@@ -1,4 +1,13 @@
-params.quiltnet_default_classes = ["benign epithelium", "carcinoma in situ", "invasive carcinoma", "connective tissue", "adipose", "vessel", "necrosis", "marking pen"]
+params.quiltnet_default_classes = [
+        "carcinoma in situ",
+        "invasive carcinoma",
+        "collagenous stroma",
+        "adipose",
+        "vessel",
+        "necrosis",
+        "invasive adenocarcinoma",
+        "sarcoma"]
+
 
 process CREATE_CLASS_EMBEDDINGS {
     publishDir "$params.outdir/class_embeddings"
@@ -45,7 +54,7 @@ process CACHE_TILES {
     publishDir "$params.outdir/cache_tiles"
 
     input:
-    tuple val(slide_id), val(oncotree_code), path(annotation_csv), path(slide), path(patch_h5)
+    tuple val(slide_id), val(oncotree_code), path(annotation_csv), path(slide), val(model_type), path(patch_h5)
     val class_map
 
     output:

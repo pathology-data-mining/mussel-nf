@@ -100,17 +100,17 @@ workflow MUSSEL {
 
     main:
         ch_slides = ch_samples.map { [it.slide_id, it.slide] }
-        EXTRACT_FEATURES(ch_slides)
+        ch = EXTRACT_FEATURES(ch_slides)
 
         ch_quiltnet = Channel.empty()
         if ("quiltnet" in params.model_types) {
             ch_features = EXTRACT_FEATURES.out.features.branch {
                 slide_id, model_type, features ->
-                    quiltnet: model_type == "QUILTNET"
+                    quiltnet: model_type == "quiltnet"
             }.quiltnet
             ch_patches = EXTRACT_FEATURES.out.patches.branch {
                 slide_id, model_type, patches ->
-                    quiltnet: model_type == "QUILTNET"
+                    quiltnet: model_type == "quiltnet"
             }.quiltnet
             ch_oncotree_slide = ch_samples.map { [it.oncotree_code, it.slide_id] }
             ch_quiltnet = QUILTNET(ch_oncotree_slide,

@@ -1,33 +1,45 @@
+
 params.outdir = 'results'
 
 params.model_types = ['quiltnet', 'ctranspath', 'resnet50']
+params.all_model_types = ['quiltnet', 'gigapath', 'ctranspath', 'resnet50']
+params.clip_model_types = ['quiltnet']
 
-for (model_type in params.model_types) {
+for (model_type in params.all_model_types) {
     params[model_type] = [:]
 }
+
+params.quiltnet.patch_size = 256
+params.quiltnet.step_size = 256
+params.quiltnet.model_path = "hf-hub:wisdomik/QuiltNet-B-16-PMB"
 
 params.resnet50.patch_size = 256
 params.resnet50.step_size = 256
 
 params.ctranspath.patch_size = 224
 params.ctranspath.step_size = 224
+params.ctranspath.model_path = "/gpfs/mskmind_ess/limr/repos/TransPath/ctranspath_model.pt"
 
 params.quiltnet.patch_size = 256
 params.quiltnet.step_size = 256
+params.quiltnet.model_path = "hf-hub:wisdomik/QuiltNet-B-16-PMB"
 
-params.ctranspath_repo_dir = ""
-params.ctranspath_model_path = ""
-params.quiltnet_model_path = "hf-hub:wisdomik/QuiltNet-B-16-PMB"
+params.gigapath.patch_size = 256
+params.gigapath.step_size = 256
+params.gigapath.model_path = "/gpfs/mskmind_ess/limr/repos/hf/prov-gigapath"
 
 params.mpp = 0.5
 params.tissue_area_threshold = 100
 
-include { QUILTNET } from './quiltnet'
+include { CLIP } from './clip'
 
 process TESSELLATE {
     label "bigTask"
+    label "cpuTask"
 
-    publishDir "$params.outdir/tiles/$model_type/"
+    publishDir "${params.outdir}/tiles/${model_type}/"
+
+    errorStrategy "ignore"
 
     input:
     tuple val(slide_id), path(slide)
@@ -55,8 +67,11 @@ params.gpu_device_ids = [0]
 
 process FEATURIZE {
     label "bigTask"
+    label "gpuTask"
 
-    publishDir "$params.outdir/features/$model_type/"
+    secret 'HF_TOKEN'
+
+    publishDir "${params.outdir}/features/${model_type}/"
 
     input:
     tuple val(slide_id), path(slide), val(model_type), path(patch_h5)
@@ -65,6 +80,9 @@ process FEATURIZE {
     tuple val(slide_id), val(model_type), path("${slide_id}.features.pt")
 
     script:
+    mtype = model_type
+    if (model_type in params.clip_model_types)
+        mtype = "CLIP"
     """
     extract_features \
         slide_path=${slide} \
@@ -72,10 +90,8 @@ process FEATURIZE {
         output_h5_path=${slide_id}.features.h5 \
         output_pt_path=${slide_id}.features.pt \
         num_workers=${task.cpus} \
-        transpath_dir=${params.ctranspath_repo_dir} \
-        transpath_model_path=${params.ctranspath_model_path} \
-        quiltnet_model_path=${params.quiltnet_model_path} \
-        model=${model_type.toUpperCase()} \
+        model_path=${params[model_type].model_path} \
+        model_type=${mtype.toUpperCase()} \
         use_gpu=${params.use_gpu ? "true" : "false"} \
         gpu_device_ids="${params.gpu_device_ids}"
     """
@@ -99,25 +115,31 @@ workflow MUSSEL {
         ch_samples // slide_id, slide, oncotree_code
 
     main:
-        ch_slides = ch_samples.map { [it.slide_id, it.slide] }
+        ch_slides = ch_samples.map { [it.slide_id, it.slide_path] }
+
         ch = EXTRACT_FEATURES(ch_slides)
 
-        ch_quiltnet = Channel.empty()
-        if ("quiltnet" in params.model_types) {
-            ch_features = EXTRACT_FEATURES.out.features.branch {
-                slide_id, model_type, features ->
-                    quiltnet: model_type == "quiltnet"
-            }.quiltnet
-            ch_patches = EXTRACT_FEATURES.out.patches.branch {
-                slide_id, model_type, patches ->
-                    quiltnet: model_type == "quiltnet"
-            }.quiltnet
-            ch_oncotree_slide = ch_samples.map { [it.oncotree_code, it.slide_id] }
-            ch_quiltnet = QUILTNET(ch_oncotree_slide,
-                ch_slides,
-                ch_features,
-                ch_patches)
+        ch_features = EXTRACT_FEATURES.out.features.branch {
+            slide_id, model_type, features ->
+                clip: params.clip_model_types.contains(model_type)
+        }.clip
+        ch_patches = EXTRACT_FEATURES.out.patches.branch {
+            slide_id, model_type, patches ->
+                clip: params.clip_model_types.contains(model_type)
+        }.clip
+
+        ch_oncotree_slide = ch_samples.map {
+            oncotree_code = "default"
+            if ("oncotree_code" in it) {
+                oncotree_code = it["oncotree_code"]
+            }
+            [oncotree_code, it.slide_id]
         }
+
+        ch_clip = CLIP(ch_oncotree_slide,
+            ch_slides,
+            ch_features,
+            ch_patches)
 
 }
 

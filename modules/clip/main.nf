@@ -1,4 +1,4 @@
-params.quiltnet_default_classes = [
+params.clip_default_classes = [
         "carcinoma in situ",
         "invasive carcinoma",
         "collagenous stroma",
@@ -10,37 +10,40 @@ params.quiltnet_default_classes = [
 
 
 process CREATE_CLASS_EMBEDDINGS {
-    publishDir "$params.outdir/class_embeddings"
+    label "cpuTask"
 
     input:
     val oncotree_code
     val class_map
+    each model_type
 
     output:
-    tuple val(oncotree_code), path("${oncotree_code}.class_embedding.pt")
+    tuple val(oncotree_code), val(model_type), path("${oncotree_code}.${model_type}.class_embedding.pt")
 
     script:
-    classes = class_map[oncotree_code] ?: params.quiltnet_default_classes
+    classes = class_map[oncotree_code] ?: params.clip_default_classes
     """
     create_class_embeddings \
-        quiltnet_model_path=${params.quiltnet_model_path} \
-        output_pt_path=${oncotree_code}.class_embedding.pt \
+        model_path=${params[model_type].model_path} \
+        output_pt_path=${oncotree_code}.${model_type}.class_embedding.pt \
         classes="${classes}"
     """
 }
 
 process ANNOTATE {
+    label "cpuTask"
+
     publishDir "$params.outdir/annotate"
 
     input:
-    tuple val(slide_id), val(model_type), val(features_pt), val(oncotree_code), path(class_embedding)
+    tuple val(slide_id), val(model_type), path(features_pt), val(oncotree_code), path(class_embedding)
     val class_map
 
     output:
     tuple val(slide_id), val(oncotree_code), path("${slide_id}.annotation.csv")
 
     script:
-    classes = class_map[oncotree_code] ?: params.quiltnet_default_classes
+    classes = class_map[oncotree_code] ?: params.clip_default_classes
     """
     annotate \
         features_pt_path=$features_pt \
@@ -51,6 +54,8 @@ process ANNOTATE {
 }
 
 process CACHE_TILES {
+    label "cpuTask"
+
     publishDir "$params.outdir/cache_tiles"
 
     input:
@@ -61,7 +66,7 @@ process CACHE_TILES {
     tuple val(slide_id), val(oncotree_code), path("${slide_id}.indices.json"), path("${slide_id}.cache.pt")
 
     script:
-    classes = class_map[oncotree_code] ?: params.quiltnet_default_classes
+    classes = class_map[oncotree_code] ?: params.clip_default_classes
     """
     cache_tiles \
         patch_h5_path=${patch_h5} \
@@ -76,7 +81,7 @@ process CACHE_TILES {
 
 params.skip_tile_caching = true
 
-workflow QUILTNET {
+workflow CLIP {
     take:
         ch_oncotree_slide // oncotree_code, slide_id
         ch_slides // slide_id, slide
@@ -86,21 +91,26 @@ workflow QUILTNET {
     main:
         def oncotree_class_map = [:].withDefault {[]}
         if (params.oncotree_class_csv) {
-            new File(params.oncotree_class_csv).readLines().eachWithIndex { row, row_index ->
-                if (row_index != 0) {
-                    def cells = row.split(',')
-                    if (cells.size() == 2) {
-                        oncotree_class_map[cells[0]].add(cells[1])
+            new File(params.oncotree_class_csv).readLines().eachWithIndex {
+                row, row_index ->
+                    if (row_index != 0) {
+                        def cells = row.split(',')
+                        if (cells.size() == 2) {
+                            oncotree_class_map[cells[0]].add(cells[1])
+                        }
                     }
-                }
             }
         }
 
         ch_oncotree_codes = ch_oncotree_slide.map {it[0]}.unique()
-        ch_class_embeddings = CREATE_CLASS_EMBEDDINGS(ch_oncotree_codes, oncotree_class_map)
+        ch_class_embeddings = CREATE_CLASS_EMBEDDINGS(
+            ch_oncotree_codes,
+            oncotree_class_map,
+            Channel.fromList(params.clip_model_types))
 
-        ch_slide_oncotree = ch_oncotree_slide.combine(ch_class_embeddings, by: 0).map {[it[1], it[0], it[2]]} // slide_id first
-        ch_annotations = ANNOTATE(ch_features.join(ch_slide_oncotree), oncotree_class_map)
+        ch_slide_oncotree = ch_oncotree_slide.combine(ch_class_embeddings, by: 0).map {[it[1], it[2], it[0], it[3]]} // slide_id and model type first
+        ch_annotations = ANNOTATE(ch_features.join(ch_slide_oncotree, by: [0,1]), oncotree_class_map)
+
         ch_tile_cache = params.skip_tile_caching ? Channel.empty() : CACHE_TILES(ch_annotations.join(ch_slides).join(ch_patches), oncotree_class_map)
 
     emit:

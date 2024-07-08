@@ -20,9 +20,9 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
     ```
     ./nextflow run pathology-data-mining/mussel-nf -profile standard,docker --samples_csv samples.csv
     ```
-    `samples.csv` is a csv file with three named columns: `slide_id`, `slide`, and `oncotree_code`.
+    `samples.csv` is a csv file with three named columns: `slide_id`, `slide_path`, and `oncotree_code`.
         * `slide_id`: slide ID
-        * `slide`: path to slide
+        * `slide_path`: path to slide
         * `oncotree_code`: Oncotree code. Optional column for the QuiltNet workflow. If not specified, quiltnet uses `params.quiltnet_default_classes`.
 
 4. When the execution completes, results will be in the `params.outdir` directory

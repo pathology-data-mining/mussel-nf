@@ -18,7 +18,7 @@ params.resnet50.step_size = 256
 
 params.ctranspath.patch_size = 224
 params.ctranspath.step_size = 224
-params.ctranspath.model_path = "/gpfs/mskmind_ess/limr/repos/TransPath/ctranspath_model.pt"
+params.ctranspath.model_path = "/gpfs/mskmind_ess/limr/repos/TransPath/ctranspath.pth"
 
 params.quiltnet.patch_size = 256
 params.quiltnet.step_size = 256

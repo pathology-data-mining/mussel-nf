@@ -33,20 +33,24 @@ params.tissue_area_threshold = 100
 
 include { CLIP } from './clip'
 
+
 process TESSELLATE {
     label "bigTask"
     label "cpuTask"
 
     publishDir "${params.outdir}/tiles/${model_type}/"
 
-    errorStrategy "ignore"
-
     input:
     tuple val(slide_id), path(slide)
     each model_type
 
     output:
-    tuple val(slide_id), val(model_type), path("${slide_id}.patch.h5")
+    tuple val(slide_id), val(model_type), path("${slide_id}.patch.h5"), optional: true, emit: h5
+    tuple val(slide_id), val(model_type), val("tiles_h5_urlpath"), val("${task.publishDir[0].path}/${slide_id}.patch.h5"), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val(model_type), val("patch_size"), val(params[model_type].patch_size), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val(model_type), val("step_size"), val(params[model_type].step_size), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val(model_type), val("mpp"), val(params.mpp), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val(model_type), val("tissue_area_threshold"), val(params.tissue_area_threshold), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
 
     script:
     """
@@ -55,15 +59,13 @@ process TESSELLATE {
         patch_config.step_size=${params[model_type].step_size} \
         patch_config.mpp=${params.mpp} \
         filter_config.tissue_area_threshold=${params.tissue_area_threshold} \
-        patch_config.num_workers=${task.cpus} \
+        num_workers=${task.cpus} \
         slide_path=${slide} \
         output_h5_path=${slide_id}.patch.h5 \
-        stitch_jpeg_path=${slide_id}.stitch.jpeg
     """
 }
 
 params.use_gpu = true
-params.gpu_device_ids = [0]
 
 process FEATURIZE {
     label "bigTask"
@@ -77,7 +79,10 @@ process FEATURIZE {
     tuple val(slide_id), path(slide), val(model_type), path(patch_h5)
 
     output:
-    tuple val(slide_id), val(model_type), path("${slide_id}.features.pt")
+    tuple val(slide_id), val(model_type), path("${slide_id}.features.pt"), emit: pt
+    tuple val(slide_id), val(model_type), path("${slide_id}.features.h5"), emit: h5
+    tuple val(slide_id), val(model_type), val("features_tensor_urlpath"), val("${task.publishDir[0].path}/${slide_id}.features.pt"), topic: meta_out
+    tuple val(slide_id), val(model_type), val("features_h5_urlpath"), val("${task.publishDir[0].path}/${slide_id}.features.h5"), topic: meta_out
 
     script:
     mtype = model_type
@@ -92,8 +97,7 @@ process FEATURIZE {
         num_workers=${task.cpus} \
         model_path=${params[model_type].model_path} \
         model_type=${mtype.toUpperCase()} \
-        use_gpu=${params.use_gpu ? "true" : "false"} \
-        gpu_device_ids="${params.gpu_device_ids}"
+        use_gpu=${params.use_gpu ? "true" : "false"}
     """
 }
 
@@ -103,16 +107,16 @@ workflow EXTRACT_FEATURES {
 
     main:
         ch_patches = TESSELLATE(ch_slides, params.model_types)
-        FEATURIZE(ch_slides.combine(ch_patches, by: 0))
+        FEATURIZE(ch_slides.combine(ch_patches.h5, by: 0))
 
     emit:
-        patches = TESSELLATE.out
-        features = FEATURIZE.out
+        patches = ch_patches.h5
+        features = FEATURIZE.out.pt
 }
 
 workflow MUSSEL {
     take:
-        ch_samples // slide_id, slide, oncotree_code
+        ch_samples // slide_id, slide_path, oncotree_code
 
     main:
         ch_slides = ch_samples.map { [it.slide_id, it.slide_path] }

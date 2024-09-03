@@ -31,6 +31,8 @@ params.gigapath.model_path = "/gpfs/mskmind_ess/limr/repos/hf/prov-gigapath"
 params.mpp = 0.5
 params.tissue_area_threshold = 100
 
+params.save_tile_png = false
+
 include { CLIP } from './clip'
 
 
@@ -51,8 +53,12 @@ process TESSELLATE {
     tuple val(slide_id), val(model_type), val("step_size"), val(params[model_type].step_size), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
     tuple val(slide_id), val(model_type), val("mpp"), val(params.mpp), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
     tuple val(slide_id), val(model_type), val("tissue_area_threshold"), val(params.tissue_area_threshold), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    path "${slide_id}_png/*.png", optional: true, emit: png
 
     script:
+    save_tile_param = ""
+    if (params.save_tile_png)
+        save_tile_param = "output_png_dir=${slide_id}_png"
     """
     tessellate \
         patch_config.patch_size=${params[model_type].patch_size} \
@@ -62,6 +68,7 @@ process TESSELLATE {
         num_workers=${task.cpus} \
         slide_path=${slide} \
         output_h5_path=${slide_id}.patch.h5 \
+        ${save_tile_param}
     """
 }
 

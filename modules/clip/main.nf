@@ -33,14 +33,16 @@ process CREATE_CLASS_EMBEDDINGS {
 process ANNOTATE {
     label "cpuTask"
 
-    publishDir "$params.outdir/annotate"
+    publishDir "$params.outdir/annotate/${model_type}/"
 
     input:
     tuple val(slide_id), val(model_type), path(features_pt), val(oncotree_code), path(class_embedding)
     val class_map
 
     output:
-    tuple val(slide_id), val(oncotree_code), path("${slide_id}.annotation.csv")
+    tuple val(slide_id), val(oncotree_code), path("${slide_id}.annotation.csv"), emit: csv
+    tuple val(slide_id), val(model_type), val("annotation_csv_urlpath"), val("${task.publishDir[0].path}/${slide_id}.annotation.csv"), topic: meta_out
+    tuple val(slide_id), val(model_type), val("classes"), val("${classes.join(';')}"), topic: meta_out
 
     script:
     classes = class_map[oncotree_code] ?: params.clip_default_classes
@@ -56,14 +58,17 @@ process ANNOTATE {
 process CACHE_TILES {
     label "cpuTask"
 
-    publishDir "$params.outdir/cache_tiles"
+    publishDir "$params.outdir/cache_tiles/${model_type}"
 
     input:
     tuple val(slide_id), val(oncotree_code), path(annotation_csv), path(slide), val(model_type), path(patch_h5)
     val class_map
 
     output:
-    tuple val(slide_id), val(oncotree_code), path("${slide_id}.indices.json"), path("${slide_id}.cache.pt")
+    path "${slide_id}.indices.json"
+    path "${slide_id}.cache.pt"
+    tuple val(slide_id), val(model_type), val("tile_cache_indices_json_urlpath"), val("${task.publishDir[0].path}/${slide_id}.indices.json"), topic: meta_out
+    tuple val(slide_id), val(model_type), val("tile_cache_tensor_urlpath"), val("${task.publishDir[0].path}/${slide_id}.cache.pt"), topic: meta_out
 
     script:
     classes = class_map[oncotree_code] ?: params.clip_default_classes
@@ -109,12 +114,12 @@ workflow CLIP {
             Channel.fromList(params.clip_model_types))
 
         ch_slide_oncotree = ch_oncotree_slide.combine(ch_class_embeddings, by: 0).map {[it[1], it[2], it[0], it[3]]} // slide_id and model type first
-        ch_annotations = ANNOTATE(ch_features.join(ch_slide_oncotree, by: [0,1]), oncotree_class_map)
+        ch_annotations = ANNOTATE(ch_features.join(ch_slide_oncotree, by: [0,1]), oncotree_class_map).csv
 
         ch_tile_cache = params.skip_tile_caching ? Channel.empty() : CACHE_TILES(ch_annotations.join(ch_slides).join(ch_patches), oncotree_class_map)
 
     emit:
-        annotations = ANNOTATE.out
+        annotations = ch_annotations
         cached_tiles = ch_tile_cache
 }
 

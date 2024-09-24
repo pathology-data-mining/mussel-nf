@@ -18,6 +18,7 @@ params.tissue_area_threshold = 100
 params.save_tile_png = false
 
 include { CLIP } from './clip'
+include { LINEAR_PROBE } from './linear_probe'
 
 
 process TESSELLATE {
@@ -102,19 +103,23 @@ workflow EXTRACT_FEATURES {
 
     emit:
         patches = ch_patches.h5
-        features = FEATURIZE.out.pt
+        pt_features = FEATURIZE.out.pt
+        h5_features = FEATURIZE.out.h5
 }
 
 workflow MUSSEL {
     take:
         ch_samples // slide_id, slide_path, oncotree_code
+        ch_annotations // slide_id, annotation_bmp_path
 
     main:
         ch_slides = ch_samples.map { [it.slide_id, it.slide_path] }
 
-        ch = EXTRACT_FEATURES(ch_slides)
+        ch_extract_feat = EXTRACT_FEATURES(ch_slides)
 
-        ch_features = EXTRACT_FEATURES.out.features.branch {
+        LINEAR_PROBE(ch_annotations, ch_extract_feat.h5_features)
+
+        ch_features = ch_extract_feat.pt_features.branch {
             slide_id, model_type, features ->
                 clip: params.clip_model_types.contains(model_type)
         }.clip

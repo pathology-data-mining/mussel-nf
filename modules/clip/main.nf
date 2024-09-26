@@ -40,9 +40,9 @@ process ANNOTATE {
     val class_map
 
     output:
-    tuple val(slide_id), val(oncotree_code), path("${slide_id}.annotation.csv"), emit: csv
-    tuple val(slide_id), val(model_type), val("annotation_csv_urlpath"), val("${task.publishDir[0].path}/${slide_id}.annotation.csv"), topic: meta_out
-    tuple val(slide_id), val(model_type), val("classes"), val("${classes.join(';')}"), topic: meta_out
+    tuple val(slide_id), val(model_type), val(oncotree_code), path("${slide_id}.annotation.csv"), emit: csv
+    tuple val(slide_id), val("${model_type}_annotation_csv_urlpath"), val("${task.publishDir[0].path}/${slide_id}.annotation.csv"), topic: meta_out
+    tuple val(slide_id), val("${model_type}_classes"), val("${classes.join(';')}"), topic: meta_out
 
     script:
     classes = class_map[oncotree_code] ?: params.clip_default_classes
@@ -57,18 +57,19 @@ process ANNOTATE {
 
 process CACHE_TILES {
     label "cpuTask"
+    label "parallelTask"
 
-    publishDir "$params.outdir/cache_tiles/${model_type}"
+    publishDir "$params.outdir/cache_tiles/${model_type}/"
 
     input:
-    tuple val(slide_id), val(oncotree_code), path(annotation_csv), path(slide), val(model_type), path(patch_h5)
+    tuple val(slide_id), val(model_type), val(oncotree_code), path(annotation_csv), path(slide), path(patch_h5)
     val class_map
 
     output:
     path "${slide_id}.indices.json"
     path "${slide_id}.cache.pt"
-    tuple val(slide_id), val(model_type), val("tile_cache_indices_json_urlpath"), val("${task.publishDir[0].path}/${slide_id}.indices.json"), topic: meta_out
-    tuple val(slide_id), val(model_type), val("tile_cache_tensor_urlpath"), val("${task.publishDir[0].path}/${slide_id}.cache.pt"), topic: meta_out
+    tuple val(slide_id), val("${model_type}_tile_cache_indices_json_urlpath"), val("${task.publishDir[0].path}/${slide_id}.indices.json"), topic: meta_out
+    tuple val(slide_id), val("${model_type}_tile_cache_tensor_urlpath"), val("${task.publishDir[0].path}/${slide_id}.cache.pt"), topic: meta_out
 
     script:
     classes = class_map[oncotree_code] ?: params.clip_default_classes

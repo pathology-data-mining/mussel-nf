@@ -1,4 +1,4 @@
-params.annotation_class_mapping = "{ 1 : 1, 2 : 1, 3 : 1, 4 : 0, 5 : 0, 6 : 0, 7 : 0, 8 : 0, 9 : 0, 11 : 0 }"
+params.annotation_class_mapping_yaml = "class_mapping.yaml"
 
 process MERGE_ANNOTATION_FEATURES {
     label "hugeTask"
@@ -7,6 +7,7 @@ process MERGE_ANNOTATION_FEATURES {
 
     input:
     tuple val(slide_id), path(annotation_bmp), val(model_type), path(features_h5)
+    path(class_mapping_yaml)
 
     output:
     path("${slide_id}.annotation_features.parquet")
@@ -17,7 +18,7 @@ process MERGE_ANNOTATION_FEATURES {
         features_h5_path=${features_h5} \
         annotation_bmp_path=${annotation_bmp} \
         output_parquet_path=${slide_id}.annotation_features.parquet \
-        class_mapping='${params.annotation_class_mapping}' \
+        class_mapping_yaml_path='${class_mapping_yaml}' \
         slide_id=${slide_id}
     """
 }
@@ -64,8 +65,8 @@ workflow LINEAR_PROBE {
         ch_h5_features // slide_id, model_type, h5_features
 
     main:
-        ch_annotations.join(ch.h5_features) | \
-            MERGE_ANNOTATION_FEATURES | \
+        ch_ann_features = ch_annotations.join(ch_h5_features)
+        MERGE_ANNOTATION_FEATURES(ch_ann_features, file(params.annotation_class_mapping_yaml)) | \
             collect | \
             STACK_ANNOTATION_FEATURES | \
             LINEAR_PROBE_BENCHMARK

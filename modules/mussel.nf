@@ -128,10 +128,12 @@ workflow MUSSEL {
             [oncotree_code, it.slide_id]
         }
 
-        ch_clip = CLIP(ch_oncotree_slide,
-            ch_slides,
-            ch_features,
-            ch_patches)
+        if (!params.model_types.disjoint(params.clip_model_types)) {
+            ch_clip = CLIP(ch_oncotree_slide,
+                ch_slides,
+                ch_features,
+                ch_patches)
+        }
 
 }
 

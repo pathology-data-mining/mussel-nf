@@ -4,6 +4,7 @@ params.outdir = "results"
 params.samples_csv = null
 params.oncotree_class_csv = null
 
+params.samples_csv_watch_path = null
 params.watch_path = null
 
 nextflow.preview.topic = true
@@ -19,9 +20,14 @@ workflow {
     ch_annotations = Channel.empty()
 
     if (params.samples_csv) {
-        ch_samples = Channel.fromPath(params.samples_csv) \
+        ch_samples = Channel.fromPath(params.samples_csv)
             .splitCsv(header: true)
             .filter { file(it.slide_path).exists() }
+    }
+
+    if (params.samples_csv_watch_path) {
+        ch_samples = Channel.watchPath("${params.samples_csv_watch_path}/*.csv")
+            .splitCsv(header: true)
     }
 
     if (params.watch_path) {
@@ -32,14 +38,15 @@ workflow {
         ch_samples = ch_samples.take(1)
     }
 
-    MUSSEL(ch_samples)
-
     Channel.topic('meta_out')
         .map { it[0..2] }
         .collectFile(storeDir: params.outdir) {
             slide_id, type, path ->
             ["manifest-${timestamp}.csv", "${slide_id},${type},${path}\n"]
         }
+
+
+    MUSSEL(ch_samples)
 
 }
 

@@ -13,7 +13,13 @@ params.optimus.model_path = "/gpfs/mskmind_ess/limr/repos/mussel-nf/optimus.pkl"
 
 params.patch_size = 224
 params.mpp = 0.5
-params.tissue_area_threshold = 100
+params.segment_threshold = 15
+params.median_blur_ksize = 11
+params.morphology_ex_kernel = 2
+params.tissue_area_threshold = 1
+params.hole_area_threshold = 1
+params.max_num_holes = 2
+
 
 params.save_tile_png = false
 
@@ -34,8 +40,14 @@ process TESSELLATE {
     tuple val(slide_id), val("tiles_h5_urlpath"), val("${task.publishDir[0].path}/${slide_id}.patch.h5"), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
     tuple val(slide_id), val("patch_size"), val(params.patch_size), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
     tuple val(slide_id), val("mpp"), val(params.mpp), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val("segment_threshold"), val(params.segment_threshold), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val("median_blur_ksize"), val(params.median_blur_ksize), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val("morphology_ex_kernel"), val(params.morphology_ex_kernel), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
     tuple val(slide_id), val("tissue_area_threshold"), val(params.tissue_area_threshold), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val("hole_area_threshold"), val(params.hole_area_threshold), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
+    tuple val(slide_id), val("max_num_holes"), val(params.max_num_holes), path("${slide_id}.patch.h5"), optional: true, topic: meta_out
     path "${slide_id}_png/*.png", optional: true, emit: png
+    path "${slide_id}.thumbnail.png", emit: thumbnail_png
 
     script:
     save_tile_param = ""
@@ -45,10 +57,16 @@ process TESSELLATE {
     tessellate \
         patch_config.mpp=${params.mpp} \
         patch_config.patch_size=${params.patch_size} \
+        seg_config.segment_threshold=${params.segment_threshold} \
+        seg_config.median_blur_ksize=${params.median_blur_ksize} \
+        seg_config.morphology_ex_kernel=${params.morphology_ex_kernel} \
         filter_config.tissue_area_threshold=${params.tissue_area_threshold} \
+        filter_config.hole_area_threshold=${params.hole_area_threshold} \
+        filter_config.max_num_holes=${params.max_num_holes} \
         num_workers=${task.cpus} \
         slide_path=${slide} \
         output_h5_path=${slide_id}.patch.h5 \
+        output_thumbnail_path=${slide_id}.thumbnail.png \
         ${save_tile_param}
     """
 }

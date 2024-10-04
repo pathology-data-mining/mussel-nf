@@ -11,7 +11,7 @@ nextflow.preview.topic = true
 
 params.test = false
 
-include { MUSSEL } from './modules/mussel'
+include { MUSSEL2 } from './modules/mussel'
 
 timestamp = new Date().getTime()
 
@@ -46,7 +46,7 @@ workflow {
         }
 
 
-    MUSSEL(ch_samples)
+    MUSSEL2(ch_samples)
 
 }
 

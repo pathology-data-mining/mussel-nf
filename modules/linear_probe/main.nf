@@ -3,14 +3,14 @@ params.annotation_class_mapping_yaml = "class_mapping.yaml"
 process MERGE_ANNOTATION_FEATURES {
     label "hugeTask"
 
-    publishDir "${params.outdir}/annotation_features/${model_type}/"
+    publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), path(annotation_bmp), val(model_type), path(features_h5)
     path(class_mapping_yaml)
 
     output:
-    path("${slide_id}.annotation_features.parquet")
+    tuple val(model_type), path("${slide_id}.annotation_features.parquet")
 
     script:
     """
@@ -26,10 +26,10 @@ process MERGE_ANNOTATION_FEATURES {
 process STACK_ANNOTATION_FEATURES {
     label "bigTask"
 
-    publishDir "${params.outdir}/annotation_features/${model_type}/"
+    publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
 
     input:
-    path annotation_features
+    tuple val(model_type), path(annotation_features)
 
     output:
     path "annotation_features.parquet"
@@ -67,7 +67,7 @@ workflow LINEAR_PROBE {
     main:
         ch_ann_features = ch_annotations.join(ch_h5_features)
         MERGE_ANNOTATION_FEATURES(ch_ann_features, file(params.annotation_class_mapping_yaml)) | \
-            collect | \
+            groupTuple | \
             STACK_ANNOTATION_FEATURES | \
             LINEAR_PROBE_BENCHMARK
 

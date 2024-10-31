@@ -33,7 +33,7 @@ process CREATE_CLASS_EMBEDDINGS {
 process ANNOTATE {
     label "cpuTask"
 
-    publishDir "$params.outdir/annotate/${model_type}/"
+    publishDir path: "$params.outdir/annotate/${model_type}/${slide_id[0..3]}/", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), val(model_type), path(features_pt), val(oncotree_code), path(class_embedding)
@@ -59,7 +59,7 @@ process CACHE_TILES {
     label "cpuTask"
     label "parallelTask"
 
-    publishDir "$params.outdir/cache_tiles/${model_type}/"
+    publishDir path: "$params.outdir/cache_tiles/${model_type}/${slide_id[0..3]}", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), val(model_type), val(oncotree_code), path(annotation_csv), path(slide), path(patch_h5)

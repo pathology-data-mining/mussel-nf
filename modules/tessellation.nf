@@ -1,5 +1,3 @@
-params.stitch_tiles = false
-
 params.filter_model_path = "/gpfs/mskmind_ess/limr/repos/Mussel/model-1727990346535.pkl"
 params.filter_threshold = 0.75
 
@@ -12,16 +10,14 @@ params.tissue_area_threshold = 1
 params.hole_area_threshold = 1
 params.max_num_holes = 2
 
-
 params.save_slide_thumbnail = false
 params.save_tile_png = false
-
 
 process TESSELLATE {
     label "bigTask"
     label "cpuTask"
 
-    publishDir "${params.outdir}/tiles/"
+    publishDir path: "${params.outdir}/tiles/${slide_id[0..3]}/", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), path(slide)
@@ -71,7 +67,7 @@ process FILTER_TILES {
     label "bigTask"
     label "cpuTask"
 
-    publishDir "${params.outdir}/filter_tiles/"
+    publishDir path: "${params.outdir}/filter_tiles/${slide_id[0..3]}/", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), val(model_type), path(features_h5)
@@ -96,7 +92,7 @@ process STITCH_TILES {
     label "bigTask"
     label "cpuTask"
 
-    publishDir "${params.outdir}/stitch_tiles/"
+    publishDir path: "${params.outdir}/stitch_tiles/${slide_id[0..3]}/", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), path(slide), path(tiles_h5)

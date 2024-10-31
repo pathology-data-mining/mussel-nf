@@ -1,4 +1,3 @@
-
 for (model_type in params.all_model_types) {
     params[model_type] = [:]
 }
@@ -16,7 +15,7 @@ process FEATURIZE {
 
     secret 'HF_TOKEN'
 
-    publishDir "${params.outdir}/features/${model_type}/"
+    publishDir path: "${params.outdir}/features/${model_type}/${slide_id[0..3]}", pattern: "*.features.pt", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), path(slide), path(patch_h5)
@@ -26,7 +25,6 @@ process FEATURIZE {
     tuple val(slide_id), val(model_type), path("${slide_id}.features.pt"), emit: pt
     tuple val(slide_id), val(model_type), path("${slide_id}.features.h5"), emit: h5
     tuple val(slide_id), val("${model_type}_features_tensor_urlpath"), val("${task.publishDir[0].path}/${slide_id}.features.pt"), topic: meta_out
-    tuple val(slide_id), val("${model_type}_features_h5_urlpath"), val("${task.publishDir[0].path}/${slide_id}.features.h5"), topic: meta_out
 
     script:
     mtype = model_type

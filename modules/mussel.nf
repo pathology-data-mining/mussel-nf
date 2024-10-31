@@ -6,7 +6,12 @@ params.model_types = ['optimus', 'virchow']
 params.all_model_types = ['quiltnet', 'gigapath', 'ctranspath', 'resnet50', 'virchow', 'optimus']
 params.clip_model_types = ['quiltnet']
 
+params.stitch_tiles = false
+
+params.filter_tiles = false
+
 include { CLIP } from './clip'
+include { LINEAR_PROBE } from './linear_probe'
 
 include { FEATURIZE; FEATURIZE as FILTER_FEATURIZE } from './featurize'
 
@@ -24,51 +29,36 @@ workflow EXTRACT_FEATURES {
             ch_slides.join(ch_patches.h5) | STITCH_TILES
         }
 
-
-        FEATURIZE(ch_slides.combine(ch_patches.h5, by: 0), params.model_types)
-
-    emit:
-        patches = ch_patches.h5
-        features = FEATURIZE.out.pt
-}
-
-workflow EXTRACT_FEATURES2 {
-    take:
-        ch_slides // slide_id, slide
-
-    main:
-        ch_patches = TESSELLATE(ch_slides)
-
-        ch_filter_features = FILTER_FEATURIZE(ch_slides.combine(ch_patches.h5, by: 0), params.filter_model_type)
-        ch_filtered_tiles = FILTER_TILES(ch_filter_features.h5)
-
-        if (params.stitch_tiles) {
-            ch_slides.join(ch_filtered_tiles.h5) | STITCH_TILES
+        if (params.filter_tiles) {
+            ch_filter_features = FILTER_FEATURIZE(ch_slides.combine(ch_patches.h5, by: 0), params.filter_model_type)
+            ch_patches = FILTER_TILES(ch_filter_features.h5)
         }
 
-        ch_features = FEATURIZE(ch_slides.combine(ch_filtered_tiles.h5, by: 0), params.model_types)
+        ch_features = FEATURIZE(ch_slides.combine(ch_patches.h5, by: 0), params.model_types)
 
     emit:
-        filtered_h5 = ch_filtered_tiles.h5
-        pt = ch_features.pt
-        h5 = ch_features.h5
+        patches_h5 = ch_patches.h5
+        pt = FEATURIZE.out.pt
+        h5 = FEATURIZE.out.h5
 }
-
 
 workflow MUSSEL {
     take:
         ch_samples // slide_id, slide_path, oncotree_code
+        ch_annotations // slide_id, annotation_bmp_path
 
     main:
         ch_slides = ch_samples.map { [it.slide_id, it.slide_path] }
 
-        EXTRACT_FEATURES(ch_slides)
+        ch_extract_feat = EXTRACT_FEATURES(ch_slides)
 
-        ch_features = EXTRACT_FEATURES.out.features.branch {
+        LINEAR_PROBE(ch_annotations, ch_extract_feat.h5)
+
+        ch_features = ch_extract_feat.pt.branch {
             slide_id, model_type, features ->
                 clip: params.clip_model_types.contains(model_type)
         }.clip
-        ch_patches = EXTRACT_FEATURES.out.patches
+        ch_patches = EXTRACT_FEATURES.out.patches_h5
 
         ch_oncotree_slide = ch_samples.map {
             oncotree_code = "default"
@@ -84,17 +74,4 @@ workflow MUSSEL {
                 ch_features,
                 ch_patches)
         }
-
-
 }
-
-workflow MUSSEL2 {
-    take:
-        ch_samples // slide_id, slide_path, oncotree_code
-
-    main:
-        ch_slides = ch_samples.map { [it.slide_id, it.slide_path] }
-
-        EXTRACT_FEATURES2(ch_slides)
-}
-

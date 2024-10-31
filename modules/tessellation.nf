@@ -17,7 +17,7 @@ process TESSELLATE {
     label "bigTask"
     label "cpuTask"
 
-    publishDir path: "${params.outdir}/tiles/", mode: "${params.publish_mode}"
+    publishDir path: "${params.outdir}/tiles/${slide_id[0..3]}/", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), path(slide)
@@ -67,7 +67,7 @@ process FILTER_TILES {
     label "bigTask"
     label "cpuTask"
 
-    publishDir path: "${params.outdir}/filter_tiles/", mode: "${params.publish_mode}"
+    publishDir path: "${params.outdir}/filter_tiles/${slide_id[0..3]}/", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), val(model_type), path(features_h5)
@@ -92,7 +92,7 @@ process STITCH_TILES {
     label "bigTask"
     label "cpuTask"
 
-    publishDir path: "${params.outdir}/stitch_tiles/", mode: "${params.publish_mode}"
+    publishDir path: "${params.outdir}/stitch_tiles/${slide_id[0..3]}/", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), path(slide), path(tiles_h5)

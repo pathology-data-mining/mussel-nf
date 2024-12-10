@@ -15,7 +15,7 @@ process FEATURIZE {
 
     secret 'HF_TOKEN'
 
-    publishDir path: "${params.outdir}/features/${model_type}/${slide_id[0..3]}", pattern: "*.features.pt", mode: "${params.publish_mode}"
+    publishDir path: "${params.outdir}/features/${model_type}/${params.publish_slide_prefix ? slide_id[0..3] : ''}", pattern: "*.features.pt", mode: "${params.publish_mode}"
 
     input:
     tuple val(slide_id), path(slide), path(patch_h5)

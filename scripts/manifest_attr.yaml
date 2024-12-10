@@ -1,0 +1,8 @@
+mpp: 0.5
+morphology_ex_kernel: 2
+tissue_area_threshold: 1
+hole_area_threshold: 1
+max_num_holes: 2
+segment_threshold: 15
+median_blur_ksize: 11
+patch_size: 224

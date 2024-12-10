@@ -31,10 +31,12 @@ workflow EXTRACT_FEATURES {
 
         if (params.filter_tiles) {
             ch_filter_features = FILTER_FEATURIZE(ch_slides.combine(ch_patches.h5, by: 0), params.filter_model_type)
-            ch_patches = FILTER_TILES(ch_filter_features.h5)
+            ch_filter_patches = FILTER_TILES(ch_filter_features.h5)
+            FEATURIZE(ch_slides.combine(ch_filter_patches.h5, by: 0), params.model_types)
+        } else {
+            FEATURIZE(ch_slides.combine(ch_patches.h5, by: 0), params.model_types)
         }
 
-        ch_features = FEATURIZE(ch_slides.combine(ch_patches.h5, by: 0), params.model_types)
 
     emit:
         patches_h5 = ch_patches.h5

@@ -13,6 +13,8 @@ nextflow.preview.topic = true
 
 params.test = false
 
+params.publish_slide_prefix = true
+
 include { MUSSEL } from './modules/mussel'
 
 timestamp = new Date().getTime()

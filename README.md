@@ -27,7 +27,53 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
 
 4. When the execution completes, results will be in the `params.outdir` directory
 
-## Azure Batch Support
+## Misc Notes
+
+* Set `params.publish_slide_prefix` to true to use a slide prefix in the publish directory.
+* The pipeline outputs a manifest automatically in `params.outdir`, but it can also be manually built with `scripts/create_manifest.py`.
+
+## Workflows
+
+The standard workflow tessellates and extracts features for the specified `params.model_types`.
+
+### Tile filtering
+
+1. Tessellation
+
+2. Feature extraction for `params.filter_model_type`
+
+3. Filter tiles using `mussel.cli.filter_features`
+
+4. Feature extraction for `params.model_types`
+
+### CLIP-based models
+
+When a clip-based model is specified (for now, only `quiltnet` is supported),
+the standard workflow runs in addition to tile annotation, and tile caching.
+Default annotation classes can be specified (`params.clip_default_classes`) or the
+classes can be determined from `params.oncotree_class_csv` that maps oncotree codes to
+classes and `oncotree_code` in the sample sheet. The optional
+`params.oncotree_class_csv` has the format of two columns (no header): oncotree code
+and class.
+
+### Linear probe benchmarking
+
+If `params.annotations_csv` is specified, the linear probe benchmarking workflow will
+run. The csv must have two named columns: `slide_id` and `annotation_bmp_path`.
+
+1. Tessellation
+
+2. Feature extraction
+
+3. Map feature tiles to annotation classes using the annotation bmp file (in
+   `params.annotations_csv`) and `params.annotation_class_mapping_yaml`.
+
+4. Combine annotation tile mappings
+
+5. Benchmark linear models
+
+
+## Azure Batch support
 
 1. Create an Azure storage account and batch account.
 
@@ -42,3 +88,16 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
     where `{azure_bucket_dir}` is an azure path like `az://test/nftest`.
 
 5. When the execution completes, results will be in the `results` directory
+
+### Azure notes
+
+#### Disk management and unusable nodes
+
+The Azure Batch nodes have poor disk space management such that if you run a
+lot of jobs, they will inevitably run out of disk space, putting the node into
+the unusable state. One possible solution is to delete the unusable nodes
+which can be done automatically with a powershell script. A better solution is
+to mount Azure file shares with large files to the batch nodes using
+`params.azure.storage.fileShares`. It's a good idea to periodically run the
+powershell script either way as nodes end up in the unusable state for a variety of
+reasons and will linger (costing $) until deleted.

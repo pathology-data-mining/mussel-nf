@@ -13,7 +13,7 @@ process CREATE_CLASS_EMBEDDINGS {
     classes = class_map[oncotree_code] ?: params.clip.default_classes
     """
     create_class_embeddings \
-        model_path=${params.featurize[model_type].model_path} \
+        model_path=${params.featurize.model_paths[model_type]} \
         output_pt_path=${oncotree_code}.${model_type}.class_embedding.pt \
         classes="${classes}"
     """

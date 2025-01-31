@@ -22,7 +22,7 @@ process FEATURIZE {
     if (model_type in params.featurize.clip_model_types)
         mtype = "CLIP"
     mpath_str = ""
-    if (model_type in params.featurize.model_paths)
+    if (params.featurize.model_paths && params.featurize.model_paths[model_type])
         mpath_str = "model_path=${params.featurize.model_paths[model_type]}"
     """
     extract_features \

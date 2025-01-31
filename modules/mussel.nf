@@ -54,7 +54,7 @@ workflow MUSSEL {
 
 
         if (!params.featurize.model_types.disjoint(params.clip.model_types)) {
-            ch_clip = CLIP(ch_oncotree_slide,
+            ch_clip = CLIP(
                 ch_samples,
                 ch_features,
                 ch_patches)

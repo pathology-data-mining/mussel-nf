@@ -1,0 +1,6 @@
+tiling:
+  filter_model_type: ctranspath
+  filter_tiles: true
+featurize:
+  model_types:
+    - optimus

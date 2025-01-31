@@ -75,7 +75,7 @@
         },
         "filter_tiles": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "filter tiles"
         },
         "patch_size": {

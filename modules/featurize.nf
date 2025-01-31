@@ -21,6 +21,9 @@ process FEATURIZE {
     mtype = model_type
     if (model_type in params.featurize.clip_model_types)
         mtype = "CLIP"
+    mpath_str = ""
+    if (model_type in params.featurize.model_paths)
+        mpath_str = "model_path=${params.featurize.model_paths[model_type]}"
     """
     extract_features \
         slide_path=${slide} \
@@ -28,8 +31,7 @@ process FEATURIZE {
         output_h5_path=${meta.slide_id}.features.h5 \
         output_pt_path=${meta.slide_id}.features.pt \
         num_workers=${task.cpus} \
-        model_path=${params.featurize.model_paths[model_type]} \
-        model_type=${mtype.toUpperCase()} \
+        model_type=${mtype.toUpperCase()} ${mpath_str} \
         use_gpu=${params.featurize.use_gpu ? "true" : "false"}
     """
 }

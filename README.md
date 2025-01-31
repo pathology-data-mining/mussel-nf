@@ -30,6 +30,7 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
 ## Misc Notes
 
 * See full parameters with `--help` or `--helpFull` option.
+* To use certain models, e.g. `CTransPath`, `params.featurize.model_paths.{model_type}` must be set to the full path of the model.
 * Set `params.publish_slide_prefix` to true to use a slide prefix in the publish directory.
 * The pipeline outputs a manifest automatically in `params.outdir`, but it can
   also be manually built with `scripts/create_manifest.py`. Partial manifest

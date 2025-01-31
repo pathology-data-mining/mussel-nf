@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/pathology-data-mining/mussel-nf/main/assets/schema_oncotree_map.json",
+  "title": "pathology-data-mining/mussel-nf pipeline - params.clip.oncotree_class_csv schema",
+  "description": "Schema for the file provided with params.clip.oncotree_class_csv",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "oncotree_code": {
+        "type": "string",
+        "pattern": "^\\S+$",
+        "errorMessage": "Oncotree code cannot contain spaces",
+        "meta": ["my_oncotree_code"]
+      },
+      "class": {
+        "type": "string",
+        "meta": ["my_class"]
+      }
+    },
+    "required": ["oncotree_code", "class"]
+  }
+}

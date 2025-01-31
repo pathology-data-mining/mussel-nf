@@ -29,8 +29,12 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
 
 ## Misc Notes
 
+* See full parameters with `--help` or `--helpFull` option.
 * Set `params.publish_slide_prefix` to true to use a slide prefix in the publish directory.
-* The pipeline outputs a manifest automatically in `params.outdir`, but it can also be manually built with `scripts/create_manifest.py`.
+* The pipeline outputs a manifest automatically in `params.outdir`, but it can
+  also be manually built with `scripts/create_manifest.py`. Partial manifest
+  results can be found in `{params.outdir}/tmp`.
+* If using docker, it's best to keep the models in the docker container, despite how large they can be.
 
 ## Workflows
 
@@ -40,25 +44,25 @@ The standard workflow tessellates and extracts features for the specified `param
 
 1. Tessellation
 
-2. Feature extraction for `params.filter_model_type`
+2. Feature extraction for `params.tiling.filter_model_type`
 
 3. Filter tiles using `mussel.cli.filter_features`
 
-4. Feature extraction for `params.model_types`
+4. Feature extraction for `params.featurize.model_types`
 
 ### CLIP-based models
 
 When a clip-based model is specified (for now, only `quiltnet` is supported),
 the standard workflow runs in addition to tile annotation, and tile caching.
-Default annotation classes can be specified (`params.clip_default_classes`) or the
-classes can be determined from `params.oncotree_class_csv` that maps oncotree codes to
+Default annotation classes can be specified (`params.clip.default_classes`) or the
+classes can be determined from `params.clip.oncotree_class_csv` that maps oncotree codes to
 classes and `oncotree_code` in the sample sheet. The optional
-`params.oncotree_class_csv` has the format of two columns (no header): oncotree code
+`params.clip.oncotree_class_csv` has the format of two columns: oncotree code
 and class.
 
 ### Linear probe benchmarking
 
-If `params.annotations_csv` is specified, the linear probe benchmarking workflow will
+If `params.linear_probe.annotations_csv` is specified, the linear probe benchmarking workflow will
 run. The csv must have two named columns: `slide_id` and `annotation_bmp_path`.
 
 1. Tessellation
@@ -66,7 +70,7 @@ run. The csv must have two named columns: `slide_id` and `annotation_bmp_path`.
 2. Feature extraction
 
 3. Map feature tiles to annotation classes using the annotation bmp file (in
-   `params.annotations_csv`) and `params.annotation_class_mapping_yaml`.
+   `params.linear_probe.annotations_csv`) and `params.linear_probe.annotation_class_mapping_yaml`.
 
 4. Combine annotation tile mappings
 

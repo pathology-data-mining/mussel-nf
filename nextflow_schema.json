@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/pathology-data-mining/mussel-nf/main/nextflow_schema.json",
+  "title": "pathology-data-mining/mussel-nf pipeline parameters",
+  "description": "pipeline for running Mussel to extract features and build a reef",
+  "type": "object",
+  "$defs": {
+    "input_output_options": {
+      "title": "Input/output options",
+      "type": "object",
+      "fa_icon": "fas fa-terminal",
+      "description": "Define where the pipeline should find input data and save output data.",
+      "required": ["outdir"],
+      "properties": {
+        "outdir": {
+          "type": "string",
+          "format": "directory-path",
+          "description": "The output directory where the results will be saved. You have to use absolute paths to storage on Cloud infrastructure.",
+          "fa_icon": "fas fa-folder-open",
+          "default": "results"
+        },
+        "publish_mode": {
+          "type": "string",
+          "default": "copy",
+          "enum": ["copy", "copyNoFollow", "link", "move", "rellink", "symlink"],
+          "description": "mode used to publish output files"
+        },
+        "samples_csv": {
+          "type": "string",
+          "description": "samples csv file with slides to process",
+          "format": "file-path",
+          "schema": "assets/schema_input.json"
+        },
+        "samples_csv_watch_path": {
+          "type": "string",
+          "description": "watch this path for sample csv files"
+        },
+        "watch_path": {
+          "type": "string",
+          "description": "watch this path for sample svs files"
+        },
+        "publish_slide_prefix": {
+          "type": "boolean",
+          "description": "include first 4 digits of the slide ID in the publish dir",
+          "default": true
+        }
+      }
+    }
+  },
+  "properties": {
+    "workflow_id": {
+      "type": "string",
+      "description": "workflow ID",
+      "help_text": "Identifier for this workflow run",
+      "default": "reef"
+    },
+    "tiling": {
+      "title": "Tessellation options",
+      "type": "object",
+      "description": "Define tessellation options",
+      "properties": {
+        "filter_model_type": {
+          "type": "string",
+          "default": "ctranspath",
+          "description": "filter tiles using features extracted with this model"
+        },
+        "filter_model_path": {
+          "type": "string",
+          "description": "pkl file containing model used to filter tiles"
+        },
+        "filter_threshold": {
+          "type": "number",
+          "default": 0.75,
+          "description": "threshold to use for filtering tiles"
+        },
+        "filter_tiles": {
+          "type": "boolean",
+          "default": true,
+          "description": "filter tiles"
+        },
+        "patch_size": {
+          "type": "integer",
+          "default": 224,
+          "description": "Patch size"
+        },
+        "mpp": {
+          "type": "number",
+          "default": 0.5,
+          "description": "microns per pixel"
+        },
+        "segment_threshold": {
+          "type": "integer",
+          "default": 15,
+          "description": "segment threshold"
+        },
+        "median_blur_ksize": {
+          "type": "integer",
+          "default": 11,
+          "description": "median blur k-size"
+        },
+        "morphology_ex_kernel": {
+          "type": "integer",
+          "default": 2,
+          "description": "morphology ex kernel"
+        },
+        "tissue_area_threshold": {
+          "type": "integer",
+          "default": 1,
+          "description": "tissue area threshold"
+        },
+        "hole_area_threshold": {
+          "type": "integer",
+          "default": 1,
+          "description": "hole area threshold"
+        },
+        "max_num_holes": {
+          "type": "integer",
+          "default": 2,
+          "description": "maximum number of holes"
+        },
+        "save_slide_thumbnail": {
+          "type": "boolean",
+          "default": false,
+          "description": "save slide thumbnails"
+        },
+        "save_tile_png": {
+          "type": "boolean",
+          "default": false,
+          "description": "save tiles as png"
+        },
+        "stitch_tiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "generate stitched tiles"
+        }
+      }
+    },
+    "featurize": {
+      "title": "Extract features options",
+      "type": "object",
+      "description": "Define extract features options",
+      "properties": {
+        "model_types": {
+          "type": "array",
+          "description": "models to use for feature extraction",
+          "default": ["optimus"],
+          "items": {
+            "type": "string",
+            "enum": ["quiltnet", "gigapath", "ctranspath", "resnet50", "virchow", "optimus"]
+          }
+        },
+        "use_gpu": {
+          "type": "boolean",
+          "default": true,
+          "description": "use the GPU for feature extraction"
+        },
+        "model_paths": {
+          "type": "object",
+          "description": "paths to models",
+          "additionalProperties": {"type": "string" }
+        }
+      }
+    },
+    "clip": {
+      "title": "CLIP-based model options",
+      "description": "Define CLIP-based model options",
+      "type": "object",
+      "properties": {
+        "model_types": {
+          "type": "array",
+          "description": "models that are designated as CLIP-based",
+          "default": ["quiltnet"]
+        },
+        "default_classes": {
+          "type": "array",
+          "description": "default classes to use for prompt-engineering",
+          "default": ["invasive carcinoma", "stroma", "other"]
+        },
+        "oncotree_class_csv": {
+          "type": "string",
+          "description": "mapping of oncotree codes to classes to use for prompt-engineering",
+          "format": "file-path",
+          "schema": "assets/schema_oncotree_map.json"
+        },
+        "skip_tile_caching": {
+          "type": "boolean",
+          "description": "skip the tile caching",
+          "default": true
+        }
+      }
+    },
+    "linear_probe": {
+      "title": "linear probing benchmark options",
+      "description": "Define linear probe benchmarking options",
+      "type": "object",
+      "properties": {
+        "annotations_csv": {
+          "type": "string",
+          "description": "mapping of slide IDs to annotation bmp file",
+          "format": "file-path",
+          "schema": "assets/schema_annotations.json"
+        },
+        "annotation_class_mapping_yaml": {
+          "type": "string",
+          "description": "mapping of annotation bmp IDs to class"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$ref": "#/$defs/input_output_options"
+    }
+  ]
+}

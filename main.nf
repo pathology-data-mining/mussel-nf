@@ -1,63 +1,67 @@
+include { validateParameters; paramsSummaryLog; samplesheetToList } from 'plugin/nf-schema'
+
+// Validate input parameters
+validateParameters()
+
+// Print summary of supplied parameters
+log.info paramsSummaryLog(workflow)
+
+
 import org.apache.commons.io.FilenameUtils
+import groovy.json.JsonOutput
 
-params.outdir = "results"
-params.publish_mode = "copy"
-params.samples_csv = null
-params.annotations_csv = null
-params.oncotree_class_csv = null
-
-params.samples_csv_watch_path = null
-params.watch_path = null
+timestamp = new Date().getTime()
 
 nextflow.preview.topic = true
 
-params.test = false
-
-params.publish_slide_prefix = true
-
 include { MUSSEL } from './modules/mussel'
 
-timestamp = new Date().getTime()
+
+process saveParams {
+    publishDir params.outdir
+
+    output:
+        path "params.json"
+
+    script:
+      "echo '${JsonOutput.toJson(params)}' > params.json"
+}
 
 workflow {
     ch_samples = Channel.empty()
     ch_annotations = Channel.empty()
 
     if (params.samples_csv) {
-        ch_samples = Channel.fromPath(params.samples_csv)
-            .splitCsv(header: true)
-            .filter { file(it.slide_path).exists() }
+
+        ch_samples = Channel.fromList(samplesheetToList(params.samples_csv, "assets/schema_input.json"))
     }
 
-    if (params.annotations_csv) {
-        ch_annotations = Channel.fromPath(params.annotations_csv)
-            .splitCsv(header: true)
-            .map { [it.slide_id, it.annotation_bmp_path] }
+    if (params.linear_probe.annotations_csv) {
+        ch_annotations = Channel.fromList(samplesheetToList(params.linear_probe.annotations_csv, "assets/schema_annotations.json"))
     }
 
     if (params.samples_csv_watch_path) {
+        ch_samples = Channel.watchPath("${params.samples_csv_watch_path}/*.csv", 'create,modify').map { samplesheetToList(it, "assets/schema_input.json") }
+        /*
         ch_samples = Channel.watchPath("${params.samples_csv_watch_path}/*.csv", 'create,modify')
             .splitCsv(header: true)
-    }
-
-    if (params.watch_path) {
-        ch_samples = Channel.watchPath(params.watch_path).map { [ slide_id: FilenameUtils.removeExtension(it.name), slide_path: it ] }
-    }
-
-    if (params.test) {
-        ch_samples = ch_samples.take(1)
+            */
     }
 
 
-    Channel.topic('meta_out')
+    tmpdir = "${params.outdir}/tmp"
+    new File(tmpdir).mkdirs()
+    Channel.topic('slide_meta')
         .map { it[0..2] }
-        .collectFile(storeDir: params.outdir) {
-            slide_id, type, path ->
-            ["manifest-${timestamp}.csv", "${slide_id},${type},${path}\n"]
+        .collectFile(storeDir: params.outdir, tempDir: tmpdir, sort: false, cache: true) {
+            meta, key, value ->
+            ["manifest-${timestamp}.csv", "${meta.slide_id},${params.workflow_id},${key},${value}\n"]
         }
 
 
     MUSSEL(ch_samples, ch_annotations)
+
+    saveParams()
 
 }
 

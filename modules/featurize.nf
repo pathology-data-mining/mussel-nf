@@ -1,13 +1,3 @@
-for (model_type in params.all_model_types) {
-    params[model_type] = [:]
-}
-params.ctranspath.model_path = "/gpfs/mskmind_ess/limr/repos/TransPath/ctranspath.pth"
-params.optimus.model_path = "/gpfs/mskmind_ess/limr/repos/mussel-nf/optimus.pkl"
-params.resnet50.model_path = "/gpfs/mskmind_ess/limr/repos/Mussel/resnet50.pkl"
-
-params.use_gpu = true
-
-
 process FEATURIZE {
     label "bigTask"
     label "gpuTask"
@@ -15,30 +5,31 @@ process FEATURIZE {
 
     secret 'HF_TOKEN'
 
-    publishDir path: "${params.outdir}/features/${model_type}/${params.publish_slide_prefix ? slide_id[0..3] : ''}", pattern: "*.features.pt", mode: "${params.publish_mode}"
+    publishDir path: "${params.outdir}/${publish_path}", pattern: "*.features.pt", mode: "${params.publish_mode}"
 
     input:
-    tuple val(slide_id), path(slide), path(patch_h5)
+    tuple val(meta), path(slide), path(patch_h5)
     each model_type
 
     output:
-    tuple val(slide_id), val(model_type), path("${slide_id}.features.pt"), emit: pt
-    tuple val(slide_id), val(model_type), path("${slide_id}.features.h5"), emit: h5
-    tuple val(slide_id), val("${model_type}_features_tensor_urlpath"), val("${task.publishDir[0].path}/${slide_id}.features.pt"), topic: meta_out
+    tuple val(meta), val(model_type), path("${meta.slide_id}.features.pt"), emit: pt
+    tuple val(meta), val(model_type), path("${meta.slide_id}.features.h5"), emit: h5
+    tuple val(meta), val("${model_type}_features_tensor_urlpath"), val("${publish_path}/${meta.slide_id}.features.pt"), topic: slide_meta
 
     script:
+    publish_path = "features/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     mtype = model_type
-    if (model_type in params.clip_model_types)
+    if (model_type in params.featurize.clip_model_types)
         mtype = "CLIP"
     """
     extract_features \
         slide_path=${slide} \
         patch_h5_path=${patch_h5} \
-        output_h5_path=${slide_id}.features.h5 \
-        output_pt_path=${slide_id}.features.pt \
+        output_h5_path=${meta.slide_id}.features.h5 \
+        output_pt_path=${meta.slide_id}.features.pt \
         num_workers=${task.cpus} \
-        model_path=${params[model_type].model_path} \
+        model_path=${params.featurize.model_paths[model_type]} \
         model_type=${mtype.toUpperCase()} \
-        use_gpu=${params.use_gpu ? "true" : "false"}
+        use_gpu=${params.featurize.use_gpu ? "true" : "false"}
     """
 }

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/pathology-data-mining/mussel-nf/main/assets/schema_input.json",
+  "title": "pathology-data-mining/mussel-nf pipeline - params.samples_csv schema",
+  "description": "Schema for the file provided with params.samples_csv",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "slide_id": {
+        "type": ["integer", "string"],
+        "pattern": "^\\S+$",
+        "errorMessage": "Sample name must be provided and cannot contain spaces",
+        "meta": ["slide_id"]
+      },
+      "slide_path": {
+        "type": "string",
+        "pattern": "^\\S+\\.(svs|tiff|tif|ndpi|scn)$",
+        "format": "file-path",
+        "errorMessage": "Path to slide must be provided, cannot contain spaces and must have extension '.svs', '.tiff', '.tif', '.ndpi', or '.scn'"
+      },
+      "oncotree_code": {
+        "type": "string",
+        "pattern": "^\\S+$",
+        "errorMessage": "Oncotree code cannot contain spaces",
+        "meta": ["oncotree_code"]
+      }
+    },
+    "required": ["slide_id", "slide_path"]
+  }
+}

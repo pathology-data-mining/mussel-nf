@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/pathology-data-mining/mussel-nf/main/assets/schema_annotations.json",
+  "title": "pathology-data-mining/mussel-nf pipeline - params.linear_probe.annotations_csv schema",
+  "description": "Schema for the file provided with params.linear_probe.annotations_csv",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "slide_id": {
+        "type": ["integer", "string"],
+        "pattern": "^\\S+$",
+        "errorMessage": "Sample name must be provided and cannot contain spaces",
+        "meta": ["my_sample"]
+      },
+      "annotation_bmp_path": {
+        "type": "string",
+        "pattern": "^\\S+\\.bmp$",
+        "format": "file-path",
+        "errorMessage": "Path to annotation must be provided, cannot contain spaces and must have extension '.bmp'"
+      }
+    },
+    "required": ["slide_id", "annotations_csv"]
+  }
+}

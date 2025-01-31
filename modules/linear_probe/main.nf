@@ -1,4 +1,3 @@
-params.annotation_class_mapping_yaml = "class_mapping.yaml"
 
 process MERGE_ANNOTATION_FEATURES {
     label "hugeTask"
@@ -6,20 +5,20 @@ process MERGE_ANNOTATION_FEATURES {
     publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
 
     input:
-    tuple val(slide_id), path(annotation_bmp), val(model_type), path(features_h5)
+    tuple val(meta), path(annotation_bmp), val(model_type), path(features_h5)
     path(class_mapping_yaml)
 
     output:
-    tuple val(model_type), path("${slide_id}.annotation_features.parquet")
+    tuple val(model_type), path("${meta.slide_id}.annotation_features.parquet")
 
     script:
     """
     merge_annotation_features \
         features_h5_path=${features_h5} \
         annotation_bmp_path=${annotation_bmp} \
-        output_parquet_path=${slide_id}.annotation_features.parquet \
+        output_parquet_path=${meta.slide_id}.annotation_features.parquet \
         class_mapping_yaml_path='${class_mapping_yaml}' \
-        slide_id=${slide_id}
+        slide_id=${meta.slide_id}
     """
 }
 
@@ -61,15 +60,17 @@ process LINEAR_PROBE_BENCHMARK {
 
 workflow LINEAR_PROBE {
     take:
-        ch_annotations // slide_id, annotation_bmp_path
-        ch_h5_features // slide_id, model_type, h5_features
+        ch_annotations // meta, annotation_bmp_path
+        ch_h5_features // meta, model_type, h5_features
 
     main:
-        ch_ann_features = ch_annotations.join(ch_h5_features)
-        MERGE_ANNOTATION_FEATURES(ch_ann_features, file(params.annotation_class_mapping_yaml)) | \
-            groupTuple | \
-            STACK_ANNOTATION_FEATURES | \
-            LINEAR_PROBE_BENCHMARK
+        if (params.linear_probe.annotation_class_mapping_yaml) {
+            ch_ann_features = ch_annotations.join(ch_h5_features)
+            MERGE_ANNOTATION_FEATURES(ch_ann_features, file(params.linear_probe.annotation_class_mapping_yaml)) | \
+                groupTuple | \
+                STACK_ANNOTATION_FEATURES | \
+                LINEAR_PROBE_BENCHMARK
+        }
 
 }
 

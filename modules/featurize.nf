@@ -19,7 +19,7 @@ process FEATURIZE {
     script:
     publish_path = "features/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     mtype = model_type
-    if (model_type in params.featurize.clip_model_types)
+    if (model_type in params.clip.model_types)
         mtype = "CLIP"
     mpath_str = ""
     if (params.featurize.model_paths && params.featurize.model_paths[model_type])

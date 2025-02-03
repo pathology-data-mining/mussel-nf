@@ -11,9 +11,11 @@ process CREATE_CLASS_EMBEDDINGS {
 
     script:
     classes = class_map[oncotree_code] ?: params.clip.default_classes
+    mpath_str = ""
+    if (params.featurize.model_paths && params.featurize.model_paths[model_type])
+        mpath_str = "model_path=${params.featurize.model_paths[model_type]}"
     """
-    create_class_embeddings \
-        model_path=${params.featurize.model_paths[model_type]} \
+    create_class_embeddings ${mpath_str} \
         output_pt_path=${oncotree_code}.${model_type}.class_embedding.pt \
         classes="${classes}"
     """
@@ -105,7 +107,7 @@ workflow CLIP {
             }
         }
 
-        ch_oncotree_codes = ch_samples.map { meta, slide -> meta.oncotree_code }.unique()
+        ch_oncotree_codes = ch_oncotree_slide.map { it[0] }.unique()
         ch_class_embeddings = CREATE_CLASS_EMBEDDINGS(
             ch_oncotree_codes,
             oncotree_class_map,

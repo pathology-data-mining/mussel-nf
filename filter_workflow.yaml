@@ -1,6 +1,10 @@
 tiling:
   filter_model_type: ctranspath
   filter_tiles: true
+  filter_model_path: "/gpfs/mskmind_ess/limr/repos/Mussel/model-1727990346535.pkl"
 featurize:
   model_types:
     - optimus
+  model_paths:
+    ctranspath: "/gpfs/mskmind_ess/limr/repos/TransPath/ctranspath.pth"
+    optimus: "/gpfs/mskmind_ess/limr/repos/mussel-nf/optimus.pkl"

@@ -18,7 +18,7 @@ include { MUSSEL } from './modules/mussel'
 
 
 process saveParams {
-    publishDir params.outdir
+    publishDir params.outdir, mode: 'copy'
 
     output:
         path "params.json"
@@ -41,11 +41,8 @@ workflow {
     }
 
     if (params.samples_csv_watch_path) {
-        ch_samples = Channel.watchPath("${params.samples_csv_watch_path}/*.csv", 'create,modify').map { samplesheetToList(it, "assets/schema_input.json") }
-        /*
         ch_samples = Channel.watchPath("${params.samples_csv_watch_path}/*.csv", 'create,modify')
-            .splitCsv(header: true)
-            */
+            .flatMap { samplesheetToList(it, "assets/schema_input.json") }
     }
 
 

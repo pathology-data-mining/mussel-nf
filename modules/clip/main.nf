@@ -32,7 +32,7 @@ process ANNOTATE {
 
     output:
     tuple val(meta), val(model_type), val(oncotree_code), path("${meta.slide_id}.annotation.csv"), emit: csv
-    tuple val(meta), val("${model_type}_annotation_csv_urlpath"), val("${publish_path}/${meta.slide_id}.annotation.csv"), topic: meta_out
+    tuple val(meta), val("${model_type}_annotation_csv_path"), val("${publish_path}/${meta.slide_id}.annotation.csv"), topic: meta_out
 
     script:
     publish_path = "annotate/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
@@ -59,8 +59,8 @@ process CACHE_TILES {
     output:
     path "${meta.slide_id}.indices.json"
     path "${meta.slide_id}.cache.pt"
-    tuple val(meta), val("${model_type}_tile_cache_indices_json_urlpath"), val("${publish_path}/${meta.slide_id}.indices.json"), topic: meta_out
-    tuple val(meta), val("${model_type}_tile_cache_tensor_urlpath"), val("${publish_path}/${meta.slide_id}.cache.pt"), topic: meta_out
+    tuple val(meta), val("${model_type}_tile_cache_indices_json_path"), val("${publish_path}/${meta.slide_id}.indices.json"), topic: meta_out
+    tuple val(meta), val("${model_type}_tile_cache_tensor_path"), val("${publish_path}/${meta.slide_id}.cache.pt"), topic: meta_out
 
     script:
     publish_path = "cache_tiles/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"

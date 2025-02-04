@@ -19,11 +19,11 @@ workflow EXTRACT_FEATURES {
         }
 
         if (params.tiling.filter_tiles) {
-            ch_filter_features = FILTER_FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), params.tiling.filter_model_type)
+            ch_filter_features = FILTER_FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), params.tiling.filter_model_type, false)
             ch_filter_patches = FILTER_TILES(ch_filter_features.h5)
-            FEATURIZE(ch_samples.combine(ch_filter_patches.h5, by: 0), params.featurize.model_types)
+            FEATURIZE(ch_samples.combine(ch_filter_patches.h5, by: 0), params.featurize.model_types, true)
         } else {
-            FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), params.featurize.model_types)
+            FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), params.featurize.model_types, true)
         }
 
 

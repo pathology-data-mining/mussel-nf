@@ -36,17 +36,17 @@ for results_dir in args.results_dir:
 
     features_pt = [{'slide_id': file.stem.split('.')[0],
                     'workflow_id': workflow_id,
-                    'key': f"{file.parents[1].name}_features_tensor_urlpath",
+                    'key': f"{file.parents[1].name}_features_tensor_path",
                     'value': file.resolve()} for file in results_dir.glob("**/*.features.pt")]
 
     tiles = [{'slide_id': file.stem.split('.')[0],
               'workflow_id': workflow_id,
-              'key': "tiles_h5_urlpath",
+              'key': "tiles_h5_path",
               'value': file.resolve()} for file in results_dir.glob("**/*.patch.h5")]
 
     filter_tiles = [{'slide_id': file.stem.split('.')[0],
               'workflow_id': workflow_id,
-              'key': "filtered_features_h5_urlpath",
+              'key': "filtered_features_h5_path",
               'value': file.resolve()} for file in results_dir.glob("**/*.filtered_features.h5")]
 
     df = pd.DataFrame.from_records(features_pt + tiles + filter_tiles)

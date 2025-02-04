@@ -10,11 +10,11 @@ process TESSELLATE {
 
     output:
     tuple val(meta), path("${meta.slide_id}.patch.h5"), optional: true, emit: h5
-    tuple val(meta), val("tiles_h5_urlpath"), val("${publish_path}/${meta.slide_id}.patch.h5"), path("${meta.slide_id}.patch.h5"), optional: true, topic: slide_meta
+    tuple val(meta), val("tiles_h5_path"), val("${publish_path}/${meta.slide_id}.patch.h5"), path("${meta.slide_id}.patch.h5"), optional: true, topic: slide_meta
     path "${meta.slide_id}_png/*.png", optional: true, emit: png
     path "${meta.slide_id}.thumbnail.png", optional: true, emit: thumbnail_png
-    tuple val(meta), val("thumbnail_urlpath"), val("${publish_path}/${meta.slide_id}.thumbnail.png"), path("${meta.slide_id}.thumbnail.png"), optional: true, topic: slide_meta
-    tuple val(meta), val("tile_png_urlpath"), val("${publish_path}/${meta.slide_id}_png"), path("${meta.slide_id}_png/*.png"), optional: true, topic: slide_meta
+    tuple val(meta), val("thumbnail_path"), val("${publish_path}/${meta.slide_id}.thumbnail.png"), path("${meta.slide_id}.thumbnail.png"), optional: true, topic: slide_meta
+    tuple val(meta), val("tile_png_path"), val("${publish_path}/${meta.slide_id}_png"), path("${meta.slide_id}_png/*.png"), optional: true, topic: slide_meta
 
     script:
     publish_path = "tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
@@ -46,21 +46,26 @@ process FILTER_TILES {
     label "bigTask"
     label "cpuTask"
 
-    publishDir path: "${params.outdir}/${publish_path}", mode: "${params.publish_mode}"
+    publishDir path: "${params.outdir}/${tiles_publish_path}", mode: "${params.publish_mode}", pattern: "*.h5"
+    publishDir path: "${params.outdir}/${pt_publish_path}", mode: "${params.publish_mode}", pattern: "*.pt"
 
     input:
     tuple val(meta), val(model_type), path(features_h5)
 
     output:
-    tuple val(meta), path("${meta.slide_id}.filtered_features.h5"), emit: h5
-    tuple val(meta), val("filtered_features_h5_urlpath"), val("${publish_path}/${meta.slide_id}.filtered_features.h5"), topic: slide_meta
+    tuple val(meta), path("${meta.slide_id}.patch.h5"), emit: h5
+    tuple val(meta), path("${meta.slide_id}.features.pt"), emit: pt
+    tuple val(meta), val("filtered_tiles_h5_path"), val("${tiles_publish_path}/${meta.slide_id}.patch.h5"), topic: slide_meta
+    tuple val(meta), val("${model_type}_features_tensor_path"), val("${pt_publish_path}/${meta.slide_id}.features.pt"), topic: slide_meta
 
     script:
-    publish_path = "filter_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
+    tiles_publish_path = "filter_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
+    pt_publish_path = "features/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     filter_features \
         features_h5_path=${features_h5} \
-        output_h5_path=${meta.slide_id}.filtered_features.h5 \
+        output_h5_path=${meta.slide_id}.patch.h5 \
+        output_pt_path=${meta.slide_id}.features.pt \
         classifier_threshold=${params.tiling.filter_threshold} \
         classifier_pkl=${params.tiling.filter_model_path}
     """
@@ -78,7 +83,7 @@ process STITCH_TILES {
 
     output:
     path "${meta.slide_id}.stitch.jpg"
-    tuple val(meta), val("thumbnail_urlpath"), val("${publish_path}/${meta.slide_id}.stitch.jpg"), topic: slide_meta
+    tuple val(meta), val("thumbnail_path"), val("${publish_path}/${meta.slide_id}.stitch.jpg"), topic: slide_meta
 
     script:
     publish_path = "stitch_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"

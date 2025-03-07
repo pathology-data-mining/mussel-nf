@@ -24,7 +24,9 @@ process saveParams {
         path "params.json"
 
     script:
-      "echo '${JsonOutput.toJson(params)}' > params.json"
+        params_out = params.subMap(['workflow_id', 'tiling'])
+        params_out["outdir"] = new File(params.outdir).absolutePath
+        "echo '${JsonOutput.toJson(params_out)}' > params.json"
 }
 
 workflow {
@@ -32,7 +34,6 @@ workflow {
     ch_annotations = Channel.empty()
 
     if (params.samples_csv) {
-
         ch_samples = Channel.fromList(samplesheetToList(params.samples_csv, "assets/schema_input.json"))
     }
 

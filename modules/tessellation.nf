@@ -26,14 +26,14 @@ process TESSELLATE {
         save_thumbnail_param = "output_thumbnail_path=${meta.slide_id}.thumbnail.png"
     """
     tessellate \
-        patch_config.mpp=${params.tiling.mpp} \
-        patch_config.patch_size=${params.tiling.patch_size} \
+        seg_config.mpp=${params.tiling.mpp} \
+        seg_config.patch_size=${params.tiling.patch_size} \
         seg_config.segment_threshold=${params.tiling.segment_threshold} \
         seg_config.median_blur_ksize=${params.tiling.median_blur_ksize} \
         seg_config.morphology_ex_kernel=${params.tiling.morphology_ex_kernel} \
-        filter_config.tissue_area_threshold=${params.tiling.tissue_area_threshold} \
-        filter_config.hole_area_threshold=${params.tiling.hole_area_threshold} \
-        filter_config.max_num_holes=${params.tiling.max_num_holes} \
+        seg_config.tissue_area_threshold=${params.tiling.tissue_area_threshold} \
+        seg_config.hole_area_threshold=${params.tiling.hole_area_threshold} \
+        seg_config.max_num_holes=${params.tiling.max_num_holes} \
         num_workers=${task.cpus} \
         slide_path=${slide} \
         output_h5_path=${meta.slide_id}.patch.h5 \
@@ -71,23 +71,3 @@ process FILTER_TILES {
     """
 }
 
-
-process STITCH_TILES {
-    label "bigTask"
-    label "cpuTask"
-
-    publishDir path: "${params.outdir}/${publish_path}", mode: "${params.publish_mode}"
-
-    input:
-    tuple val(meta), path(slide), path(tiles_h5)
-
-    output:
-    path "${meta.slide_id}.stitch.jpg"
-    tuple val(meta), val("thumbnail_path"), val("${publish_path}/${meta.slide_id}.stitch.jpg"), topic: slide_meta
-
-    script:
-    publish_path = "stitch_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
-    """
-    stitch_tiles slide_path=${slide} h5_path=${tiles_h5} output_jpeg_path=${meta.slide_id}.stitch.jpg
-    """
-}

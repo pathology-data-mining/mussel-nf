@@ -3,7 +3,7 @@ include { LINEAR_PROBE } from './linear_probe'
 
 include { FEATURIZE; FEATURIZE as FILTER_FEATURIZE } from './featurize'
 
-include { TESSELLATE; STITCH_TILES; FILTER_TILES } from './tessellation'
+include { TESSELLATE; FILTER_TILES } from './tessellation'
 
 
 
@@ -13,10 +13,6 @@ workflow EXTRACT_FEATURES {
 
     main:
         ch_patches = TESSELLATE(ch_samples)
-
-        if (params.tiling.stitch_tiles) {
-            ch_samples.join(ch_patches.h5) | STITCH_TILES
-        }
 
         if (params.tiling.filter_tiles) {
             ch_filter_features = FILTER_FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), params.tiling.filter_model_type, false)

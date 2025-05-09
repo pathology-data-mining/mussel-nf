@@ -5,7 +5,7 @@ process MERGE_ANNOTATION_FEATURES {
     publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
 
     input:
-    tuple val(meta), path(annotation_bmp), val(model_type), path(features_h5)
+    tuple val(meta), val(model_type), path(features_h5), path(annotation_bmp) 
     path(class_mapping_yaml)
 
     output:
@@ -31,7 +31,7 @@ process STACK_ANNOTATION_FEATURES {
     tuple val(model_type), path(annotation_features)
 
     output:
-    path "annotation_features.parquet"
+    tuple val(model_type), path("annotation_features.parquet")
 
     script:
     """
@@ -47,8 +47,16 @@ process STACK_ANNOTATION_FEATURES {
 }
 
 process LINEAR_PROBE_BENCHMARK {
+    label "bigTask"
+
+    publishDir "${params.outdir}/linear_probe_benchmark/${model_type}/", mode: "${params.publish_mode}"
+
     input:
-    path annotation_features
+    tuple val(model_type), path(annotation_features)
+
+    output:
+    path "classification_report.csv"
+    path "confusion_matrix.png"
 
     script:
     """
@@ -65,8 +73,8 @@ workflow LINEAR_PROBE {
 
     main:
         if (params.linear_probe.annotation_class_mapping_yaml) {
-            ch_ann_features = ch_annotations.join(ch_h5_features)
-            MERGE_ANNOTATION_FEATURES(ch_ann_features, file(params.linear_probe.annotation_class_mapping_yaml)) | \
+            ch_features_ann = ch_h5_features.map{tuple(it[0].slide_id, *it)}.combine(ch_annotations.map{tuple(it[0].slide_id, *it.tail())}, by: 0).map{it.tail()}
+            MERGE_ANNOTATION_FEATURES(ch_features_ann, file(params.linear_probe.annotation_class_mapping_yaml)) | \
                 groupTuple | \
                 STACK_ANNOTATION_FEATURES | \
                 LINEAR_PROBE_BENCHMARK

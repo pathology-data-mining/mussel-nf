@@ -11,7 +11,7 @@
         "type": ["integer", "string"],
         "pattern": "^\\S+$",
         "errorMessage": "Sample name must be provided and cannot contain spaces",
-        "meta": ["my_sample"]
+        "meta": ["slide_id"]
       },
       "annotation_bmp_path": {
         "type": "string",
@@ -20,6 +20,6 @@
         "errorMessage": "Path to annotation must be provided, cannot contain spaces and must have extension '.bmp'"
       }
     },
-    "required": ["slide_id", "annotations_csv"]
+    "required": ["slide_id", "annotation_bmp_path"]
   }
 }

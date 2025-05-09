@@ -12,8 +12,10 @@ process TESSELLATE {
     tuple val(meta), path("${meta.slide_id}.patch.h5"), optional: true, emit: h5
     tuple val(meta), val("tiles_h5_path"), val("${publish_path}/${meta.slide_id}.patch.h5"), path("${meta.slide_id}.patch.h5"), optional: true, topic: slide_meta
     path "${meta.slide_id}_png/*.png", optional: true, emit: png
-    path "${meta.slide_id}.thumbnail.png", optional: true, emit: thumbnail_png
+    path "${meta.slide_id}.*.png", optional: true, emit: thumbnail_png
     tuple val(meta), val("thumbnail_path"), val("${publish_path}/${meta.slide_id}.thumbnail.png"), path("${meta.slide_id}.thumbnail.png"), optional: true, topic: slide_meta
+    tuple val(meta), val("grid_mask_path"), val("${publish_path}/${meta.slide_id}.grid_mask.png"), path("${meta.slide_id}.grid_mask.png"), optional: true, topic: slide_meta
+    tuple val(meta), val("mask_path"), val("${publish_path}/${meta.slide_id}.mask.png"), path("${meta.slide_id}.mask.png"), optional: true, topic: slide_meta
     tuple val(meta), val("tile_png_path"), val("${publish_path}/${meta.slide_id}_png"), path("${meta.slide_id}_png/*.png"), optional: true, topic: slide_meta
 
     script:
@@ -21,6 +23,10 @@ process TESSELLATE {
     save_tile_param = ""
     if (params.tiling.save_tile_png)
         save_tile_param = "output_png_dir=${meta.slide_id}_png"
+    stitch_tile_param = ""
+    if (params.tiling.stitch_tiles)
+        stitch_tile_param = "output_grid_mask_path=${meta.slide_id}.grid_mask.png"
+        stitch_tile_param += " output_mask_path=${meta.slide_id}.mask.png"
     save_thumbnail_param = ""
     if (params.tiling.save_slide_thumbnail)
         save_thumbnail_param = "output_thumbnail_path=${meta.slide_id}.thumbnail.png"
@@ -38,7 +44,8 @@ process TESSELLATE {
         slide_path=${slide} \
         output_h5_path=${meta.slide_id}.patch.h5 \
         ${save_thumbnail_param} \
-        ${save_tile_param}
+        ${save_tile_param} \
+        ${stitch_tile_param}
     """
 }
 

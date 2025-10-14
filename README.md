@@ -106,3 +106,44 @@ to mount Azure file shares with large files to the batch nodes using
 `params.azure.storage.fileShares`. It's a good idea to periodically run the
 powershell script either way as nodes end up in the unusable state for a variety of
 reasons and will linger (costing $) until deleted.
+
+## Troubleshooting
+
+### AttributeError
+
+Error: 
+```
+AttributeError: 'Attention' object has no attribute 'norm'
+```
+
+Solution:
+
+When this occurs it means that a dependency has a version mismatch between what 
+was loaded into the pickle file and what Mussel is using. It is best to not use the 
+pickle file and instead use this Mussel 
+[feauture](https://github.com/pathology-data-mining/Mussel/blob/main/README-commands.md#save_model) 
+to automatically download the models from huggingface.
+
+### Cache filling up
+
+Error:
+
+On our on-prem machines, the uv and huggingface caches are by default set to user's home directory. 
+This mount fills up quickly so it is best to move this cache elsewhere.
+
+Solution:
+
+Move the uv and huggingface cache directory to a different mount by setting the environment
+variables `UV_CACHE_DIR` and `HF_HOME`. 
+
+### Conflicting Huggingface Downloads
+
+Error:
+
+Launching multiple jobs without the models already downloaded in parallel to slurm can cause 
+job failures since they will all try to save the models at the same time.
+
+Solution:
+
+Run your workflow for a single slide first as a 'dry-run' to properly download the models, then 
+re-run with multiple slides afterwards.

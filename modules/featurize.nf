@@ -9,7 +9,7 @@ process FEATURIZE {
 
     input:
     tuple val(meta), path(slide), path(patch_h5)
-    each model_type
+    each model_config // tuple of [model_type, model_path]
     val post_filter // true if coords in h5 are post filter (set to true if no filtering)
 
     output:
@@ -18,12 +18,15 @@ process FEATURIZE {
     tuple val(meta), val("${model_type_name}_features_tensor_path"), val("${publish_path}/${meta.slide_id}.features.pt"), topic: slide_meta
 
     script:
+    model_type = model_config[0]
+    model_path = model_config[1]
+    
     mtype = model_type
     if (model_type in params.clip.model_types)
         mtype = "CLIP"
     mpath_str = ""
-    if (params.featurize.model_paths && params.featurize.model_paths[model_type])
-        mpath_str = "model_path=${params.featurize.model_paths[model_type]}"
+    if (model_path)
+        mpath_str = "model_path=${model_path}"
 
     model_type_name = "${post_filter ? '' : 'prefilter_'}${model_type}"
     publish_path = "features/${model_type_name}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"

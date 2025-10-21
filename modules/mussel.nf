@@ -15,11 +15,23 @@ workflow EXTRACT_FEATURES {
         ch_patches = TESSELLATE(ch_samples)
 
         if (params.tiling.filter_tiles) {
-            ch_filter_features = FILTER_FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), params.tiling.filter_model_type, false)
+            filter_model_path = params.featurize.model_paths && params.featurize.model_paths[params.tiling.filter_model_type] ? params.featurize.model_paths[params.tiling.filter_model_type] : null
+            ch_filter_features = FILTER_FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), [params.tiling.filter_model_type, filter_model_path], false)
             ch_filter_patches = FILTER_TILES(ch_filter_features.h5)
-            FEATURIZE(ch_samples.combine(ch_filter_patches.h5, by: 0), params.featurize.model_types, true)
+            
+            // Create a channel with model types and their paths as tuples
+            ch_model_configs = Channel.fromList(params.featurize.model_types).map { model_type ->
+                model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
+                [model_type, model_path]
+            }
+            FEATURIZE(ch_samples.combine(ch_filter_patches.h5, by: 0), ch_model_configs, true)
         } else {
-            FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), params.featurize.model_types, true)
+            // Create a channel with model types and their paths as tuples
+            ch_model_configs = Channel.fromList(params.featurize.model_types).map { model_type ->
+                model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
+                [model_type, model_path]
+            }
+            FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), ch_model_configs, true)
         }
 
 

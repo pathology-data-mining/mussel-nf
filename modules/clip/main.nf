@@ -4,16 +4,19 @@ process CREATE_CLASS_EMBEDDINGS {
     input:
     val oncotree_code
     val class_map
-    each model_type
+    each model_config // tuple of [model_type, model_path]
 
     output:
     tuple val(oncotree_code), val(model_type), path("${oncotree_code}.${model_type}.class_embedding.pt")
 
     script:
+    model_type = model_config[0]
+    model_path = model_config[1]
+    
     classes = class_map[oncotree_code] ?: params.clip.default_classes
     mpath_str = ""
-    if (params.featurize.model_paths && params.featurize.model_paths[model_type])
-        mpath_str = "model_path=${params.featurize.model_paths[model_type]}"
+    if (model_path)
+        mpath_str = "model_path=${model_path}"
     """
     create_class_embeddings ${mpath_str} \
         output_pt_path=${oncotree_code}.${model_type}.class_embedding.pt \
@@ -108,10 +111,17 @@ workflow CLIP {
         }
 
         ch_oncotree_codes = ch_oncotree_slide.map { it[0] }.unique()
+        
+        // Create a channel with model types and their paths as tuples
+        ch_clip_model_configs = Channel.fromList(params.clip.model_types).map { model_type ->
+            model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
+            [model_type, model_path]
+        }
+        
         ch_class_embeddings = CREATE_CLASS_EMBEDDINGS(
             ch_oncotree_codes,
             oncotree_class_map,
-            Channel.fromList(params.clip.model_types))
+            ch_clip_model_configs)
 
         ch_slide_oncotree = ch_oncotree_slide.combine(ch_class_embeddings, by: 0).map {[it[1], it[2], it[0], it[3]]} // slide_id and model type first
         ch_annotations = ANNOTATE(ch_features.join(ch_slide_oncotree, by: [0,1]), oncotree_class_map).csv

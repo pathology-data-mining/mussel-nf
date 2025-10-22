@@ -147,3 +147,20 @@ Solution:
 
 Run your workflow for a single slide first as a 'dry-run' to properly download the models, then 
 re-run with multiple slides afterwards.
+
+## Testing
+
+Unit tests are available for the Python scripts in the pipeline. To run the tests:
+
+```bash
+# Install test dependencies
+pip install pytest pytest-cov pandas pyyaml
+
+# Run all tests
+pytest
+
+# Run tests with coverage
+pytest --cov=scripts --cov-report=term-missing
+```
+
+See [tests/README.md](tests/README.md) for more information about testing.

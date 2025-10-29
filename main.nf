@@ -12,7 +12,7 @@ import groovy.json.JsonOutput
 
 timestamp = new Date().getTime()
 
-nextflow.preview.topic = true
+// nextflow.preview.topic = true
 
 include { MUSSEL } from './modules/mussel'
 

@@ -1,7 +1,7 @@
 include { CLIP } from './clip'
 include { LINEAR_PROBE } from './linear_probe'
 
-include { FEATURIZE; FEATURIZE as FILTER_FEATURIZE; FEATURIZE_BATCH } from './featurize'
+include { FEATURIZE_BATCH; FEATURIZE_BATCH as FILTER_FEATURIZE } from './featurize'
 
 include { TESSELLATE; FILTER_TILES } from './tessellation'
 
@@ -17,9 +17,31 @@ workflow EXTRACT_FEATURES {
         ch_patches = TESSELLATE(ch_samples)
 
         if (params.tiling.filter_tiles) {
+            // Batch slides for filtering feature extraction
             filter_model_path = params.featurize.model_paths && params.featurize.model_paths[params.tiling.filter_model_type] ? params.featurize.model_paths[params.tiling.filter_model_type] : null
-            ch_filter_features = FILTER_FEATURIZE(ch_samples.combine(ch_patches.h5, by: 0), [params.tiling.filter_model_type, filter_model_path], false)
-            ch_filter_patches = FILTER_TILES(ch_filter_features.h5)
+            filter_model_config = Channel.value([params.tiling.filter_model_type, filter_model_path, null, null])
+
+            ch_filter_slide_batches = ch_samples.combine(ch_patches.h5, by: 0)
+                .collate(params.featurize.slide_batch_size ?: 8)
+                .map { batch ->
+                    def slides = batch.collect { meta, slide, patch_h5 -> slide }
+                    def patch_h5s = batch.collect { meta, slide, patch_h5 -> patch_h5 }
+                    tuple(batch, slides, patch_h5s)
+                }
+
+            FILTER_FEATURIZE(ch_filter_slide_batches, filter_model_config, false)
+
+            // Flatten filter results
+            ch_filter_h5 = FILTER_FEATURIZE.out.h5
+                .flatMap { batch_meta, model_type, h5_files ->
+                    h5_files.collect { h5_file ->
+                        def filename = h5_file.name.replaceAll('.features.h5$', '')
+                        def meta = batch_meta.find { it.slide_id == filename }
+                        tuple(meta, model_type, h5_file)
+                    }
+                }
+
+            ch_filter_patches = FILTER_TILES(ch_filter_h5)
 
             // Create a channel with model configs (model_type, model_path, slide_model_type, slide_model_path)
             ch_model_configs = Channel.fromList(params.featurize.model_types).map { model_type ->

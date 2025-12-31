@@ -47,9 +47,19 @@ process TESSELLATE_FEATURIZE {
         aggregation_str = "aggregation_method=model"
     }
 
+    // Filter model configuration (for extracting features before filtering)
+    filter_model_str = ""
     classifier_pkl_str = ""
-    if (params.tiling.filter_tiles && params.tiling.filter_model_path)
-        classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
+    if (params.tiling.filter_tiles) {
+        if (params.tiling.filter_model_type) {
+            filter_model_str = "filter_model_type=${params.tiling.filter_model_type.toUpperCase()}"
+            filter_model_path = params.featurize.model_paths ? params.featurize.model_paths[params.tiling.filter_model_type] : null
+            if (filter_model_path)
+                filter_model_str += " filter_model_path=${filter_model_path}"
+        }
+        if (params.tiling.filter_model_path)
+            classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
+    }
 
     save_tile_param = ""
     if (params.tiling.save_tile_png)
@@ -97,6 +107,7 @@ process TESSELLATE_FEATURIZE {
         batch_size=${params.featurize.batch_size} \
         ${slide_model_str} \
         ${aggregation_str} \
+        ${filter_model_str} \
         ${classifier_pkl_str} \
         classifier_threshold=${params.tiling.filter_threshold} \
         ${save_thumbnail_param} \
@@ -152,9 +163,19 @@ process TESSELLATE_FEATURIZE_BATCH {
         aggregation_str = "aggregation_method=identity"
     }
 
+    // Filter model configuration (for extracting features before filtering)
+    filter_model_str = ""
     classifier_pkl_str = ""
-    if (params.tiling.filter_tiles && params.tiling.filter_model_path)
-        classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
+    if (params.tiling.filter_tiles) {
+        if (params.tiling.filter_model_type) {
+            filter_model_str = "filter_model_type=${params.tiling.filter_model_type.toUpperCase()}"
+            filter_model_path = params.featurize.model_paths ? params.featurize.model_paths[params.tiling.filter_model_type] : null
+            if (filter_model_path)
+                filter_model_str += " filter_model_path=${filter_model_path}"
+        }
+        if (params.tiling.filter_model_path)
+            classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
+    }
 
     save_h5_param = "save_features_to_h5=true"  // Always save features in one-step workflow
 
@@ -203,6 +224,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         slide_batch_size=${slide_batch_size} \
         ${slide_model_str} \
         ${aggregation_str} \
+        ${filter_model_str} \
         ${classifier_pkl_str} \
         classifier_threshold=${params.tiling.filter_threshold} \
         ${output_mask_suffix_str} \

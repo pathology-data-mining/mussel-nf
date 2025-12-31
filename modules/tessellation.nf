@@ -30,8 +30,13 @@ process TESSELLATE {
     save_thumbnail_param = ""
     if (params.tiling.save_slide_thumbnail)
         save_thumbnail_param = "output_thumbnail_path=${meta.slide_id}.thumbnail.png"
+
+    // Use seg_config group if specified, otherwise use individual parameters
+    seg_config_str = params.tiling.seg_config_group ? "seg_config=${params.tiling.seg_config_group}" : ""
+
     """
     tessellate \
+        ${seg_config_str} \
         seg_config.mpp=${params.tiling.mpp} \
         seg_config.patch_size=${params.tiling.patch_size} \
         seg_config.segment_threshold=${params.tiling.segment_threshold} \

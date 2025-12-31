@@ -20,8 +20,9 @@ workflow EXTRACT_FEATURES {
             // Batch slides for filtering feature extraction
             // Extract features using the feature extraction model (e.g., ctranspath)
             // Then FILTER_TILES will use the classifier_pkl to filter tiles
-            filter_model_path = params.featurize.model_paths?."${params.tiling.filter_model_type}"
-            filter_model_config = Channel.value([params.tiling.filter_model_type, filter_model_path, null, null])
+            def filter_model_type = params.tiling.filter_model_type
+            def filter_model_path = params.featurize.model_paths ? params.featurize.model_paths[filter_model_type] : null
+            def filter_model_config = Channel.value([filter_model_type, filter_model_path, null, null])
 
             ch_filter_slide_batches = ch_samples.combine(ch_patches.h5, by: 0)
                 .collate(params.featurize.slide_batch_size ?: 8)

@@ -61,6 +61,7 @@ process FEATURIZE_BATCH {
     extract_features \
         patch_h5_paths='[${patch_h5_paths_str}]' \
         slide_paths='[${slide_paths_str}]' \
+        slide_ids='[${slide_ids_str}]' \
         output_dir=. \
         num_workers=${task.cpus} \
         model_type=${mtype.toUpperCase()} ${mpath_str} \

@@ -30,6 +30,8 @@ process TESSELLATE_FEATURIZE {
     model_path = model_config[1]
     slide_model_type = model_config.size() > 2 ? model_config[2] : null
     slide_model_path = model_config.size() > 3 ? model_config[3] : null
+    prefilter_model_type = model_config.size() > 4 ? model_config[4] : null
+    prefilter_model_path = model_config.size() > 5 ? model_config[5] : null
 
     model_type_name = slide_model_type ?: model_type
     publish_path = "features/${model_type_name}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
@@ -51,11 +53,11 @@ process TESSELLATE_FEATURIZE {
     prefilter_model_str = ""
     classifier_pkl_str = ""
     if (params.tiling.filter_tiles) {
-        if (params.tiling.filter_model_type) {
-            prefilter_model_str = "prefilter_model_type=${params.tiling.filter_model_type.toUpperCase()}"
-            filter_model_path = params.featurize.model_paths ? params.featurize.model_paths[params.tiling.filter_model_type] : null
-            if (filter_model_path)
-                prefilter_model_str += " prefilter_model_path=${filter_model_path}"
+        if (prefilter_model_type) {
+            prefilter_model_str = "prefilter_model_type=${prefilter_model_type.toUpperCase()}"
+            if (prefilter_model_path) {
+                prefilter_model_str += " prefilter_model_path=${prefilter_model_path}"
+            }
         }
         if (params.tiling.filter_model_path)
             classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
@@ -141,6 +143,8 @@ process TESSELLATE_FEATURIZE_BATCH {
     model_path = model_config[1]
     slide_model_type = model_config.size() > 2 ? model_config[2] : null
     slide_model_path = model_config.size() > 3 ? model_config[3] : null
+    prefilter_model_type = model_config.size() > 4 ? model_config[4] : null
+    prefilter_model_path = model_config.size() > 5 ? model_config[5] : null
 
     // Extract metadata for all slides in batch
     batch_metadata = slide_batch.collect { meta, slide -> meta }
@@ -167,11 +171,11 @@ process TESSELLATE_FEATURIZE_BATCH {
     prefilter_model_str = ""
     classifier_pkl_str = ""
     if (params.tiling.filter_tiles) {
-        if (params.tiling.filter_model_type) {
-            prefilter_model_str = "prefilter_model_type=${params.tiling.filter_model_type.toUpperCase()}"
-            filter_model_path = params.featurize.model_paths ? params.featurize.model_paths[params.tiling.filter_model_type] : null
-            if (filter_model_path)
-                prefilter_model_str += " prefilter_model_path=${filter_model_path}"
+        if (prefilter_model_type) {
+            prefilter_model_str = "prefilter_model_type=${prefilter_model_type.toUpperCase()}"
+            if (prefilter_model_path) {
+                prefilter_model_str += " prefilter_model_path=${prefilter_model_path}"
+            }
         }
         if (params.tiling.filter_model_path)
             classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"

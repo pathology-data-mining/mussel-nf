@@ -21,6 +21,8 @@ process FEATURIZE_BATCH {
     model_path = model_config[1]
     slide_model_type = model_config.size() > 2 ? model_config[2] : null
     slide_model_path = model_config.size() > 3 ? model_config[3] : null
+    prefilter_model_type = model_config.size() > 4 ? model_config[4] : null
+    prefilter_model_path = model_config.size() > 5 ? model_config[5] : null
 
     // Extract metadata for all slides in batch
     batch_metadata = slide_batch.collect { meta, slide, patch_h5 -> meta }

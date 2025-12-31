@@ -52,12 +52,14 @@ workflow EXTRACT_FEATURES {
 
             ch_filter_patches = FILTER_TILES(ch_filter_h5)
 
-            // Create a channel with model configs (model_type, model_path, slide_model_type, slide_model_path)
+            // Create a channel with model configs (model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path)
             ch_model_configs = Channel.fromList(params.featurize.model_types).map { model_type ->
                 model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
                 slide_model_type = params.featurize.slide_model_types ? params.featurize.slide_model_types[0] : null
                 slide_model_path = slide_model_type && params.featurize.slide_model_paths ? params.featurize.slide_model_paths[slide_model_type] : null
-                [model_type, model_path, slide_model_type, slide_model_path]
+                prefilter_model_type = params.tiling.filter_tiles ? params.tiling.filter_model_type : null
+                prefilter_model_path = prefilter_model_type && params.featurize.model_paths ? params.featurize.model_paths[prefilter_model_type] : null
+                [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
             }
 
             // Batch slides together for processing
@@ -93,12 +95,14 @@ workflow EXTRACT_FEATURES {
                     }
                 }
         } else {
-            // Create a channel with model configs (model_type, model_path, slide_model_type, slide_model_path)
+            // Create a channel with model configs (model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path)
             ch_model_configs = Channel.fromList(params.featurize.model_types).map { model_type ->
                 model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
                 slide_model_type = params.featurize.slide_model_types ? params.featurize.slide_model_types[0] : null
                 slide_model_path = slide_model_type && params.featurize.slide_model_paths ? params.featurize.slide_model_paths[slide_model_type] : null
-                [model_type, model_path, slide_model_type, slide_model_path]
+                prefilter_model_type = params.tiling.filter_tiles ? params.tiling.filter_model_type : null
+                prefilter_model_path = prefilter_model_type && params.featurize.model_paths ? params.featurize.model_paths[prefilter_model_type] : null
+                [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
             }
 
             // Batch slides together for processing

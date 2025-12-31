@@ -35,14 +35,19 @@ workflow EXTRACT_FEATURES {
             FILTER_FEATURIZE(ch_filter_slide_batches, filter_model_config, false)
 
             // Flatten filter results
-            // Use indexed matching since output files may use staged names
+            // Match files to metadata by index since filenames may use staged names
             ch_filter_h5 = FILTER_FEATURIZE.out.h5
-                .flatMap { batch_meta, model_type, h5_files ->
-                    // Sort files to ensure consistent ordering, then zip with metadata
-                    def sorted_files = h5_files.sort { it.name }
-                    [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
-                        tuple(meta, model_type, h5_file)
-                    }
+                .map { batch_meta, model_type, h5_files ->
+                    // Convert single file to list for uniform handling
+                    def files_list = h5_files instanceof List ? h5_files : [h5_files]
+                    // Sort to ensure consistent ordering
+                    def sorted_files = files_list.sort { it.name }
+                    // Pair each file with its corresponding metadata by index
+                    [batch_meta, model_type, sorted_files]
+                }
+                .transpose(by: [0, 2])
+                .map { meta, model_type, h5_file ->
+                    tuple(meta, model_type, h5_file)
                 }
 
             ch_filter_patches = FILTER_TILES(ch_filter_h5)

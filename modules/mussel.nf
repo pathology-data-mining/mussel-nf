@@ -18,8 +18,8 @@ workflow EXTRACT_FEATURES {
 
         if (params.tiling.filter_tiles) {
             // Batch slides for filtering feature extraction
-            filter_model_path = params.featurize.model_paths && params.featurize.model_paths[params.tiling.filter_model_type] ? params.featurize.model_paths[params.tiling.filter_model_type] : null
-            filter_model_config = Channel.value([params.tiling.filter_model_type, filter_model_path, null, null])
+            // Use the filter_model_path from tiling config
+            filter_model_config = Channel.value([params.tiling.filter_model_type, params.tiling.filter_model_path, null, null])
 
             ch_filter_slide_batches = ch_samples.combine(ch_patches.h5, by: 0)
                 .collate(params.featurize.slide_batch_size ?: 8)

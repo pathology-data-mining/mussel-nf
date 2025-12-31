@@ -35,11 +35,12 @@ workflow EXTRACT_FEATURES {
             FILTER_FEATURIZE(ch_filter_slide_batches, filter_model_config, false)
 
             // Flatten filter results
+            // Use indexed matching since output files may use staged names
             ch_filter_h5 = FILTER_FEATURIZE.out.h5
                 .flatMap { batch_meta, model_type, h5_files ->
-                    h5_files.collect { h5_file ->
-                        def filename = h5_file.name.replaceAll('.features.h5$', '')
-                        def meta = batch_meta.find { it.slide_id == filename }
+                    // Sort files to ensure consistent ordering, then zip with metadata
+                    def sorted_files = h5_files.sort { it.name }
+                    [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
                 }
@@ -70,22 +71,19 @@ workflow EXTRACT_FEATURES {
             )
 
             // Flatten batch results back to individual slides
-            // Use flatMap to emit individual items from batch
+            // Use indexed matching since output files may use staged names
             ch_pt_out = FEATURIZE_BATCH.out.pt
                 .flatMap { batch_meta, model_type, pt_files ->
-                    // Match each file to its metadata by extracting slide_id from filename
-                    pt_files.collect { pt_file ->
-                        def filename = pt_file.name.replaceAll('.features.pt$', '')
-                        def meta = batch_meta.find { it.slide_id == filename }
+                    def sorted_files = pt_files.sort { it.name }
+                    [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                         tuple(meta, model_type, pt_file)
                     }
                 }
 
             ch_h5_out = FEATURIZE_BATCH.out.h5
                 .flatMap { batch_meta, model_type, h5_files ->
-                    h5_files.collect { h5_file ->
-                        def filename = h5_file.name.replaceAll('.features.h5$', '')
-                        def meta = batch_meta.find { it.slide_id == filename }
+                    def sorted_files = h5_files.sort { it.name }
+                    [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
                 }
@@ -114,20 +112,19 @@ workflow EXTRACT_FEATURES {
             )
 
             // Flatten batch results back to individual slides
+            // Use indexed matching since output files may use staged names
             ch_pt_out = FEATURIZE_BATCH.out.pt
                 .flatMap { batch_meta, model_type, pt_files ->
-                    pt_files.collect { pt_file ->
-                        def filename = pt_file.name.replaceAll('.features.pt$', '')
-                        def meta = batch_meta.find { it.slide_id == filename }
+                    def sorted_files = pt_files.sort { it.name }
+                    [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                         tuple(meta, model_type, pt_file)
                     }
                 }
 
             ch_h5_out = FEATURIZE_BATCH.out.h5
                 .flatMap { batch_meta, model_type, h5_files ->
-                    h5_files.collect { h5_file ->
-                        def filename = h5_file.name.replaceAll('.features.h5$', '')
-                        def meta = batch_meta.find { it.slide_id == filename }
+                    def sorted_files = h5_files.sort { it.name }
+                    [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
                 }
@@ -168,29 +165,27 @@ workflow EXTRACT_FEATURES_ONE_STEP {
         )
 
         // Flatten batch results back to individual slides
+        // Use indexed matching since output files may use staged names
         ch_pt_out = TESSELLATE_FEATURIZE_BATCH.out.pt
             .flatMap { batch_meta, model_type, pt_files ->
-                pt_files.collect { pt_file ->
-                    def filename = pt_file.name.replaceAll('.features.pt$', '')
-                    def meta = batch_meta.find { it.slide_id == filename }
+                def sorted_files = pt_files.sort { it.name }
+                [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                     tuple(meta, model_type, pt_file)
                 }
             }
 
         ch_h5_out = TESSELLATE_FEATURIZE_BATCH.out.h5
             .flatMap { batch_meta, model_type, h5_files ->
-                h5_files.collect { h5_file ->
-                    def filename = h5_file.name.replaceAll('.features.h5$', '')
-                    def meta = batch_meta.find { it.slide_id == filename }
+                def sorted_files = h5_files.sort { it.name }
+                [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                     tuple(meta, model_type, h5_file)
                 }
             }
 
         ch_patches_out = TESSELLATE_FEATURIZE_BATCH.out.patch_h5
             .flatMap { batch_meta, patch_h5_files ->
-                patch_h5_files.collect { patch_h5_file ->
-                    def filename = patch_h5_file.name.replaceAll('.patch.h5$', '')
-                    def meta = batch_meta.find { it.slide_id == filename }
+                def sorted_files = patch_h5_files.sort { it.name }
+                [batch_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
                     tuple(meta, patch_h5_file)
                 }
             }

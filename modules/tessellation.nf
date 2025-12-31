@@ -34,17 +34,22 @@ process TESSELLATE {
     // Use seg_config group if specified, otherwise use individual parameters
     seg_config_str = params.tiling.seg_config_group ? "seg_config=${params.tiling.seg_config_group}" : ""
 
+    // Build individual parameter overrides (only if not using group, or to override group defaults)
+    seg_params = []
+    if (params.tiling.mpp != null) seg_params << "seg_config.mpp=${params.tiling.mpp}"
+    if (params.tiling.patch_size != null) seg_params << "seg_config.patch_size=${params.tiling.patch_size}"
+    if (params.tiling.segment_threshold != null) seg_params << "seg_config.segment_threshold=${params.tiling.segment_threshold}"
+    if (params.tiling.median_blur_ksize != null) seg_params << "seg_config.median_blur_ksize=${params.tiling.median_blur_ksize}"
+    if (params.tiling.morphology_ex_kernel != null) seg_params << "seg_config.morphology_ex_kernel=${params.tiling.morphology_ex_kernel}"
+    if (params.tiling.tissue_area_threshold != null) seg_params << "seg_config.tissue_area_threshold=${params.tiling.tissue_area_threshold}"
+    if (params.tiling.hole_area_threshold != null) seg_params << "seg_config.hole_area_threshold=${params.tiling.hole_area_threshold}"
+    if (params.tiling.max_num_holes != null) seg_params << "seg_config.max_num_holes=${params.tiling.max_num_holes}"
+    seg_params_str = seg_params.join(' \\\n        ')
+
     """
     tessellate \
         ${seg_config_str} \
-        seg_config.mpp=${params.tiling.mpp} \
-        seg_config.patch_size=${params.tiling.patch_size} \
-        seg_config.segment_threshold=${params.tiling.segment_threshold} \
-        seg_config.median_blur_ksize=${params.tiling.median_blur_ksize} \
-        seg_config.morphology_ex_kernel=${params.tiling.morphology_ex_kernel} \
-        seg_config.tissue_area_threshold=${params.tiling.tissue_area_threshold} \
-        seg_config.hole_area_threshold=${params.tiling.hole_area_threshold} \
-        seg_config.max_num_holes=${params.tiling.max_num_holes} \
+        ${seg_params_str} \
         num_workers=${task.cpus} \
         slide_path=${slide} \
         output_h5_path=${meta.slide_id}.patch.h5 \

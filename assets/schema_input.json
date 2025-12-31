@@ -15,9 +15,9 @@
       },
       "slide_path": {
         "type": "string",
-        "pattern": "^\\S+\\.(svs|tiff|tif|ndpi|scn)$",
+        "pattern": "^.+\\.(svs|tiff|tif|ndpi|scn)$",
         "format": "file-path",
-        "errorMessage": "Path to slide must be provided, cannot contain spaces and must have extension '.svs', '.tiff', '.tif', '.ndpi', or '.scn'"
+        "errorMessage": "Path to slide must be provided and must have extension '.svs', '.tiff', '.tif', '.ndpi', or '.scn'"
       },
       "oncotree_code": {
         "type": "string",

@@ -54,6 +54,12 @@
       "help_text": "Identifier for this workflow run",
       "default": "reef"
     },
+    "use_one_step_workflow": {
+      "type": "boolean",
+      "description": "Use one-step tessellation and featurization workflow",
+      "help_text": "When true, uses TESSELLATE_FEATURIZE_BATCH for combined tessellation and feature extraction. When false, uses separate TESSELLATE and FEATURIZE_BATCH processes.",
+      "default": false
+    },
     "tiling": {
       "title": "Tessellation options",
       "type": "object",
@@ -77,6 +83,12 @@
           "type": "boolean",
           "default": false,
           "description": "filter tiles"
+        },
+        "seg_config_group": {
+          "type": ["string", "null"],
+          "description": "Segmentation configuration preset",
+          "help_text": "Use a predefined segmentation configuration: 'default', 'biopsy', 'resection', or 'tcga'. When null, uses individual segmentation parameters.",
+          "enum": [null, "default", "biopsy", "resection", "tcga"]
         },
         "patch_size": {
           "type": "integer",
@@ -154,9 +166,31 @@
           "default": true,
           "description": "use the GPU for feature extraction"
         },
+        "batch_size": {
+          "type": "integer",
+          "default": 64,
+          "description": "Batch size for tile/patch feature extraction"
+        },
+        "slide_batch_size": {
+          "type": "integer",
+          "default": 8,
+          "description": "Number of slides to process together in a batch (controls both Type 2 and Type 3 batching)"
+        },
         "model_paths": {
           "type": "object",
           "description": "paths to models",
+          "additionalProperties": {"type": "string" }
+        },
+        "slide_model_types": {
+          "type": "array",
+          "description": "Slide-level models for aggregation",
+          "items": {
+            "type": "string"
+          }
+        },
+        "slide_model_paths": {
+          "type": "object",
+          "description": "Paths to slide-level models",
           "additionalProperties": {"type": "string" }
         }
       }

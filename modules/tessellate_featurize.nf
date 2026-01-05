@@ -127,8 +127,9 @@ process TESSELLATE_FEATURIZE_BATCH {
 
     secret 'HF_TOKEN'
 
-    publishDir path: "${params.outdir}/${publish_path_base}", mode: "${params.publish_mode}", pattern: "*.{pt,h5}"
-    publishDir path: "${params.outdir}/tiles", mode: "${params.publish_mode}", pattern: "*.patch.h5"
+    publishDir path: "${params.outdir}/${publish_path_base}", mode: "${params.publish_mode}", pattern: "pt/*.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
+    publishDir path: "${params.outdir}/${publish_path_base}", mode: "${params.publish_mode}", pattern: "h5/*.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
+    publishDir path: "${params.outdir}/tiles", mode: "${params.publish_mode}", pattern: "tile_h5/*.h5", saveAs: { fn -> fn.replaceFirst("tile_h5/", "") }
 
     input:
     tuple val(slide_batch), path(slides) // batch with slide files

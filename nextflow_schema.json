@@ -181,6 +181,11 @@
           "description": "paths to models",
           "additionalProperties": {"type": "string" }
         },
+        "model_batch_sizes": {
+          "type": "object",
+          "description": "Per-model batch sizes for feature extraction. Keys are model names (e.g., ctranspath, optimus), values are integers. If not specified, uses default batch_size.",
+          "additionalProperties": {"type": "integer" }
+        },
         "slide_model_types": {
           "type": "array",
           "description": "Slide-level models for aggregation",

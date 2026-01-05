@@ -198,6 +198,13 @@ process TESSELLATE_FEATURIZE_BATCH {
     // 2. How many slides to aggregate together during slide-level aggregation (Type 3 batching)
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
+    // Build model_batch_sizes dict string for Hydra (e.g., "model_batch_sizes={CTRANSPATH:32,OPTIMUS:64}")
+    model_batch_sizes_str = ""
+    if (params.featurize.model_batch_sizes) {
+        def batch_sizes_entries = params.featurize.model_batch_sizes.collect { k, v -> "${k.toUpperCase()}:${v}" }.join(',')
+        model_batch_sizes_str = "model_batch_sizes={${batch_sizes_entries}}"
+    }
+
     // Use seg_config group if specified, otherwise use individual parameters
     seg_config_str = params.tiling.seg_config_group ? "seg_config=${params.tiling.seg_config_group}" : ""
 
@@ -226,6 +233,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         model_type=${model_type.toUpperCase()} ${mpath_str} \
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
         batch_size=${params.featurize.batch_size} \
+        ${model_batch_sizes_str} \
         slide_batch_size=${slide_batch_size} \
         ${slide_model_str} \
         ${aggregation_str} \

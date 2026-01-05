@@ -8,8 +8,8 @@ process FEATURIZE_BATCH {
     publishDir path: "${params.outdir}/${publish_path_base}", mode: "${params.publish_mode}", pattern: "*.{pt,h5}"
 
     input:
-    tuple val(slide_batch), path(slides, stageAs: 'slide_*'), path(patch_h5s, stageAs: '*.patch.h5')
-    each model_config // tuple of [model_type, model_path, slide_model_type, slide_model_path]
+    tuple val(slide_batch), path(slides), path(patch_h5s)
+    each model_config // tuple of [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
     val post_filter // true if coords in h5 are post filter (set to true if no filtering)
 
     output:

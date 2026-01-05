@@ -131,8 +131,8 @@ process TESSELLATE_FEATURIZE_BATCH {
     publishDir path: "${params.outdir}/tiles", mode: "${params.publish_mode}", pattern: "*.patch.h5"
 
     input:
-    tuple val(slide_batch), path(slides, stageAs: 'slide_*') // batch with staged slide files
-    each model_config // tuple of [model_type, model_path, slide_model_type, slide_model_path]
+    tuple val(slide_batch), path(slides) // batch with slide files
+    each model_config // tuple of [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
 
     output:
     tuple val(batch_metadata), val(model_type), path("*.features.pt"), emit: pt
@@ -184,7 +184,7 @@ process TESSELLATE_FEATURIZE_BATCH {
 
     save_h5_param = "save_features_to_h5=true"  // Always save features in one-step workflow
 
-    // Use staged file basenames
+    // Slides are staged with original filenames (no stageAs), so we can use their names directly
     slide_paths_str = slides.collect { it.name }.join(',')
     slide_ids_str = slide_batch.collect { meta, path -> meta.slide_id }.join(',')
 

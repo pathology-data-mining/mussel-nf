@@ -51,16 +51,13 @@ process TESSELLATE_FEATURIZE {
 
     // Filter model configuration (for extracting features before filtering)
     prefilter_model_str = ""
-    model_dir_str = ""
+    prefilter_model_path_str = ""
     classifier_pkl_str = ""
     if (params.tiling.filter_tiles) {
         if (prefilter_model_type) {
             prefilter_model_str = "prefilter_model_type=${prefilter_model_type.toUpperCase()}"
-            // Use model_dir to point to directory containing prefilter model
-            if (prefilter_model_path) {
-                def model_dir = new File(prefilter_model_path).getParent()
-                model_dir_str = "model_dir=${model_dir}"
-            }
+            if (prefilter_model_path)
+                prefilter_model_path_str = "prefilter_model_path=${prefilter_model_path}"
         }
         if (params.tiling.filter_model_path)
             classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
@@ -108,12 +105,12 @@ process TESSELLATE_FEATURIZE {
         output_pt_path=${meta.slide_id}.features.pt \
         intermediate_h5_path=${meta.slide_id}.patch.h5 \
         model_type=${model_type.toUpperCase()} ${mpath_str} \
-        ${model_dir_str} \
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
         batch_size=${params.featurize.batch_size} \
         ${slide_model_str} \
         ${aggregation_str} \
         ${prefilter_model_str} \
+        ${prefilter_model_path_str} \
         ${classifier_pkl_str} \
         classifier_threshold=${params.tiling.filter_threshold} \
         ${save_thumbnail_param} \
@@ -173,16 +170,13 @@ process TESSELLATE_FEATURIZE_BATCH {
 
     // Filter model configuration (for extracting features before filtering)
     prefilter_model_str = ""
-    model_dir_str = ""
+    prefilter_model_path_str = ""
     classifier_pkl_str = ""
     if (params.tiling.filter_tiles) {
         if (prefilter_model_type) {
             prefilter_model_str = "prefilter_model_type=${prefilter_model_type.toUpperCase()}"
-            // Use model_dir to point to directory containing prefilter model
-            if (prefilter_model_path) {
-                def model_dir = new File(prefilter_model_path).getParent()
-                model_dir_str = "model_dir=${model_dir}"
-            }
+            if (prefilter_model_path)
+                prefilter_model_path_str = "prefilter_model_path=${prefilter_model_path}"
         }
         if (params.tiling.filter_model_path)
             classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
@@ -236,6 +230,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         ${slide_model_str} \
         ${aggregation_str} \
         ${prefilter_model_str} \
+        ${prefilter_model_path_str} \
         ${classifier_pkl_str} \
         classifier_threshold=${params.tiling.filter_threshold} \
         ${output_mask_suffix_str} \

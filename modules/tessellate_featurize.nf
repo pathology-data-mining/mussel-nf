@@ -135,9 +135,9 @@ process TESSELLATE_FEATURIZE_BATCH {
     each model_config // tuple of [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
 
     output:
-    tuple val(batch_metadata), val(model_type), path("*.features.pt"), emit: pt
-    tuple val(batch_metadata), val(model_type), path("*.features.h5"), optional: true, emit: h5
-    tuple val(batch_metadata), path("*.patch.h5"), emit: patch_h5
+    tuple val(batch_metadata), val(model_type), path("pt/*.features.pt"), emit: pt
+    tuple val(batch_metadata), val(model_type), path("h5/*.features.h5"), optional: true, emit: h5
+    tuple val(batch_metadata), path("tile_h5/*.patch.h5"), emit: patch_h5
 
     script:
     model_type = model_config[0]

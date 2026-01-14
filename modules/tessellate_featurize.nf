@@ -10,12 +10,15 @@ process TESSELLATE_FEATURIZE {
 
     input:
     tuple val(meta), path(slide)
-    each model_config
+    each model_type_input // Model type string - can be:
+                          // - Patch encoder: 'resnet50', 'ctranspath', 'gigapath', 'virchow', 'virchow2', 'optimus', 'uni', 'uni2h', 'conch1_5', 'clip', 'googlepath'
+                          // - Slide encoder: 'gigapath_slide', 'titan_slide'
+                          // When using slide encoders, the required patch encoder is automatically inferred from params.featurize.slide_to_patch_mapping
 
     output:
-    tuple val(meta), val(model_type), path("${meta.slide_id}.features.pt"), emit: pt
-    tuple val(meta), val(model_type), path("${meta.slide_id}.features.h5"), optional: true, emit: h5
-    tuple val(meta), val(model_type), path("${meta.slide_id}.patch.h5"), emit: patch_h5
+    tuple val(meta), val(model_type_input), path("${meta.slide_id}.features.pt"), emit: pt
+    tuple val(meta), val(model_type_input), path("${meta.slide_id}.features.h5"), optional: true, emit: h5
+    tuple val(meta), val(model_type_input), path("${meta.slide_id}.patch.h5"), emit: patch_h5
     tuple val(meta), val("${model_type_name}_features_tensor_path"), val("${publish_path}/${meta.slide_id}.features.pt"), topic: slide_meta
     tuple val(meta), val("${model_type_name}_features_h5_path"), val("${publish_path}/${meta.slide_id}.features.h5"), optional: true, topic: slide_meta
     tuple val(meta), val("${model_type_name}_tiles_h5_path"), val("${publish_path}/${meta.slide_id}.patch.h5"), topic: slide_meta
@@ -26,12 +29,17 @@ process TESSELLATE_FEATURIZE {
     tuple val(meta), val("mask_path"), val("${publish_path}/${meta.slide_id}.mask.png"), path("${meta.slide_id}.mask.png"), optional: true, topic: slide_meta
 
     script:
-    model_type = model_config[0]
-    model_path = model_config[1]
-    slide_model_type = model_config.size() > 2 ? model_config[2] : null
-    slide_model_path = model_config.size() > 3 ? model_config[3] : null
-    prefilter_model_type = model_config.size() > 4 ? model_config[4] : null
-    prefilter_model_path = model_config.size() > 5 ? model_config[5] : null
+    // Determine if this is a slide-level model and infer the patch encoder
+    slide_model_type = params.featurize.slide_to_patch_mapping && params.featurize.slide_to_patch_mapping[model_type_input] ? model_type_input : null
+    model_type = slide_model_type ? params.featurize.slide_to_patch_mapping[model_type_input] : model_type_input
+
+    // Look up paths from params if available, otherwise models will be downloaded from HF hub
+    model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
+    slide_model_path = slide_model_type && params.featurize.slide_model_paths && params.featurize.slide_model_paths[slide_model_type] ? params.featurize.slide_model_paths[slide_model_type] : null
+
+    // For tessellate, also check if we need a prefilter model
+    prefilter_model_type = params.tiling.filter_tiles ? params.tiling.filter_model_type : null
+    prefilter_model_path = prefilter_model_type && params.featurize.model_paths && params.featurize.model_paths[prefilter_model_type] ? params.featurize.model_paths[prefilter_model_type] : null
 
     model_type_name = slide_model_type ?: model_type
     publish_path = "features/${model_type_name}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
@@ -127,32 +135,46 @@ process TESSELLATE_FEATURIZE_BATCH {
 
     secret 'HF_TOKEN'
 
-    publishDir path: "${params.outdir}/${publish_path_base}", mode: "${params.publish_mode}", pattern: "pt/*.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
-    publishDir path: "${params.outdir}/${publish_path_base}", mode: "${params.publish_mode}", pattern: "h5/*.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
+    // Publish slide encoder features (always created)
+    publishDir path: "${params.outdir}/features/${model_type_name}", mode: "${params.publish_mode}", pattern: "pt/*.features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
+    publishDir path: "${params.outdir}/features/${model_type_name}", mode: "${params.publish_mode}", pattern: "h5/*.features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
+    // Publish patch encoder features (only created when using slide-level model)
+    publishDir path: "${params.outdir}/features/${patch_encoder_name}", mode: "${params.publish_mode}", pattern: "pt/*.patch_features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
+    publishDir path: "${params.outdir}/features/${patch_encoder_name}", mode: "${params.publish_mode}", pattern: "h5/*.patch_features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
     publishDir path: "${params.outdir}/tiles", mode: "${params.publish_mode}", pattern: "tile_h5/*.h5", saveAs: { fn -> fn.replaceFirst("tile_h5/", "") }
 
     input:
     tuple val(slide_batch), path(slides) // batch with slide files
-    each model_config // tuple of [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
+    each model_type_input // Model type string - can be:
+                          // - Patch encoder: 'resnet50', 'ctranspath', 'gigapath', 'virchow', 'virchow2', 'optimus', 'uni', 'uni2h', 'conch1_5', 'clip', 'googlepath'
+                          // - Slide encoder: 'gigapath_slide', 'titan_slide'
+                          // When using slide encoders, the required patch encoder is automatically inferred from params.featurize.slide_to_patch_mapping
 
     output:
-    tuple val(batch_metadata), val(model_type), path("pt/*.features.pt"), emit: pt
-    tuple val(batch_metadata), val(model_type), path("h5/*.features.h5"), optional: true, emit: h5
-    tuple val(batch_metadata), path("tile_h5/*.patch.h5"), emit: patch_h5
+    tuple val(batch_metadata), val(model_type_input), path("pt/*.features.pt"), emit: pt
+    tuple val(batch_metadata), val(model_type_input), path("h5/*.features.h5"), optional: true, emit: h5
+    tuple val(batch_metadata), val(model_type), path("pt/*.patch_features.pt"), optional: true, emit: patch_pt
+    tuple val(batch_metadata), val(model_type), path("h5/*.patch_features.h5"), optional: true, emit: patch_h5
+    tuple val(batch_metadata), path("tile_h5/*.patch.h5"), emit: tile_h5
 
     script:
-    model_type = model_config[0]
-    model_path = model_config[1]
-    slide_model_type = model_config.size() > 2 ? model_config[2] : null
-    slide_model_path = model_config.size() > 3 ? model_config[3] : null
-    prefilter_model_type = model_config.size() > 4 ? model_config[4] : null
-    prefilter_model_path = model_config.size() > 5 ? model_config[5] : null
+    // Determine if this is a slide-level model and infer the patch encoder
+    slide_model_type = params.featurize.slide_to_patch_mapping && params.featurize.slide_to_patch_mapping[model_type_input] ? model_type_input : null
+    model_type = slide_model_type ? params.featurize.slide_to_patch_mapping[model_type_input] : model_type_input
+
+    // Look up paths from params if available, otherwise models will be downloaded from HF hub
+    model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
+    slide_model_path = slide_model_type && params.featurize.slide_model_paths && params.featurize.slide_model_paths[slide_model_type] ? params.featurize.slide_model_paths[slide_model_type] : null
+
+    // For tessellate, also check if we need a prefilter model
+    prefilter_model_type = params.tiling.filter_tiles ? params.tiling.filter_model_type : null
+    prefilter_model_path = prefilter_model_type && params.featurize.model_paths && params.featurize.model_paths[prefilter_model_type] ? params.featurize.model_paths[prefilter_model_type] : null
 
     // Extract metadata for all slides in batch
     batch_metadata = slide_batch.collect { meta, slide -> meta }
 
     model_type_name = slide_model_type ?: model_type
-    publish_path_base = "features/${model_type_name}"
+    patch_encoder_name = model_type
 
     mpath_str = ""
     if (model_path)
@@ -194,9 +216,9 @@ process TESSELLATE_FEATURIZE_BATCH {
     output_thumbnail_suffix_str = params.tiling.save_slide_thumbnail ? "output_thumbnail_suffix=thumbnail.png" : ""
     output_png_dir_suffix_str = params.tiling.save_tile_png ? "output_png_dir_suffix=png" : ""
 
-    // Use slide_batch_size for both:
-    // 1. How many slides to process together in this Nextflow task (Type 2 batching)
-    // 2. How many slides to aggregate together during slide-level aggregation (Type 3 batching)
+    // SLIDE ENCODER BATCHING: When using slide-level models (e.g., gigapath_slide),
+    // this controls how many slide-level feature aggregations are computed together.
+    // This is the batch size passed to the slide encoder model.
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
     // Build model_batch_sizes dict string for Hydra (e.g., "model_batch_sizes={CTRANSPATH:32,OPTIMUS:64}")

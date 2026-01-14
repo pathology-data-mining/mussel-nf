@@ -5,24 +5,33 @@ process FEATURIZE_BATCH {
 
     secret 'HF_TOKEN'
 
-    publishDir path: "${params.outdir}/${publish_path_base}", mode: "${params.publish_mode}", pattern: "*.{pt,h5}"
+    // Publish slide encoder features (always created)
+    publishDir path: "${params.outdir}/features/${model_type_name}", mode: "${params.publish_mode}", pattern: "*.features.{pt,h5}"
+    // Publish patch encoder features (only created when using slide-level model)
+    publishDir path: "${params.outdir}/features/${patch_encoder_name}", mode: "${params.publish_mode}", pattern: "*.patch_features.{pt,h5}"
 
     input:
     tuple val(slide_batch), path(slides), path(patch_h5s)
-    each model_config // tuple of [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
+    each model_type_input // Model type string - can be:
+                          // - Patch encoder: 'resnet50', 'ctranspath', 'gigapath', 'virchow', 'virchow2', 'optimus', 'uni', 'uni2h', 'conch1_5', 'clip', 'googlepath'
+                          // - Slide encoder: 'gigapath_slide', 'titan_slide'
+                          // When using slide encoders, the required patch encoder is automatically inferred from params.featurize.slide_to_patch_mapping
     val post_filter // true if coords in h5 are post filter (set to true if no filtering)
 
     output:
-    tuple val(batch_metadata), val(model_type), path("*.features.pt"), emit: pt
-    tuple val(batch_metadata), val(model_type), path("*.features.h5"), emit: h5
+    tuple val(batch_metadata), val(model_type_input), path("*.features.pt"), emit: pt
+    tuple val(batch_metadata), val(model_type_input), path("*.features.h5"), emit: h5
+    tuple val(batch_metadata), val(model_type), path("*.patch_features.pt"), optional: true, emit: patch_pt
+    tuple val(batch_metadata), val(model_type), path("*.patch_features.h5"), optional: true, emit: patch_h5
 
     script:
-    model_type = model_config[0]
-    model_path = model_config[1]
-    slide_model_type = model_config.size() > 2 ? model_config[2] : null
-    slide_model_path = model_config.size() > 3 ? model_config[3] : null
-    prefilter_model_type = model_config.size() > 4 ? model_config[4] : null
-    prefilter_model_path = model_config.size() > 5 ? model_config[5] : null
+    // Determine if this is a slide-level model and infer the patch encoder
+    slide_model_type = params.featurize.slide_to_patch_mapping && params.featurize.slide_to_patch_mapping[model_type_input] ? model_type_input : null
+    model_type = slide_model_type ? params.featurize.slide_to_patch_mapping[model_type_input] : model_type_input
+
+    // Look up paths from params if available, otherwise models will be downloaded from HF hub
+    model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
+    slide_model_path = slide_model_type && params.featurize.slide_model_paths && params.featurize.slide_model_paths[slide_model_type] ? params.featurize.slide_model_paths[slide_model_type] : null
 
     // Extract metadata for all slides in batch
     batch_metadata = slide_batch.collect { meta, slide, patch_h5 -> meta }
@@ -46,7 +55,7 @@ process FEATURIZE_BATCH {
     }
 
     model_type_name = "${post_filter ? '' : 'prefilter_'}${slide_model_type ?: model_type}"
-    publish_path_base = "features/${model_type_name}"
+    patch_encoder_name = "${post_filter ? '' : 'prefilter_'}${model_type}"
 
     // Build lists of paths for batch processing - use staged file basenames
     // Nextflow stages files in work directory, so we can use basenames directly
@@ -54,9 +63,9 @@ process FEATURIZE_BATCH {
     slide_paths_str = slides.collect { it.name }.join(',')
     slide_ids_str = slide_batch.collect { meta, slide, patch_h5 -> meta.slide_id }.join(',')
 
-    // Use slide_batch_size for both:
-    // 1. How many slides to process together in this Nextflow task (Type 2 batching)
-    // 2. How many slides to aggregate together during slide-level aggregation (Type 3 batching)
+    // SLIDE ENCODER BATCHING: When using slide-level models (e.g., gigapath_slide),
+    // this controls how many slide-level feature aggregations are computed together.
+    // This is the batch size passed to the slide encoder model.
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
     // Build model_batch_sizes dict string for Hydra (e.g., "model_batch_sizes={CTRANSPATH:32,OPTIMUS:64}")

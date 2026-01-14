@@ -20,19 +20,17 @@ workflow EXTRACT_FEATURES {
             // Batch slides for filtering feature extraction
             // Extract features using the feature extraction model (e.g., ctranspath)
             // Then FILTER_TILES will use the classifier_pkl to filter tiles
-            filter_model_type = params.tiling.filter_model_type
-            filter_model_path = params.featurize.model_paths ? params.featurize.model_paths[filter_model_type] : null
-            filter_model_config = Channel.of([filter_model_type, filter_model_path, null, null])
+            filter_model_type = Channel.of(params.tiling.filter_model_type)
 
             ch_filter_slide_batches = ch_samples.combine(ch_patches.h5, by: 0)
-                .collate(params.featurize.slide_batch_size ?: 8)
+                .collate(params.featurize.workflow_batch_size ?: params.featurize.slide_batch_size ?: 8)
                 .map { batch ->
                     def slides = batch.collect { meta, slide, patch_h5 -> slide }
                     def patch_h5s = batch.collect { meta, slide, patch_h5 -> patch_h5 }
                     tuple(batch, slides, patch_h5s)
                 }
 
-            FILTER_FEATURIZE(ch_filter_slide_batches, filter_model_config, false)
+            FILTER_FEATURIZE(ch_filter_slide_batches, filter_model_type, false)
 
             // Flatten filter results
             // Match files to metadata by index since filenames may use staged names
@@ -52,19 +50,12 @@ workflow EXTRACT_FEATURES {
 
             ch_filter_patches = FILTER_TILES(ch_filter_h5)
 
-            // Create a channel with model configs (model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path)
-            ch_model_configs = Channel.fromList(params.featurize.model_types).map { model_type ->
-                model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
-                slide_model_type = params.featurize.slide_model_types ? params.featurize.slide_model_types[0] : null
-                slide_model_path = slide_model_type && params.featurize.slide_model_paths ? params.featurize.slide_model_paths[slide_model_type] : null
-                prefilter_model_type = params.tiling.filter_tiles ? params.tiling.filter_model_type : null
-                prefilter_model_path = prefilter_model_type && params.featurize.model_paths ? params.featurize.model_paths[prefilter_model_type] : null
-                [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
-            }
+            // Just pass model type strings - processes will look up paths from params
+            ch_model_types = Channel.fromList(params.featurize.model_types)
 
-            // Batch slides together for processing
+            // Batch slides together for processing (workflow batching)
             ch_slide_batches = ch_samples.combine(ch_filter_patches.h5, by: 0)
-                .collate(params.featurize.slide_batch_size ?: 8)
+                .collate(params.featurize.workflow_batch_size ?: params.featurize.slide_batch_size ?: 8)
                 .map { batch ->
                     def slides = batch.collect { meta, slide, patch_h5 -> slide }
                     def patch_h5s = batch.collect { meta, slide, patch_h5 -> patch_h5 }
@@ -73,7 +64,7 @@ workflow EXTRACT_FEATURES {
 
             FEATURIZE_BATCH(
                 ch_slide_batches,
-                ch_model_configs,
+                ch_model_types,
                 true
             )
 
@@ -95,19 +86,12 @@ workflow EXTRACT_FEATURES {
                     }
                 }
         } else {
-            // Create a channel with model configs (model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path)
-            ch_model_configs = Channel.fromList(params.featurize.model_types).map { model_type ->
-                model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
-                slide_model_type = params.featurize.slide_model_types ? params.featurize.slide_model_types[0] : null
-                slide_model_path = slide_model_type && params.featurize.slide_model_paths ? params.featurize.slide_model_paths[slide_model_type] : null
-                prefilter_model_type = params.tiling.filter_tiles ? params.tiling.filter_model_type : null
-                prefilter_model_path = prefilter_model_type && params.featurize.model_paths ? params.featurize.model_paths[prefilter_model_type] : null
-                [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
-            }
+            // Just pass model type strings - processes will look up paths from params
+            ch_model_types = Channel.fromList(params.featurize.model_types)
 
-            // Batch slides together for processing
+            // Batch slides together for processing (workflow batching)
             ch_slide_batches = ch_samples.combine(ch_patches.h5, by: 0)
-                .collate(params.featurize.slide_batch_size ?: 8)
+                .collate(params.featurize.workflow_batch_size ?: params.featurize.slide_batch_size ?: 8)
                 .map { batch ->
                     def slides = batch.collect { meta, slide, patch_h5 -> slide }
                     def patch_h5s = batch.collect { meta, slide, patch_h5 -> patch_h5 }
@@ -116,7 +100,7 @@ workflow EXTRACT_FEATURES {
 
             FEATURIZE_BATCH(
                 ch_slide_batches,
-                ch_model_configs,
+                ch_model_types,
                 true
             )
 
@@ -152,19 +136,12 @@ workflow EXTRACT_FEATURES_ONE_STEP {
         ch_samples // tuple val(meta), file(slide)
 
     main:
-        // Create a channel with model configs (model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path)
-        ch_model_configs = Channel.fromList(params.featurize.model_types).map { model_type ->
-            model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
-            slide_model_type = params.featurize.slide_model_types ? params.featurize.slide_model_types[0] : null
-            slide_model_path = slide_model_type && params.featurize.slide_model_paths ? params.featurize.slide_model_paths[slide_model_type] : null
-            prefilter_model_type = params.tiling.filter_tiles ? params.tiling.filter_model_type : null
-            prefilter_model_path = prefilter_model_type && params.featurize.model_paths ? params.featurize.model_paths[prefilter_model_type] : null
-            [model_type, model_path, slide_model_type, slide_model_path, prefilter_model_type, prefilter_model_path]
-        }
+        // Just pass model type strings - processes will look up paths from params
+        ch_model_types = Channel.fromList(params.featurize.model_types)
 
-        // Batch slides together for one-step tessellate + featurize
+        // Batch slides together for one-step tessellate + featurize (workflow batching)
         ch_slide_batches = ch_samples
-            .collate(params.featurize.slide_batch_size ?: 8)
+            .collate(params.featurize.workflow_batch_size ?: params.featurize.slide_batch_size ?: 8)
             .map { batch ->
                 def slides = batch.collect { meta, slide -> slide }
                 tuple(batch, slides)
@@ -172,7 +149,7 @@ workflow EXTRACT_FEATURES_ONE_STEP {
 
         TESSELLATE_FEATURIZE_BATCH(
             ch_slide_batches,
-            ch_model_configs
+            ch_model_types
         )
 
         // Flatten batch results back to individual slides

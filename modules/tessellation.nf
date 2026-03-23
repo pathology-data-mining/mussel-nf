@@ -3,6 +3,8 @@ process TESSELLATE {
     label "bigTask"
     label "cpuTask"
 
+    scratch params.scratch_dir ?: false
+
     publishDir path: "${params.outdir}/${publish_path}", mode: "${params.publish_mode}"
 
     input:

@@ -4,6 +4,8 @@ process TESSELLATE_FEATURIZE {
     label "gpuTask"
     label "parallelTask"
 
+    scratch params.scratch_dir ?: false
+
     secret 'HF_TOKEN'
 
     publishDir path: "${params.outdir}/${publish_path}", mode: "${params.publish_mode}"

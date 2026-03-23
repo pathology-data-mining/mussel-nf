@@ -43,6 +43,11 @@
           "type": "boolean",
           "description": "include first 4 digits of the slide ID in the publish dir",
           "default": true
+        },
+        "scratch_dir": {
+          "type": "string",
+          "description": "Path to fast local scratch storage for WSI caching (e.g., /scratch/$USER). When set, input WSI files are staged to this directory before processing.",
+          "default": null
         }
       }
     }

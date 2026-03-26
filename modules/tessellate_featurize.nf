@@ -63,6 +63,7 @@ process TESSELLATE_FEATURIZE {
     prefilter_model_str = ""
     prefilter_model_path_str = ""
     classifier_pkl_str = ""
+    classifier_threshold_str = ""
     if (params.tiling.filter_tiles) {
         if (prefilter_model_type) {
             prefilter_model_str = "prefilter_model_type=${prefilter_model_type.toUpperCase()}"
@@ -71,6 +72,7 @@ process TESSELLATE_FEATURIZE {
         }
         if (params.tiling.filter_model_path)
             classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
+        classifier_threshold_str = "classifier_threshold=${params.tiling.filter_threshold}"
     }
 
     save_tile_param = ""
@@ -122,7 +124,7 @@ process TESSELLATE_FEATURIZE {
         ${prefilter_model_str} \
         ${prefilter_model_path_str} \
         ${classifier_pkl_str} \
-        classifier_threshold=${params.tiling.filter_threshold} \
+        ${classifier_threshold_str} \
         ${save_thumbnail_param} \
         ${save_tile_param} \
         ${stitch_tile_param} \
@@ -197,6 +199,7 @@ process TESSELLATE_FEATURIZE_BATCH {
     prefilter_model_str = ""
     prefilter_model_path_str = ""
     classifier_pkl_str = ""
+    classifier_threshold_str = ""
     if (params.tiling.filter_tiles) {
         if (prefilter_model_type) {
             prefilter_model_str = "prefilter_model_type=${prefilter_model_type.toUpperCase()}"
@@ -205,6 +208,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         }
         if (params.tiling.filter_model_path)
             classifier_pkl_str = "classifier_pkl=${params.tiling.filter_model_path}"
+        classifier_threshold_str = "classifier_threshold=${params.tiling.filter_threshold}"
     }
 
     save_h5_param = "save_features_to_h5=true"  // Always save features in one-step workflow
@@ -265,7 +269,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         ${prefilter_model_str} \
         ${prefilter_model_path_str} \
         ${classifier_pkl_str} \
-        classifier_threshold=${params.tiling.filter_threshold} \
+        ${classifier_threshold_str} \
         ${output_mask_suffix_str} \
         ${output_grid_mask_suffix_str} \
         ${output_thumbnail_suffix_str} \

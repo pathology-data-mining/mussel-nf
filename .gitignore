@@ -1,2 +1,9 @@
 work/
 .nextflow*
+tests/data/*.svs
+tests/data/*.tiff
+tests/data/*.tif
+tests/data/*.ndpi
+tests/data/*.scn
+tests/results/
+tests/results_two_step/

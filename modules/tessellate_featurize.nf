@@ -20,7 +20,7 @@ process TESSELLATE_FEATURIZE {
     output:
     tuple val(meta), val(model_type_input), path("${meta.slide_id}.features.pt"), emit: pt
     tuple val(meta), val(model_type_input), path("${meta.slide_id}.features.h5"), optional: true, emit: h5
-    tuple val(meta), val(model_type_input), path("${meta.slide_id}.patch.h5"), emit: patch_h5
+    tuple val(meta), val(model_type_input), path("${meta.slide_id}.patch.h5"), emit: tile_h5
     tuple val(meta), val("${model_type_name}_features_tensor_path"), val("${publish_path}/${meta.slide_id}.features.pt"), topic: slide_meta
     tuple val(meta), val("${model_type_name}_features_h5_path"), val("${publish_path}/${meta.slide_id}.features.h5"), optional: true, topic: slide_meta
     tuple val(meta), val("${model_type_name}_tiles_h5_path"), val("${publish_path}/${meta.slide_id}.patch.h5"), topic: slide_meta
@@ -57,6 +57,8 @@ process TESSELLATE_FEATURIZE {
         if (slide_model_path)
             slide_model_str += " slide_model_path=${slide_model_path}"
         aggregation_str = "aggregation_method=model"
+    } else {
+        aggregation_str = "aggregation_method=identity"
     }
 
     // Filter model configuration (for extracting features before filtering)

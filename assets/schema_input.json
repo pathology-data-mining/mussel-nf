@@ -15,7 +15,7 @@
       },
       "slide_path": {
         "type": "string",
-        "pattern": "^.+\\.(svs|tiff|tif|ndpi|scn)$",
+        "pattern": "^[^\n]+\\.(svs|tiff|tif|ndpi|scn)$",
         "format": "file-path",
         "errorMessage": "Path to slide must be provided and must have extension '.svs', '.tiff', '.tif', '.ndpi', or '.scn'"
       },

@@ -170,7 +170,7 @@ workflow EXTRACT_FEATURES_ONE_STEP {
                 }
             }
 
-        ch_patches_out = TESSELLATE_FEATURIZE_BATCH.out.patch_h5
+        ch_patches_out = TESSELLATE_FEATURIZE_BATCH.out.tile_h5
             .flatMap { batch_meta, patch_h5_files ->
                 def sorted_files = patch_h5_files.sort { it.name }
                 [batch_meta, sorted_files].transpose().collect { meta, patch_h5_file ->

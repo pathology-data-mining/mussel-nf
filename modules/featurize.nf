@@ -21,6 +21,7 @@ process FEATURIZE_BATCH {
     output:
     tuple val(batch_metadata), val(model_type_input), path("*.features.pt"), emit: pt
     tuple val(batch_metadata), val(model_type_input), path("*.features.h5"), emit: h5
+    // Patch-level features are only produced when using slide-level encoders (optional)
     tuple val(batch_metadata), val(model_type), path("*.patch_features.pt"), optional: true, emit: patch_pt
     tuple val(batch_metadata), val(model_type), path("*.patch_features.h5"), optional: true, emit: patch_h5
 

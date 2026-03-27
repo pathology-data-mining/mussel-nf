@@ -1,82 +1,107 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.1.2).
 
 ## Requirements
 
 * Unix-like operating system
-* Java 11
+* Java 17+
+* Nextflow ≥ 24.x (uses [nf-schema](https://nextflow-io.github.io/nf-schema/) plugin)
+* One of: Docker, Apptainer, or a Conda/Mamba environment
 
 ## Quickstart
 
-1. Install docker
-
-2. Install nextflow:
-    ```
+1. Install Nextflow:
+    ```bash
     curl -s https://get.nextflow.io | bash
     ```
 
-3. Launch the pipeline execution using docker
-    ```
-    ./nextflow run pathology-data-mining/mussel-nf -profile standard,docker --samples_csv samples.csv
-    ```
-    `samples.csv` is a csv file with three named columns: `slide_id`, `slide_path`, and `oncotree_code`.
-        * `slide_id`: slide ID
-        * `slide_path`: path to slide
-        * `oncotree_code`: Oncotree code. Optional column for the QuiltNet workflow. If not specified, quiltnet uses `params.quiltnet_default_classes`.
+2. Launch the pipeline:
+    ```bash
+    # Local with Docker
+    nextflow run main.nf -profile standard,docker --samples_csv samples.csv
 
-4. When the execution completes, results will be in the `params.outdir` directory
+    # HPC cluster with Apptainer
+    nextflow run main.nf -profile cluster,slurm,apptainer --samples_csv samples.csv
+
+    # Resume a previous run
+    nextflow run main.nf -profile standard,docker --samples_csv samples.csv -resume
+    ```
+
+    `samples.csv` must have columns `slide_id` and `slide_path` (required), plus optional `oncotree_code`.
+    Accepted slide extensions: `.svs`, `.tiff`, `.tif`, `.ndpi`, `.scn`.
+
+3. When the execution completes, results will be in `params.outdir` (default: `results/`).
 
 ## Misc Notes
 
-* See full parameters with `--help` or `--helpFull` option.
-* To use certain models, e.g. `CTransPath`, `params.featurize.model_paths.{model_type}` must be set to the full path of the model.
-* Set `params.publish_slide_prefix` to true to use a slide prefix in the publish directory.
-* The pipeline outputs a manifest automatically in `params.outdir`, but it can
-  also be manually built with `scripts/create_manifest.py`. Partial manifest
-  results can be found in `{params.outdir}/tmp`.
-* If using docker, it's best to keep the models in the docker container, despite how large they can be.
+* See full parameters with `--help` or `--helpFull`.
+* To use gated HuggingFace models (e.g. UNI, Virchow), set the `HF_TOKEN` Nextflow secret:
+  `nextflow secrets set HF_TOKEN <token>`
+* To use models from local paths instead of downloading, set `params.featurize.model_paths.{model_type}`.
+* Set `params.publish_slide_prefix = true` to nest published files under a 4-char slide ID prefix.
+* The pipeline auto-generates a manifest CSV in `params.outdir`. It can also be rebuilt manually
+  with `scripts/create_manifest.py`.
+* On shared HPC systems, redirect caches to avoid filling home directories:
+  ```bash
+  export UV_CACHE_DIR=/path/to/large/mount/.uv
+  export HF_HOME=/path/to/large/mount/.hf
+  ```
+* Pre-download models before launching at scale — parallel jobs all hitting HuggingFace simultaneously
+  causes race conditions. Run a single-slide dry-run first.
+* `params.featurize.workflow_batch_size` (default: 8) controls how many slides are grouped into a
+  single Nextflow task, reducing scheduler overhead.
 
 ## Workflows
 
-The standard workflow tessellates and extracts features for the specified `params.model_types`.
+The standard workflow tessellates slides and extracts features for `params.featurize.model_types`.
+
+### One-step vs two-step execution
+
+* **One-step** (`params.use_one_step_workflow = true`, default): tessellation and feature extraction
+  happen in a single task via `tessellate_extract_features`. More efficient for most use cases.
+* **Two-step** (`params.use_one_step_workflow = false`): separate `TESSELLATE` → `FEATURIZE_BATCH`
+  tasks. Useful when reusing pre-tessellated tiles.
 
 ### Tile filtering
 
+When `params.tiling.filter_tiles = true` (default: `false`):
+
 1. Tessellation
-
-2. Feature extraction for `params.tiling.filter_model_type`
-
-3. Filter tiles using `mussel.cli.filter_features`
-
+2. Feature extraction for `params.tiling.filter_model_type` (default: `ctranspath`)
+3. Filter tiles using a classifier (`.pkl` at `params.tiling.filter_model_path`, threshold `params.tiling.filter_threshold`)
 4. Feature extraction for `params.featurize.model_types`
 
-### CLIP-based models
+### CLIP-based annotation
 
-When a clip-based model is specified (for now, only `quiltnet` is supported),
-the standard workflow runs in addition to tile annotation, and tile caching.
-Default annotation classes can be specified (`params.clip.default_classes`) or the
-classes can be determined from `params.clip.oncotree_class_csv` that maps oncotree codes to
-classes and `oncotree_code` in the sample sheet. The optional
-`params.clip.oncotree_class_csv` has the format of two columns: oncotree code
-and class.
+When `params.clip.model_types` is non-empty (e.g. `['quiltnet']`), the standard feature extraction
+workflow runs, then tile annotation and tile caching are performed.
+
+Default annotation classes are set via `params.clip.default_classes`, or per oncotree code via
+`params.clip.oncotree_class_csv` (two columns: `oncotree_code`, `class`). The sample sheet
+`oncotree_code` column is used to look up classes per slide.
 
 ### Linear probe benchmarking
 
-If `params.linear_probe.annotations_csv` is specified, the linear probe benchmarking workflow will
-run. The csv must have two named columns: `slide_id` and `annotation_bmp_path`.
+If `params.linear_probe.annotations_csv` is specified, the linear probe benchmarking workflow runs.
+The CSV must have columns `slide_id` and `annotation_bmp_path`.
 
 1. Tessellation
-
 2. Feature extraction
+3. Map tile coordinates to annotation classes using the BMP mask and `params.linear_probe.annotation_class_mapping_yaml`
+4. Combine per-slide annotation mappings
+5. Benchmark logistic regression classifiers
 
-3. Map feature tiles to annotation classes using the annotation bmp file (in
-   `params.linear_probe.annotations_csv`) and `params.linear_probe.annotation_class_mapping_yaml`.
 
-4. Combine annotation tile mappings
+## Integration tests
 
-5. Benchmark linear models
+A single-slide integration test is included for both workflow modes:
 
+```bash
+bash tests/run_integration_test.sh
+```
+
+Requires `tests/data/1079807.svs` to be present (not tracked by git — copy or symlink a real slide file).
 
 ## Azure Batch support
 

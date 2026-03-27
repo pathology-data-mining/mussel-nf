@@ -10,7 +10,9 @@
       "type": "object",
       "fa_icon": "fas fa-terminal",
       "description": "Define where the pipeline should find input data and save output data.",
-      "required": ["outdir"],
+      "required": [
+        "outdir"
+      ],
       "properties": {
         "outdir": {
           "type": "string",
@@ -22,7 +24,14 @@
         "publish_mode": {
           "type": "string",
           "default": "copy",
-          "enum": ["copy", "copyNoFollow", "link", "move", "rellink", "symlink"],
+          "enum": [
+            "copy",
+            "copyNoFollow",
+            "link",
+            "move",
+            "rellink",
+            "symlink"
+          ],
           "description": "mode used to publish output files"
         },
         "samples_csv": {
@@ -90,10 +99,19 @@
           "description": "filter tiles"
         },
         "seg_config_group": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Segmentation configuration preset",
           "help_text": "Use a predefined segmentation configuration: 'default', 'biopsy', 'resection', or 'tcga'. When null, uses individual segmentation parameters.",
-          "enum": [null, "default", "biopsy", "resection", "tcga"]
+          "enum": [
+            null,
+            "default",
+            "biopsy",
+            "resection",
+            "tcga"
+          ]
         },
         "patch_size": {
           "type": "integer",
@@ -160,10 +178,19 @@
         "model_types": {
           "type": "array",
           "description": "models to use for feature extraction",
-          "default": ["optimus"],
+          "default": [
+            "optimus"
+          ],
           "items": {
             "type": "string",
-            "enum": ["quiltnet", "gigapath", "ctranspath", "resnet50", "virchow", "optimus"]
+            "enum": [
+              "quiltnet",
+              "gigapath",
+              "ctranspath",
+              "resnet50",
+              "virchow",
+              "optimus"
+            ]
           }
         },
         "use_gpu": {
@@ -184,17 +211,23 @@
         "model_paths": {
           "type": "object",
           "description": "paths to models",
-          "additionalProperties": {"type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "model_batch_sizes": {
           "type": "object",
           "description": "Per-model batch sizes for feature extraction. Keys are model names (e.g., ctranspath, optimus), values are integers. If not specified, uses default batch_size.",
-          "additionalProperties": {"type": "integer" }
+          "additionalProperties": {
+            "type": "integer"
+          }
         },
         "slide_model_paths": {
           "type": "object",
           "description": "Paths to slide-level models",
-          "additionalProperties": {"type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },
@@ -206,12 +239,18 @@
         "model_types": {
           "type": "array",
           "description": "models that are designated as CLIP-based",
-          "default": ["quiltnet"]
+          "default": [
+            "quiltnet"
+          ]
         },
         "default_classes": {
           "type": "array",
           "description": "default classes to use for prompt-engineering",
-          "default": ["invasive carcinoma", "stroma", "other"]
+          "default": [
+            "invasive carcinoma",
+            "stroma",
+            "other"
+          ]
         },
         "oncotree_class_csv": {
           "type": "string",
@@ -240,42 +279,6 @@
         "annotation_class_mapping_yaml": {
           "type": "string",
           "description": "mapping of annotation bmp IDs to class"
-        }
-      }
-    },
-    "tessellate_featurize": {
-      "title": "Combined tessellation and featurization options",
-      "type": "object",
-      "description": "Options for combined tessellation and feature extraction",
-      "properties": {
-        "use_gpu": {
-          "type": "boolean",
-          "default": true,
-          "description": "use the GPU for feature extraction"
-        },
-        "batch_size": {
-          "type": "integer",
-          "default": 64,
-          "description": "batch size for feature extraction"
-        },
-        "slide_batch_size": {
-          "type": "integer",
-          "default": 8,
-          "description": "number of slides to process in a batch"
-        },
-        "classifier_pkl": {
-          "type": ["string", "null"],
-          "description": "path to classifier pickle file"
-        },
-        "classifier_threshold": {
-          "type": "number",
-          "default": 0.75,
-          "description": "threshold for classifier"
-        },
-        "save_features_to_h5": {
-          "type": "boolean",
-          "default": true,
-          "description": "save features to HDF5 format"
         }
       }
     }

@@ -153,6 +153,35 @@
           "default": 2,
           "description": "maximum number of holes"
         },
+        "overlap": {
+          "type": "integer",
+          "default": 0,
+          "description": "Patch overlap in pixels."
+        },
+        "min_tissue_proportion": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Minimum fraction of a patch that must be tissue to be kept."
+        },
+        "remove_artifacts": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use GrandQC artifact remover to filter artifact regions before tessellation."
+        },
+        "remove_penmarks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Remove pen mark regions before tessellation."
+        },
+        "seg_model": {
+          "type": "string",
+          "default": "classic",
+          "enum": [
+            "classic",
+            "neural"
+          ],
+          "description": "Segmentation model to use for tissue detection."
+        },
         "save_slide_thumbnail": {
           "type": "boolean",
           "default": false,
@@ -190,7 +219,8 @@
               "resnet50",
               "virchow",
               "optimus"
-            ]
+            ],
+            "description": "Patch encoders: resnet50, ctranspath, gigapath, virchow, virchow2, optimus, hoptimus1, h0mini, uni, uni2h, conch1_5, clip, googlepath, phikon, phikon_v2, midnight12k, gpfm, hibou_l. Slide encoders: gigapath_slide, titan_slide, prism_slide, feather_slide, chief_slide, madeleine_slide."
           }
         },
         "use_gpu": {

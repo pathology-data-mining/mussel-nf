@@ -1,6 +1,6 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.1.2).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (tracking `trident-features` branch, Mussel v1.2.0).
 
 ## Requirements
 
@@ -32,6 +32,24 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
     Accepted slide extensions: `.svs`, `.tiff`, `.tif`, `.ndpi`, `.scn`.
 
 3. When the execution completes, results will be in `params.outdir` (default: `results/`).
+
+## Supported Models
+
+**Patch encoders** (`params.featurize.model_types`):
+`resnet50`, `ctranspath`, `gigapath`, `virchow`, `virchow2`, `optimus`, `hoptimus1`, `h0mini`, `uni`, `uni2h`, `conch1_5`, `clip`, `googlepath`, `phikon`, `phikon_v2`, `midnight12k`, `gpfm`, `hibou_l`
+
+**Slide encoders** (specified in `model_types`; patch encoder auto-resolved):
+
+| Model key | Patch encoder |
+|---|---|
+| `gigapath_slide` | `gigapath` |
+| `titan_slide` | `conch1_5` |
+| `prism_slide` | `virchow` |
+| `feather_slide` | `conch1_5` |
+| `chief_slide` | `ctranspath` |
+| `madeleine_slide` | `clip` |
+
+See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 
 ## Misc Notes
 

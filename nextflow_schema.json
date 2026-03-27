@@ -203,6 +203,11 @@
           "default": 64,
           "description": "Batch size for tile/patch feature extraction"
         },
+        "workflow_batch_size": {
+          "type": "integer",
+          "default": 8,
+          "description": "Number of slides grouped into a single Nextflow task. Reduces scheduler overhead."
+        },
         "slide_batch_size": {
           "type": "integer",
           "default": 8,

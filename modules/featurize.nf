@@ -69,13 +69,6 @@ process FEATURIZE_BATCH {
     // This is the batch size passed to the slide encoder model.
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
-    // Build model_batch_sizes dict string for Hydra (e.g., "model_batch_sizes={CTRANSPATH:32,OPTIMUS:64}")
-    model_batch_sizes_str = ""
-    if (params.featurize.model_batch_sizes) {
-        def batch_sizes_entries = params.featurize.model_batch_sizes.collect { k, v -> "${k.toUpperCase()}:${v}" }.join(',')
-        model_batch_sizes_str = "model_batch_sizes={${batch_sizes_entries}}"
-    }
-
     """
     extract_features \
         patch_h5_paths='[${patch_h5_paths_str}]' \
@@ -86,7 +79,6 @@ process FEATURIZE_BATCH {
         model_type=${mtype.toUpperCase()} ${mpath_str} \
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
         batch_size=${params.featurize.batch_size ?: 64} \
-        ${model_batch_sizes_str} \
         slide_batch_size=${slide_batch_size} \
         ${slide_model_str} \
         ${aggregation_str}

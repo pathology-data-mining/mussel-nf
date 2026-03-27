@@ -69,6 +69,11 @@ process FEATURIZE_BATCH {
     // This is the batch size passed to the slide encoder model.
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
+    // Resolve per-model batch size override, falling back to global default
+    batch_size = (params.featurize.model_batch_sizes && params.featurize.model_batch_sizes[mtype.toUpperCase()])
+        ? params.featurize.model_batch_sizes[mtype.toUpperCase()]
+        : (params.featurize.batch_size ?: 64)
+
     """
     extract_features \
         patch_h5_paths='[${patch_h5_paths_str}]' \
@@ -78,7 +83,7 @@ process FEATURIZE_BATCH {
         num_workers=${task.cpus} \
         model_type=${mtype.toUpperCase()} ${mpath_str} \
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
-        batch_size=${params.featurize.batch_size ?: 64} \
+        batch_size=${batch_size} \
         slide_batch_size=${slide_batch_size} \
         ${slide_model_str} \
         ${aggregation_str}

@@ -82,21 +82,21 @@
         "filter_model_type": {
           "type": "string",
           "default": "ctranspath",
-          "description": "filter tiles using features extracted with this model"
+          "description": "Patch encoder used to extract features for legacy tile filtering (e.g. ctranspath)."
         },
         "filter_model_path": {
           "type": "string",
-          "description": "pkl file containing model used to filter tiles"
+          "description": "Path to the .pkl sklearn classifier used by legacy tile filtering."
         },
         "filter_threshold": {
           "type": "number",
           "default": 0.75,
-          "description": "threshold to use for filtering tiles"
+          "description": "Confidence threshold for the legacy tile classifier (0\u20131). Tiles below this score are discarded."
         },
         "filter_tiles": {
           "type": "boolean",
           "default": false,
-          "description": "filter tiles"
+          "description": "Enable legacy classifier-based tile filtering. After tessellation, extracts patch features with filter_model_type and applies a .pkl classifier to discard non-tissue tiles."
         },
         "seg_config_group": {
           "type": [
@@ -156,22 +156,22 @@
         "overlap": {
           "type": "integer",
           "default": 0,
-          "description": "Patch overlap in pixels."
+          "description": "Patch overlap in pixels. Default 0 (no overlap). Requires Mussel v1.2.0+."
         },
         "min_tissue_proportion": {
           "type": "number",
           "default": 0.0,
-          "description": "Minimum fraction of a patch that must be tissue to be kept."
+          "description": "Minimum fraction of a patch that must be tissue to be retained. Default 0.0 (keep all). Requires Mussel v1.2.0+."
         },
         "remove_artifacts": {
           "type": "boolean",
           "default": false,
-          "description": "Use GrandQC artifact remover to filter artifact regions before tessellation."
+          "description": "Use GrandQC neural artifact remover to exclude artifact regions from the tissue mask during tessellation. Does not require a separate classifier model. Requires Mussel v1.2.0+."
         },
         "remove_penmarks": {
           "type": "boolean",
           "default": false,
-          "description": "Remove pen mark regions before tessellation."
+          "description": "Detect and exclude pen mark regions before tessellation. Requires Mussel v1.2.0+."
         },
         "seg_model": {
           "type": "string",
@@ -180,7 +180,7 @@
             "classic",
             "neural"
           ],
-          "description": "Segmentation model to use for tissue detection."
+          "description": "Tissue segmentation model used during tessellation: classic (threshold-based, default) or neural (neural network). Requires Mussel v1.2.0+."
         },
         "save_slide_thumbnail": {
           "type": "boolean",

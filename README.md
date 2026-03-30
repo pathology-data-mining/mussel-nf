@@ -83,12 +83,30 @@ The standard workflow tessellates slides and extracts features for `params.featu
 
 ### Tile filtering
 
-When `params.tiling.filter_tiles = true` (default: `false`):
+There are two independent mechanisms for filtering out non-tissue or low-quality tiles:
+
+#### Legacy classifier-based filtering (`params.tiling.filter_tiles`)
+
+A post-tessellation step that uses a pre-trained sklearn classifier to score tiles:
 
 1. Tessellation
-2. Feature extraction for `params.tiling.filter_model_type` (default: `ctranspath`)
-3. Filter tiles using a classifier (`.pkl` at `params.tiling.filter_model_path`, threshold `params.tiling.filter_threshold`)
-4. Feature extraction for `params.featurize.model_types`
+2. Feature extraction using `params.tiling.filter_model_type` (default: `ctranspath`)
+3. Classify tiles with the `.pkl` model at `params.tiling.filter_model_path`; discard tiles below `params.tiling.filter_threshold`
+4. Feature extraction for `params.featurize.model_types` on surviving tiles
+
+Requires a pre-trained `.pkl` classifier. Set `filter_tiles = true` to enable.
+
+#### Segmentation-integrated artifact removal (`params.tiling.remove_artifacts` / `remove_penmarks`) — v1.2.0+
+
+These options remove artifacts **during tessellation** by refining the tissue mask before patches are extracted. No separate classifier model is needed.
+
+- **`remove_artifacts`**: runs the GrandQC neural artifact remover to exclude ink, air bubbles, and other slide artifacts from the tissue mask
+- **`remove_penmarks`**: detects and excludes pen mark regions before tessellation
+- **`seg_model = 'neural'`**: use neural network tissue segmentation instead of the classic threshold-based approach
+- **`min_tissue_proportion`**: drop patches where less than this fraction of pixels are tissue (default `0.0`)
+- **`overlap`**: extract overlapping patches (pixels, default `0`)
+
+These options can be combined with legacy tile filtering or used independently.
 
 ### CLIP-based annotation
 

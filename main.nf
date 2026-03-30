@@ -81,6 +81,9 @@ workflow {
 
     if (params.linear_probe.annotations_csv) {
         ch_annotations = Channel.fromList(samplesheetToList(params.linear_probe.annotations_csv, "assets/schema_annotations.json"))
+        if (!params.linear_probe.annotation_class_mapping_yaml) {
+            log.warn "params.linear_probe.annotation_class_mapping_yaml is not set — linear probe benchmarking will be skipped"
+        }
     }
 
     if (params.samples_csv_watch_path) {

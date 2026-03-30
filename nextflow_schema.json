@@ -284,6 +284,50 @@
         "annotation_class_mapping_yaml": {
           "type": "string",
           "description": "mapping of annotation bmp IDs to class"
+        },
+        "test_size": {
+          "type": "number",
+          "default": 0.2,
+          "description": "Fraction of annotated tiles held out for testing the logistic regression classifier."
+        },
+        "val_size": {
+          "type": "number",
+          "default": 0.1,
+          "description": "Fraction of annotated tiles used for validation during logistic regression training."
+        },
+        "random_state": {
+          "type": "integer",
+          "default": 42,
+          "description": "Random seed for train/val/test split reproducibility."
+        },
+        "annotation_percent_filter_threshold": {
+          "type": "number",
+          "default": 0.5,
+          "description": "Minimum fraction of annotated pixels required in a tile for it to be included in training."
+        },
+        "C": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Inverse regularization strength for logistic regression (smaller = stronger regularization)."
+        },
+        "max_iter": {
+          "type": "integer",
+          "default": 5000,
+          "description": "Maximum number of solver iterations for logistic regression."
+        },
+        "penalty": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "enum": [
+            "l1",
+            "l2",
+            "elasticnet",
+            null
+          ],
+          "description": "Regularization penalty type for logistic regression. Null uses the solver default."
         }
       }
     }

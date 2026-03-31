@@ -1,6 +1,6 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (tracking `trident-features` branch, Mussel v1.2.0).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.2.0).
 
 ## Requirements
 

@@ -175,12 +175,11 @@
         },
         "seg_model": {
           "type": "string",
-          "default": "classic",
           "enum": [
             "classic",
             "neural"
           ],
-          "description": "Tissue segmentation model used during tessellation: classic (threshold-based, default) or neural (neural network). Requires Mussel v1.2.0+."
+          "description": "Tissue segmentation model used during tessellation: classic (threshold-based) or neural (neural network). If unset, Mussel uses its own default (classic) or the seg_config_group preset value. Requires Mussel v1.2.0+."
         },
         "save_slide_thumbnail": {
           "type": "boolean",

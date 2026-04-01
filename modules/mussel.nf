@@ -7,6 +7,7 @@ include { TESSELLATE; FILTER_TILES } from './tessellation'
 
 include { TESSELLATE_FEATURIZE_BATCH } from './tessellate_featurize'
 
+include { WDS_SHARD } from './wds'
 
 
 workflow EXTRACT_FEATURES {
@@ -212,6 +213,45 @@ workflow MUSSEL {
                 ch_samples,
                 ch_features,
                 ch_patches)
+        }
+
+        // ── WebDataset sharding (opt-in) ──────────────────────────────────────
+        if (params.wds.enabled) {
+            // Determine group key per slide: oncotree_code or the fixed string "all"
+            ch_pt_keyed = ch_extract_feat.pt.map { meta, model_type, pt_file ->
+                def group = (params.wds.group_by_oncotree && meta.oncotree_code)
+                    ? meta.oncotree_code
+                    : "all"
+                tuple(group, model_type, meta.slide_id, pt_file)
+            }
+
+            if (params.wds.shard_h5) {
+                // Join pt and h5 channels by (group, model_type, slide_id)
+                ch_h5_keyed = ch_extract_feat.h5.map { meta, model_type, h5_file ->
+                    def group = (params.wds.group_by_oncotree && meta.oncotree_code)
+                        ? meta.oncotree_code
+                        : "all"
+                    tuple(group, model_type, meta.slide_id, h5_file)
+                }
+
+                // Collect per (group, model_type) — wait for all slides in each group
+                ch_wds_input = ch_pt_keyed
+                    .join(ch_h5_keyed, by: [0, 1, 2])         // key: [group, model_type, slide_id]
+                    .groupTuple(by: [0, 1])                    // group by (group, model_type)
+                    .map { group, model_type, slide_ids, pt_files, h5_files ->
+                        tuple(group, model_type, slide_ids, pt_files, h5_files)
+                    }
+            } else {
+                // pt only — collect per (group, model_type)
+                ch_wds_input = ch_pt_keyed
+                    .groupTuple(by: [0, 1])                    // group by (group, model_type)
+                    .map { group, model_type, slide_ids, pt_files ->
+                        // Pass an empty list for h5_files so WDS_SHARD input tuple is consistent
+                        tuple(group, model_type, slide_ids, pt_files, [])
+                    }
+            }
+
+            WDS_SHARD(ch_wds_input)
         }
 }
 

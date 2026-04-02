@@ -216,6 +216,7 @@ workflow MUSSEL {
         }
 
         // ── WebDataset sharding (opt-in) ──────────────────────────────────────
+        ch_wds_shards = Channel.empty()
         if (params.wds.enabled) {
             // Determine group key per slide: oncotree_code or the fixed string "all"
             ch_pt_keyed = ch_extract_feat.pt.map { meta, model_type, pt_file ->
@@ -252,6 +253,12 @@ workflow MUSSEL {
             }
 
             WDS_SHARD(ch_wds_input)
+            ch_wds_shards = WDS_SHARD.out.shards
         }
+
+    emit:
+        pt         = ch_extract_feat.pt
+        h5         = ch_extract_feat.h5
+        wds_shards = ch_wds_shards
 }
 

@@ -15,21 +15,26 @@ process VALIDATE_H5 {
     script:
     """
     #!/usr/bin/env python
-    import h5py
+    import h5py, sys
     from concurrent.futures import ThreadPoolExecutor
+
+    errors = []
 
     def validate(file):
         try:
-            f = h5py.File(file, 'r')
-        except:
-            print(f"{file}: read failure")
-        if 'coords' not in f.keys():
-            print(f"{file}: coords not found")
+            with h5py.File(file, 'r') as f:
+                if 'coords' not in f.keys():
+                    errors.append(f"{file}: 'coords' key not found")
+        except Exception as exc:
+            errors.append(f"{file}: could not open — {exc}")
 
     with ThreadPoolExecutor(max_workers=${task.cpus}) as executor:
         executor.map(validate, "${files.join(',')}".split(","))
-        executor.shutdown(wait=True)
 
+    for e in errors:
+        print(e)
+    if errors:
+        sys.exit(1)
     """
 }
 
@@ -45,19 +50,24 @@ process VALIDATE_PT {
     script:
     """
     #!/usr/bin/env python
+    import sys, torch
     from concurrent.futures import ThreadPoolExecutor
-    import torch
+
+    errors = []
 
     def validate(file):
         try:
             torch.load(file, weights_only=True)
-        except:
-            print(f"{file}: unable to load weights")
+        except Exception as exc:
+            errors.append(f"{file}: could not load — {exc}")
 
     with ThreadPoolExecutor(max_workers=${task.cpus}) as executor:
-        for file in "${files.join(',')}".split(","):
-            executor.submit(validate, file)
-    executor.shutdown(wait=True)
+        list(executor.map(validate, "${files.join(',')}".split(",")))
+
+    for e in errors:
+        print(e)
+    if errors:
+        sys.exit(1)
     """
 }
 
@@ -74,30 +84,31 @@ process VALIDATE_WDS_SHARDS {
     script:
     """
     #!/usr/bin/env python
-    import tarfile
+    import sys, tarfile
     from concurrent.futures import ThreadPoolExecutor
 
     def validate(tar_path):
-        errors = []
+        errs = []
         try:
             with tarfile.open(tar_path) as t:
                 members = t.getmembers()
             if not members:
-                errors.append(f"{tar_path}: empty shard (no members)")
+                errs.append(f"{tar_path}: empty shard (no members)")
             elif not any(m.name.endswith('.pt') for m in members):
-                names = [m.name for m in members]
-                errors.append(f"{tar_path}: no .pt entries found — members: {names}")
+                errs.append(f"{tar_path}: no .pt entries — members: {[m.name for m in members]}")
         except Exception as exc:
-            errors.append(f"{tar_path}: could not open tar — {exc}")
-        return errors
+            errs.append(f"{tar_path}: could not open — {exc}")
+        return errs
 
     tar_paths = "${files instanceof List ? files.join(',') : files}".split(",")
     with ThreadPoolExecutor(max_workers=${task.cpus}) as executor:
         results = list(executor.map(validate, tar_paths))
 
-    for errs in results:
-        for e in errs:
-            print(e)
+    errors = [e for errs in results for e in errs]
+    for e in errors:
+        print(e)
+    if errors:
+        sys.exit(1)
     """
 }
 

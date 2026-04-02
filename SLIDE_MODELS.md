@@ -16,6 +16,7 @@ Slide-level models aggregate patch-level features into a single slide-level repr
 | CONCH/FEATHER | `feather_slide` | `conch1_5` |
 | CHIEF | `chief_slide` | `ctranspath` |
 | MADELEINE | `madeleine_slide` | `clip` |
+| ABMIL | `abmil_slide` | (encoder-agnostic) |
 
 ## Configuration
 

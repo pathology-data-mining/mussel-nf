@@ -219,7 +219,7 @@
               "virchow",
               "optimus"
             ],
-            "description": "Patch encoders: resnet50, ctranspath, gigapath, virchow, virchow2, optimus, hoptimus1, h0mini, uni, uni2h, conch1_5, clip, googlepath, phikon, phikon_v2, midnight12k, gpfm, hibou_l. Slide encoders: gigapath_slide, titan_slide, prism_slide, feather_slide, chief_slide, madeleine_slide."
+            "description": "Patch encoders: resnet50, ctranspath, gigapath, virchow, virchow2, optimus, hoptimus1, h0mini, uni, uni2h, conch1_5, conch_v1, clip, googlepath, phikon, phikon_v2, midnight12k, gpfm, hibou_l, openmidnight, genbio_pathfm, kaiko_vits8, kaiko_vits16, kaiko_vitb8, kaiko_vitb16, kaiko_vitl14, lunit_vits8, lunit_vits16. Slide encoders: gigapath_slide, titan_slide, prism_slide, feather_slide, chief_slide, madeleine_slide, abmil_slide."
           }
         },
         "use_gpu": {

@@ -1,6 +1,6 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.2.0).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.3.0).
 
 ## Requirements
 
@@ -36,7 +36,7 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
 ## Supported Models
 
 **Patch encoders** (`params.featurize.model_types`):
-`resnet50`, `ctranspath`, `gigapath`, `virchow`, `virchow2`, `optimus`, `hoptimus1`, `h0mini`, `uni`, `uni2h`, `conch1_5`, `clip`, `googlepath`, `phikon`, `phikon_v2`, `midnight12k`, `gpfm`, `hibou_l`
+`resnet50`, `ctranspath`, `gigapath`, `virchow`, `virchow2`, `optimus`, `hoptimus1`, `h0mini`, `uni`, `uni2h`, `conch1_5`, `conch_v1`, `clip`, `googlepath`, `phikon`, `phikon_v2`, `midnight12k`, `gpfm`, `hibou_l`, `openmidnight`, `genbio_pathfm`, `kaiko_vits8`, `kaiko_vits16`, `kaiko_vitb8`, `kaiko_vitb16`, `kaiko_vitl14`, `lunit_vits8`, `lunit_vits16`
 
 **Slide encoders** (specified in `model_types`; patch encoder auto-resolved):
 
@@ -48,6 +48,7 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
 | `feather_slide` | `conch1_5` |
 | `chief_slide` | `ctranspath` |
 | `madeleine_slide` | `clip` |
+| `abmil_slide` | (encoder-agnostic — specify patch encoder separately) |
 
 See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 

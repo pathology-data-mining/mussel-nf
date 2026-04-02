@@ -19,9 +19,9 @@
 PROFILES  ?=
 NXF_ARGS  ?=
 
-# Path to an SVS slide used by the integration tests.
-# Defaults to the test slide shipped with the Mussel library.
-MUSSEL_TEST_SLIDE ?= /gpfs/mskmind_ess/limr/repos/Mussel/tests/testdata/948176.svs
+# Path to the test SVS slide. Defaults to the slide vendored in tests/testdata/.
+# Override if needed: MUSSEL_TEST_SLIDE=/path/to/other.svs make test
+MUSSEL_TEST_SLIDE ?= $(CURDIR)/tests/testdata/948176.svs
 SLIDE_ID          := 948176
 
 nf_test   := nf-test
@@ -62,7 +62,7 @@ help:
 	@echo "  make test-wds-grouped   WDS per-oncotree sharding (main.nf -profile test_wds_grouped)"
 	@echo ""
 	@echo "Variables:"
-	@echo "  MUSSEL_TEST_SLIDE=<path>  path to a test SVS slide (default: Mussel repo testdata)"
+	@echo "  MUSSEL_TEST_SLIDE=<path>  path to a test SVS slide (default: tests/testdata/948176.svs)"
 	@echo "  PROFILES=<profiles>       extra Nextflow profiles, comma-separated"
 	@echo "  NXF_ARGS=<args>           extra Nextflow CLI arguments"
 	@echo ""

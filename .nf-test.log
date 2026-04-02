@@ -1,6 +1,6 @@
-Apr-02 13:22:22.894 [main] INFO  com.askimed.nf.test.App - nf-test 0.9.5
-Apr-02 13:22:22.912 [main] INFO  com.askimed.nf.test.App - Arguments: [list]
-Apr-02 13:22:24.272 [main] INFO  com.askimed.nf.test.App - Nextflow Version: 25.10.4
-Apr-02 13:22:24.806 [main] INFO  com.askimed.nf.test.lang.dependencies.DependencyResolver - Loaded 13 files from directory /gpfs/mskmind_ess/limr/repos/mussel-nf-wds in 0.027 sec
-Apr-02 13:22:24.808 [main] INFO  com.askimed.nf.test.lang.dependencies.DependencyResolver - Found 4 files containing tests.
-Apr-02 13:22:24.809 [main] DEBUG com.askimed.nf.test.lang.dependencies.DependencyResolver - Found files: [/gpfs/mskmind_ess/limr/repos/mussel-nf-wds/tests/pipeline.nf.test, /gpfs/mskmind_ess/limr/repos/mussel-nf-wds/tests/pipeline_two_step.nf.test, /gpfs/mskmind_ess/limr/repos/mussel-nf-wds/tests/pipeline_wds.nf.test, /gpfs/mskmind_ess/limr/repos/mussel-nf-wds/tests/pipeline_wds_grouped.nf.test]
+Apr-02 14:39:24.059 [main] INFO  com.askimed.nf.test.App - nf-test 0.9.5
+Apr-02 14:39:24.076 [main] INFO  com.askimed.nf.test.App - Arguments: [list]
+Apr-02 14:39:25.936 [main] INFO  com.askimed.nf.test.App - Nextflow Version: 25.10.4
+Apr-02 14:39:26.526 [main] INFO  com.askimed.nf.test.lang.dependencies.DependencyResolver - Loaded 16 files from directory /gpfs/mskmind_ess/limr/repos/mussel-nf-multi-slide in 0.094 sec
+Apr-02 14:39:26.528 [main] INFO  com.askimed.nf.test.lang.dependencies.DependencyResolver - Found 5 files containing tests.
+Apr-02 14:39:26.529 [main] DEBUG com.askimed.nf.test.lang.dependencies.DependencyResolver - Found files: [/gpfs/mskmind_ess/limr/repos/mussel-nf-multi-slide/tests/pipeline_wds_grouped.nf.test, /gpfs/mskmind_ess/limr/repos/mussel-nf-multi-slide/tests/pipeline_wds.nf.test, /gpfs/mskmind_ess/limr/repos/mussel-nf-multi-slide/tests/multi_slide.nf.test, /gpfs/mskmind_ess/limr/repos/mussel-nf-multi-slide/tests/pipeline_two_step.nf.test, /gpfs/mskmind_ess/limr/repos/mussel-nf-multi-slide/tests/pipeline.nf.test]

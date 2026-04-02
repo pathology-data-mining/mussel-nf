@@ -10,3 +10,4 @@ tests/results/
 tests/results_two_step/
 .nf-test.log
 bin/__pycache__/
+tests/results_multi_slide/

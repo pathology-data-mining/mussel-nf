@@ -8,6 +8,7 @@ include { TESSELLATE; FILTER_TILES } from './tessellation'
 include { TESSELLATE_FEATURIZE_BATCH } from './tessellate_featurize'
 
 include { WDS_SHARD } from './wds'
+include { MERGE_SAMPLE_FEATURES } from './sample_merge'
 
 
 workflow EXTRACT_FEATURES {
@@ -205,6 +206,23 @@ workflow MUSSEL {
         } else {
             ch_extract_feat = EXTRACT_FEATURES(ch_samples)
         }
+
+        // ── Multi-slide sample aggregation ───────────────────────────────────────
+        // When multiple slides share the same sample_id, aggregate their per-slide
+        // feature H5 files (already computed above) into one per-sample output.
+        // Groups by (sample_id, model_type) so each invocation handles one model.
+        ch_sample_feat_h5 = ch_extract_feat.h5
+            .filter { meta, model_type, h5 -> meta.n_slides > 1 }
+            .map { meta, model_type, h5 ->
+                tuple(groupKey([sample_id: meta.sample_id, model_type: model_type], meta.n_slides), meta, h5)
+            }
+            .groupTuple()
+            .map { key, metas, h5s ->
+                tuple(key.sample_id, metas, key.model_type, h5s)
+            }
+
+        MERGE_SAMPLE_FEATURES(ch_sample_feat_h5)
+        // ─────────────────────────────────────────────────────────────────────────
 
         LINEAR_PROBE(ch_annotations, ch_extract_feat.h5)
 

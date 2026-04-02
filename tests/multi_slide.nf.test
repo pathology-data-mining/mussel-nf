@@ -1,0 +1,21 @@
+nextflow_pipeline {
+    name   "MUSSEL multi-slide sample aggregation"
+    script "./multi_slide.nf"
+    profile "test_multi_slide"
+
+    test("two slides merge into one sample-level feature tensor") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+            // Per-slide features — one per input slide
+            assert path("${outputDir}/features/resnet50/948176_A.features.pt").exists()
+            assert path("${outputDir}/features/resnet50/948176_B.features.pt").exists()
+            // Sample-level merged features
+            assert path("${outputDir}/features/resnet50/PATIENT_TEST.features.pt").exists()
+        }
+    }
+}

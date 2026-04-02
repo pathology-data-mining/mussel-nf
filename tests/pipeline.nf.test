@@ -1,0 +1,17 @@
+nextflow_pipeline {
+    name   "MUSSEL main pipeline — one-step workflow"
+    script "../main.nf"
+    profile "test"
+
+    test("one-step workflow succeeds and produces features") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+            assert path("${outputDir}/features/resnet50/948176.features.pt").exists()
+        }
+    }
+}

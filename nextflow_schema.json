@@ -368,7 +368,7 @@
         "shard_h5": {
           "type": "boolean",
           "default": false,
-          "description": "Also bundle .h5 patch-feature files into the shards alongside the .pt slide-feature files. Note: .h5 files are large."
+          "description": "Extract tile coordinates from .h5 patch-feature files and store as .coords.npy in the shard alongside .features.npy. Note: .h5 files are large."
         },
         "max_shard_size": {
           "type": "integer",
@@ -378,8 +378,8 @@
         },
         "shard_prefix": {
           "type": "string",
-          "default": "shard-",
-          "description": "Filename prefix for shard tar files, e.g. 'shard-' produces shard-000000.tar."
+          "default": "",
+          "description": "Filename prefix for shard tar files. Default '' produces 000000.tar (paladin-compatible naming)."
         }
       }
     }

@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""Create WebDataset-format .tar shards from feature files.
+"""Create paladin-compatible WebDataset tar shards from feature files.
 
-Each shard is a standard tar archive where every sample consists of one or more
-files named ``{slide_id}.{ext}``.  WebDataset identifies samples by the stem
-before the first dot, so the resulting shards are drop-in compatible with the
-``webdataset`` Python library.
+Each shard is a standard tar archive where every sample consists of:
+  - ``{slide_id}.features.npy``  — float32 [N_tiles, D] feature array
+  - ``{slide_id}.coords.npy``    — int64  [N_tiles, 2] tile coords (optional)
+
+The format matches the paladin training pipeline and is directly readable by
+the ``webdataset`` Python library:
+
+    import io, numpy as np, torch, webdataset as wds
+    ds = wds.WebDataset("results/wds/optimus/all/000000.tar")
+    for sample in ds:
+        slide_id = sample["__key__"]
+        features = torch.from_numpy(np.load(io.BytesIO(sample["features.npy"])))
 
 Usage
 -----
@@ -12,27 +20,48 @@ Usage
         --pt_files slide1.features.pt slide2.features.pt ... \\
         --slide_ids slide1,slide2,... \\
         --output_dir ./wds_out \\
-        [--h5_files slide1.features.h5 ...] \\
+        [--h5_files slide1.patch.h5 ...] \\
         [--max_shard_size 1000] \\
-        [--prefix shard-]
+        [--prefix ""]
 
 Output
 ------
-    {output_dir}/shard-000000.tar
-    {output_dir}/shard-000001.tar
+    {output_dir}/000000.tar
+    {output_dir}/000001.tar
     ...
 """
 
 import argparse
 import math
-import os
 import tarfile
+from io import BytesIO
 from pathlib import Path
+
+import h5py
+import numpy as np
+import torch
 
 
 def _shard_path(output_dir: Path, prefix: str, index: int, total: int) -> Path:
     width = max(6, len(str(total - 1)))
     return output_dir / f"{prefix}{str(index).zfill(width)}.tar"
+
+
+def _npy_bytes(arr: np.ndarray) -> bytes:
+    buf = BytesIO()
+    np.save(buf, arr)
+    return buf.getvalue()
+
+
+def _add_npy(tar: tarfile.TarFile, arcname: str, data: bytes) -> None:
+    info = tarfile.TarInfo(name=arcname)
+    info.size = len(data)
+    info.mtime = 0
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    tar.addfile(info, BytesIO(data))
 
 
 def create_shards(
@@ -41,9 +70,9 @@ def create_shards(
     output_dir: Path,
     h5_files: list[Path] | None = None,
     max_shard_size: int = 1000,
-    prefix: str = "shard-",
+    prefix: str = "",
 ) -> list[Path]:
-    """Write one or more WDS tar shards and return the list of shard paths."""
+    """Write paladin-compatible WDS tar shards and return the list of shard paths."""
     assert len(pt_files) == len(slide_ids), (
         f"pt_files ({len(pt_files)}) and slide_ids ({len(slide_ids)}) must match"
     )
@@ -66,28 +95,28 @@ def create_shards(
         with tarfile.open(shard_path, "w") as tar:
             for i in range(start, end):
                 slide_id = slide_ids[i]
-                # .pt file — always present
-                _add_file(tar, pt_files[i], f"{slide_id}.pt")
-                # .h5 file — optional
+
+                # features.npy — convert .pt tensor to float32 numpy
+                tensor = torch.load(pt_files[i], weights_only=True)
+                if tensor.ndim == 1:
+                    tensor = tensor.unsqueeze(0)
+                _add_npy(tar, f"{slide_id}.features.npy", _npy_bytes(tensor.numpy().astype(np.float32)))
+
+                # coords.npy — extract tile coordinates from .h5 (optional)
                 if h5_files is not None:
-                    _add_file(tar, h5_files[i], f"{slide_id}.features.h5")
+                    try:
+                        with h5py.File(h5_files[i], "r") as hf:
+                            coords = hf["coords"][:].astype(np.int64)
+                        if coords.ndim == 1:
+                            coords = coords.reshape(1, -1)
+                        _add_npy(tar, f"{slide_id}.coords.npy", _npy_bytes(coords))
+                    except Exception as exc:
+                        print(f"WARNING: could not read coords from {h5_files[i]}: {exc}")
 
         shard_paths.append(shard_path)
         print(f"Wrote {shard_path} ({end - start} samples)")
 
     return shard_paths
-
-
-def _add_file(tar: tarfile.TarFile, src: Path, arcname: str) -> None:
-    info = tar.gettarinfo(str(src), arcname=arcname)
-    # Strip mtime/uid/gid noise for reproducibility
-    info.mtime = 0
-    info.uid = 0
-    info.gid = 0
-    info.uname = ""
-    info.gname = ""
-    with open(src, "rb") as fh:
-        tar.addfile(info, fh)
 
 
 def main() -> None:
@@ -112,7 +141,7 @@ def main() -> None:
         "--h5_files",
         nargs="+",
         default=None,
-        help="Optional .h5 patch-feature files to bundle alongside .pt files",
+        help="Optional .h5 patch-feature files; tile coords are extracted and stored as .coords.npy",
     )
     parser.add_argument(
         "--max_shard_size",
@@ -122,8 +151,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--prefix",
-        default="shard-",
-        help="Filename prefix for shards (default: 'shard-')",
+        default="",
+        help="Filename prefix for shards (default: '' produces 000000.tar)",
     )
     args = parser.parse_args()
 

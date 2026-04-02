@@ -1,5 +1,5 @@
 /**
- * WDS_SHARD — pack per-slide feature files into WebDataset tar shards.
+ * WDS_SHARD — pack per-slide feature files into paladin-compatible WebDataset tar shards.
  *
  * Inputs
  * ------
@@ -7,18 +7,20 @@
  *   model_type  : the encoder name used to produce the features, e.g. "optimus"
  *   slide_ids   : list of slide ID strings (same order as files)
  *   pt_files    : collected list of *.features.pt paths
- *   h5_files    : collected list of *.features.h5 paths (empty list when not sharding h5)
+ *   h5_files    : collected list of *.patch.h5 paths (empty list when wds.shard_h5=false)
  *
  * Output
  * ------
- *   shard-NNNNNN.tar files published to
+ *   NNNNNN.tar files published to
  *     ${params.outdir}/wds/${model_type}/${group_name}/
  *
- * WDS format
- * ----------
- *   Each tar entry is named  {slide_id}.pt  (and optionally {slide_id}.features.h5).
+ * WDS format (paladin-compatible)
+ * --------------------------------
+ *   Each tar entry consists of:
+ *     {slide_id}.features.npy  — float32 feature array (converted from .pt)
+ *     {slide_id}.coords.npy    — int64 tile coords extracted from .h5 (when shard_h5=true)
  *   Shards are deterministically ordered by slide_id within each group.
- *   This is directly readable by the `webdataset` Python library.
+ *   Directly consumable by paladin and the `webdataset` Python library.
  */
 process WDS_SHARD {
     label "bigTask"
@@ -36,7 +38,7 @@ process WDS_SHARD {
 
     script:
     max_shard_size = params.wds.max_shard_size ?: 1000
-    prefix         = params.wds.shard_prefix   ?: "shard-"
+    prefix         = params.wds.shard_prefix != null ? params.wds.shard_prefix : ""
     slide_ids_str  = slide_ids.join(",")
 
     // Build the pt file list in the work directory (staged names)

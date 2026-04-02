@@ -3,7 +3,7 @@ nextflow_pipeline {
     script "../main.nf"
     profile "test_wds_grouped"
 
-    test("WDS grouped sharding creates per-oncotree shard-*.tar") {
+    test("WDS grouped sharding creates per-oncotree *.tar") {
         when {
             params {
                 outdir = "${outputDir}"
@@ -16,14 +16,14 @@ nextflow_pipeline {
             assert shardDir.isDirectory() : "Shard directory missing: ${shardDir}"
 
             def tars = shardDir.listFiles().findAll { it.name.endsWith('.tar') }
-            assert tars.size() > 0 : "No shard-*.tar files in ${shardDir}"
+            assert tars.size() > 0 : "No *.tar files in ${shardDir}"
 
             tars.each { tar ->
                 def proc = ['tar', 'tf', tar.absolutePath].execute()
                 proc.waitFor()
                 assert proc.exitValue() == 0 : "tar tf failed for ${tar.name}"
-                assert proc.text.trim().split('\n').any { it.endsWith('.pt') } :
-                    "No .pt entries found in ${tar.name}"
+                assert proc.text.trim().split('\n').any { it.endsWith('.features.npy') } :
+                    "No .features.npy entries found in ${tar.name}"
             }
         }
     }

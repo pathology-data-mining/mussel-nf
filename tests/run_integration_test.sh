@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Integration test for mussel-nf.
 # Runs the pipeline with both workflow modes and validates outputs.
+# Also tests WebDataset shard output (flat and oncotree-grouped).
 #
 # Usage: ./tests/run_integration_test.sh [extra nextflow args]
 #
@@ -63,10 +64,91 @@ run_and_validate() {
     echo "PASS [${profile}]"
 }
 
+# ── Helper: validate WebDataset shards ───────────────────────────────────────
+#
+# validate_wds_shards <results_dir> <model_type> <group_name> <slide_id>
+#
+#   Checks that:
+#     1. At least one shard-*.tar exists under
+#        <results_dir>/wds/<model_type>/<group_name>/
+#     2. Every expected slide_id appears as <slide_id>.pt inside the shards.
+
+validate_wds_shards() {
+    local results_dir="$1"
+    local model_type="$2"
+    local group_name="$3"
+    local slide_id="$4"
+
+    local shard_dir="${results_dir}/wds/${model_type}/${group_name}"
+
+    echo ""
+    echo "==> Validating WDS shards in ${shard_dir} (slide: ${slide_id})"
+
+    # 1. At least one shard tar must exist
+    local shards=()
+    while IFS= read -r -d '' f; do
+        shards+=("$f")
+    done < <(find "$shard_dir" -maxdepth 1 -name "shard-*.tar" -print0 2>/dev/null)
+
+    if [[ ${#shards[@]} -eq 0 ]]; then
+        echo "FAIL: No shard-*.tar files found in ${shard_dir}"
+        return 1
+    fi
+    echo "  Found ${#shards[@]} shard(s)"
+
+    # 2. The expected slide must be present in the shards (as <slide_id>.pt)
+    local found=0
+    for shard in "${shards[@]}"; do
+        if python3 - "$shard" "$slide_id" <<'PYEOF'
+import sys, tarfile
+shard_path, slide_id = sys.argv[1], sys.argv[2]
+with tarfile.open(shard_path) as t:
+    names = t.getnames()
+if f"{slide_id}.pt" not in names:
+    print(f"  {shard_path}: members={names}")
+    sys.exit(1)
+print(f"  {shard_path}: found {slide_id}.pt  OK")
+PYEOF
+        then
+            found=1
+            break
+        fi
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+        echo "FAIL: ${slide_id}.pt not found in any shard under ${shard_dir}"
+        return 1
+    fi
+
+    echo "PASS [WDS shards: ${model_type}/${group_name}]"
+}
+
 # ── Run both workflow modes ───────────────────────────────────────────────────
 
 run_and_validate test          "$SCRIPT_DIR/results"
 run_and_validate test_two_step "$SCRIPT_DIR/results_two_step"
+
+# ── Run WDS shard tests ───────────────────────────────────────────────────────
+
+echo ""
+echo "==> Running WDS flat-shard test (group_by_oncotree=false)"
+nextflow run main.nf -profile test_wds
+
+validate_wds_shards \
+    "$SCRIPT_DIR/results_wds" \
+    "resnet50" \
+    "all" \
+    "1079807"
+
+echo ""
+echo "==> Running WDS grouped-shard test (group_by_oncotree=true, oncotree_code=BRCA)"
+nextflow run main.nf -profile test_wds_grouped
+
+validate_wds_shards \
+    "$SCRIPT_DIR/results_wds_grouped" \
+    "resnet50" \
+    "BRCA" \
+    "1079807"
 
 echo ""
 echo "PASS: All integration tests succeeded."

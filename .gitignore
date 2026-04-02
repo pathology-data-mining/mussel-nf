@@ -8,3 +8,5 @@ tests/data/*.ndpi
 tests/data/*.scn
 tests/results/
 tests/results_two_step/
+.nf-test.log
+bin/__pycache__/

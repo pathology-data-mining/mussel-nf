@@ -11,3 +11,4 @@ tests/results/
 tests/results_two_step/
 tests/test*.csv
 bin/__pycache__/
+bin/nf-test

@@ -24,7 +24,7 @@ NXF_ARGS  ?=
 MUSSEL_TEST_SLIDE ?= /gpfs/mskmind_ess/limr/repos/Mussel/tests/testdata/948176.svs
 SLIDE_ID          := 948176
 
-nf_test   := bin/nf-test
+nf_test   := nf-test
 # Pass extra profiles with the '+' prefix so they compose with the test profile.
 nf_flags  := $(if $(PROFILES),--profile +$(PROFILES),) $(NXF_ARGS)
 

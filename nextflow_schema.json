@@ -177,9 +177,14 @@
           "type": "string",
           "enum": [
             "classic",
+            "otsu",
             "neural"
           ],
-          "description": "Tissue segmentation model used during tessellation: classic (threshold-based) or neural (neural network). If unset, Mussel uses its own default (classic) or the seg_config_group preset value. Requires Mussel v1.2.0+."
+          "description": "Tissue segmentation model used during tessellation: classic (HSV + fixed threshold), otsu (HSV + Otsu automatic threshold), or neural (DeepLabV3 neural network). If unset, Mussel uses its own default (classic) or the seg_config_group preset value. Requires Mussel v1.2.0+."
+        },
+        "slide_mpp_override": {
+          "type": "number",
+          "description": "If set, use this value (µm/px) as the slide's native MPP instead of reading from slide metadata. Use when a slide lacks MPP tags and the metadata-based fallback produces incorrect results."
         },
         "save_slide_thumbnail": {
           "type": "boolean",

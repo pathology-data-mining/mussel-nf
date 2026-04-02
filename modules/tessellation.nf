@@ -51,6 +51,7 @@ process TESSELLATE {
     if (params.tiling.remove_artifacts) seg_params << "seg_config.remove_artifacts=true"
     if (params.tiling.remove_penmarks) seg_params << "seg_config.remove_penmarks=true"
     if (params.tiling.seg_model != null) seg_params << "seg_config.seg_model=${params.tiling.seg_model}"
+    if (params.tiling.slide_mpp_override != null) seg_params << "seg_config.slide_mpp_override=${params.tiling.slide_mpp_override}"
     seg_params_str = seg_params.join(' \\\n        ')
 
     """

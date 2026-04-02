@@ -3,27 +3,54 @@
 # Runs the pipeline with both workflow modes and validates outputs.
 # Also tests WebDataset shard output (flat and oncotree-grouped).
 #
-# Usage: ./tests/run_integration_test.sh [extra nextflow args]
+# Usage:
+#   ./tests/run_integration_test.sh [extra nextflow args]
 #
-# Prerequisites:
-#   - tests/data/1079807.svs must exist (copy with:
-#       cp /gpfs/mskmind_emc/data_large/pathology/BR_16-512/slides/1079807.svs tests/data/)
-#   - conda environment or container with Mussel must be available
+# Environment variables:
+#   MUSSEL_REPO       Path to the Mussel source repository.
+#                     Default: /gpfs/mskmind_ess/limr/repos/Mussel
+#   MUSSEL_TEST_SLIDE Absolute path to the test WSI.
+#                     Default: ${MUSSEL_REPO}/tests/testdata/948176.svs
+#
+# The test CSVs are generated at runtime into a temp directory so no
+# absolute path is baked into committed files.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-SLIDE="$SCRIPT_DIR/data/1079807.svs"
 
-# ── Pre-flight checks ─────────────────────────────────────────────────────────
+# ── Resolve test slide ────────────────────────────────────────────────────────
+
+MUSSEL_REPO="${MUSSEL_REPO:-/gpfs/mskmind_ess/limr/repos/Mussel}"
+SLIDE="${MUSSEL_TEST_SLIDE:-${MUSSEL_REPO}/tests/testdata/948176.svs}"
+SLIDE_ID="$(basename "${SLIDE%.*}")"   # e.g. 948176
 
 if [[ ! -f "$SLIDE" ]]; then
     echo "ERROR: Test slide not found at $SLIDE"
-    echo "Copy it with:"
-    echo "  cp /gpfs/mskmind_emc/data_large/pathology/BR_16-512/slides/1079807.svs $SCRIPT_DIR/data/"
+    echo "Override with:  MUSSEL_TEST_SLIDE=/path/to/slide.svs $0"
+    echo "Or set:         MUSSEL_REPO=/path/to/Mussel  (expects tests/testdata/948176.svs)"
     exit 1
 fi
+
+# ── Generate test CSV files into a temp directory ─────────────────────────────
+# Nextflow nf-schema validates file-path columns at startup, so the CSVs must
+# contain real paths — we produce them at run-time to avoid committing absolute
+# paths into the repository.
+
+TMPDIR_CSV="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_CSV"' EXIT
+
+CSV_PLAIN="${TMPDIR_CSV}/test.csv"
+CSV_ONCOTREE="${TMPDIR_CSV}/test_oncotree.csv"
+
+printf 'slide_id,slide_path\n%s,%s\n' "$SLIDE_ID" "$SLIDE" > "$CSV_PLAIN"
+printf 'slide_id,slide_path,oncotree_code\n%s,%s,BRCA\n' "$SLIDE_ID" "$SLIDE" > "$CSV_ONCOTREE"
+
+echo "==> Test slide:  $SLIDE"
+echo "==> Slide ID:    $SLIDE_ID"
+echo "==> Plain CSV:   $CSV_PLAIN"
+echo "==> Oncotree CSV:$CSV_ONCOTREE"
 
 cd "$PROJECT_DIR"
 
@@ -32,10 +59,13 @@ cd "$PROJECT_DIR"
 run_and_validate() {
     local profile="$1"
     local results_dir="$2"
+    local samples_csv="$3"
 
     echo ""
     echo "==> Running mussel-nf integration test (profile: ${profile})"
-    nextflow run main.nf -profile "${profile}" "$@"
+    nextflow run main.nf \
+        -profile "${profile}" \
+        --samples_csv "$samples_csv"
 
     echo ""
     echo "==> Validating outputs for profile: ${profile}"
@@ -67,11 +97,6 @@ run_and_validate() {
 # ── Helper: validate WebDataset shards ───────────────────────────────────────
 #
 # validate_wds_shards <results_dir> <model_type> <group_name> <slide_id>
-#
-#   Checks that:
-#     1. At least one shard-*.tar exists under
-#        <results_dir>/wds/<model_type>/<group_name>/
-#     2. Every expected slide_id appears as <slide_id>.pt inside the shards.
 
 validate_wds_shards() {
     local results_dir="$1"
@@ -125,30 +150,34 @@ PYEOF
 
 # ── Run both workflow modes ───────────────────────────────────────────────────
 
-run_and_validate test          "$SCRIPT_DIR/results"
-run_and_validate test_two_step "$SCRIPT_DIR/results_two_step"
+run_and_validate test          "$SCRIPT_DIR/results"          "$CSV_PLAIN"
+run_and_validate test_two_step "$SCRIPT_DIR/results_two_step" "$CSV_PLAIN"
 
 # ── Run WDS shard tests ───────────────────────────────────────────────────────
 
 echo ""
 echo "==> Running WDS flat-shard test (group_by_oncotree=false)"
-nextflow run main.nf -profile test_wds
+nextflow run main.nf \
+    -profile test_wds \
+    --samples_csv "$CSV_PLAIN"
 
 validate_wds_shards \
     "$SCRIPT_DIR/results_wds" \
     "resnet50" \
     "all" \
-    "1079807"
+    "$SLIDE_ID"
 
 echo ""
 echo "==> Running WDS grouped-shard test (group_by_oncotree=true, oncotree_code=BRCA)"
-nextflow run main.nf -profile test_wds_grouped
+nextflow run main.nf \
+    -profile test_wds_grouped \
+    --samples_csv "$CSV_ONCOTREE"
 
 validate_wds_shards \
     "$SCRIPT_DIR/results_wds_grouped" \
     "resnet50" \
     "BRCA" \
-    "1079807"
+    "$SLIDE_ID"
 
 echo ""
 echo "PASS: All integration tests succeeded."

@@ -1,5 +1,6 @@
 work/
 .nextflow*
+.nf-test/
 tests/data/*.svs
 tests/data/*.tiff
 tests/data/*.tif

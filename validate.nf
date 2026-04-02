@@ -29,7 +29,7 @@ process VALIDATE_H5 {
             errors.append(f"{file}: could not open — {exc}")
 
     with ThreadPoolExecutor(max_workers=${task.cpus}) as executor:
-        executor.map(validate, "${files.join(',')}".split(","))
+        list(executor.map(validate, "${files.join(',')}".split(",")))
 
     for e in errors:
         print(e)

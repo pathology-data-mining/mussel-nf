@@ -137,7 +137,7 @@ files) can be packed into [WebDataset](https://github.com/webdataset/webdataset)
 shards.  Shards are directly readable by the `webdataset` Python library via:
 
 ```python
-import webdataset as wds
+import io, torch, webdataset as wds
 ds = wds.WebDataset("results/wds/optimus/all/shard-{000000..000004}.tar")
 for sample in ds:
     slide_id = sample["__key__"]

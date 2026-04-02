@@ -111,6 +111,12 @@ process TESSELLATE_FEATURIZE_BATCH {
     if (params.tiling.tissue_area_threshold != null) seg_params << "seg_config.tissue_area_threshold=${params.tiling.tissue_area_threshold}"
     if (params.tiling.hole_area_threshold != null) seg_params << "seg_config.hole_area_threshold=${params.tiling.hole_area_threshold}"
     if (params.tiling.max_num_holes != null) seg_params << "seg_config.max_num_holes=${params.tiling.max_num_holes}"
+    if (params.tiling.overlap != null) seg_params << "seg_config.overlap=${params.tiling.overlap}"
+    if (params.tiling.min_tissue_proportion != null) seg_params << "seg_config.min_tissue_proportion=${params.tiling.min_tissue_proportion}"
+    if (params.tiling.remove_artifacts) seg_params << "seg_config.remove_artifacts=true"
+    if (params.tiling.remove_penmarks) seg_params << "seg_config.remove_penmarks=true"
+    if (params.tiling.seg_model != null) seg_params << "seg_config.seg_model=${params.tiling.seg_model}"
+    if (params.tiling.slide_mpp_override != null) seg_params << "seg_config.slide_mpp_override=${params.tiling.slide_mpp_override}"
     seg_params_str = seg_params.join(' \\\n        ')
 
     """

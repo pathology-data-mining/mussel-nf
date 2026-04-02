@@ -1,6 +1,6 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.1.2).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.3.0).
 
 ## Requirements
 
@@ -32,6 +32,25 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
     Accepted slide extensions: `.svs`, `.tiff`, `.tif`, `.ndpi`, `.scn`.
 
 3. When the execution completes, results will be in `params.outdir` (default: `results/`).
+
+## Supported Models
+
+**Patch encoders** (`params.featurize.model_types`):
+`resnet50`, `ctranspath`, `gigapath`, `virchow`, `virchow2`, `optimus`, `hoptimus1`, `h0mini`, `uni`, `uni2h`, `conch1_5`, `conch_v1`, `clip`, `googlepath`, `phikon`, `phikon_v2`, `midnight12k`, `gpfm`, `hibou_l`, `openmidnight`, `genbio_pathfm`, `kaiko_vits8`, `kaiko_vits16`, `kaiko_vitb8`, `kaiko_vitb16`, `kaiko_vitl14`, `lunit_vits8`, `lunit_vits16`
+
+**Slide encoders** (specified in `model_types`; patch encoder auto-resolved):
+
+| Model key | Patch encoder |
+|---|---|
+| `gigapath_slide` | `gigapath` |
+| `titan_slide` | `conch1_5` |
+| `prism_slide` | `virchow` |
+| `feather_slide` | `conch1_5` |
+| `chief_slide` | `ctranspath` |
+| `madeleine_slide` | `clip` |
+| `abmil_slide` | (encoder-agnostic — specify patch encoder separately) |
+
+See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 
 ## Misc Notes
 
@@ -65,12 +84,31 @@ The standard workflow tessellates slides and extracts features for `params.featu
 
 ### Tile filtering
 
-When `params.tiling.filter_tiles = true` (default: `false`):
+There are two independent mechanisms for filtering out non-tissue or low-quality tiles:
+
+#### Legacy classifier-based filtering (`params.tiling.filter_tiles`)
+
+A post-tessellation step that uses a pre-trained sklearn classifier to score tiles:
 
 1. Tessellation
-2. Feature extraction for `params.tiling.filter_model_type` (default: `ctranspath`)
-3. Filter tiles using a classifier (`.pkl` at `params.tiling.filter_model_path`, threshold `params.tiling.filter_threshold`)
-4. Feature extraction for `params.featurize.model_types`
+2. Feature extraction using `params.tiling.filter_model_type` (default: `ctranspath`)
+3. Classify tiles with the `.pkl` model at `params.tiling.filter_model_path`; discard tiles below `params.tiling.filter_threshold`
+4. Feature extraction for `params.featurize.model_types` on surviving tiles
+
+Requires a pre-trained `.pkl` classifier. Set `filter_tiles = true` to enable.
+
+#### Segmentation-integrated artifact removal (`params.tiling.remove_artifacts` / `remove_penmarks`)
+
+These options remove artifacts **during tessellation** by refining the tissue mask before patches are extracted. No separate classifier model is needed.
+
+- **`remove_artifacts`**: runs the GrandQC neural artifact remover to exclude ink, air bubbles, and other slide artifacts from the tissue mask
+- **`remove_penmarks`**: detects and excludes pen mark regions before tessellation
+- **`seg_model`**: tissue segmentation backend — `'classic'` (HSV + fixed threshold, default), `'otsu'` (HSV + Otsu automatic threshold), or `'neural'` (DeepLabV3 neural network)
+- **`min_tissue_proportion`**: drop patches where less than this fraction of pixels are tissue (default `0.0`)
+- **`overlap`**: extract overlapping patches (pixels, default `0`)
+- **`slide_mpp_override`**: override the slide's MPP value when metadata is missing or incorrect
+
+These options can be combined with legacy tile filtering or used independently.
 
 ### CLIP-based annotation
 

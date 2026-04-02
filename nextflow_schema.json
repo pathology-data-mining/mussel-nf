@@ -82,21 +82,21 @@
         "filter_model_type": {
           "type": "string",
           "default": "ctranspath",
-          "description": "filter tiles using features extracted with this model"
+          "description": "Patch encoder used to extract features for legacy tile filtering (e.g. ctranspath)."
         },
         "filter_model_path": {
           "type": "string",
-          "description": "pkl file containing model used to filter tiles"
+          "description": "Path to the .pkl sklearn classifier used by legacy tile filtering."
         },
         "filter_threshold": {
           "type": "number",
           "default": 0.75,
-          "description": "threshold to use for filtering tiles"
+          "description": "Confidence threshold for the legacy tile classifier (0\u20131). Tiles below this score are discarded."
         },
         "filter_tiles": {
           "type": "boolean",
           "default": false,
-          "description": "filter tiles"
+          "description": "Enable legacy classifier-based tile filtering. After tessellation, extracts patch features with filter_model_type and applies a .pkl classifier to discard non-tissue tiles."
         },
         "seg_config_group": {
           "type": [
@@ -153,6 +153,39 @@
           "default": 2,
           "description": "maximum number of holes"
         },
+        "overlap": {
+          "type": "integer",
+          "default": 0,
+          "description": "Patch overlap in pixels. Default 0 (no overlap). Requires Mussel v1.2.0+."
+        },
+        "min_tissue_proportion": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Minimum fraction of a patch that must be tissue to be retained. Default 0.0 (keep all). Requires Mussel v1.2.0+."
+        },
+        "remove_artifacts": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use GrandQC neural artifact remover to exclude artifact regions from the tissue mask during tessellation. Does not require a separate classifier model. Requires Mussel v1.2.0+."
+        },
+        "remove_penmarks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Detect and exclude pen mark regions before tessellation. Requires Mussel v1.2.0+."
+        },
+        "seg_model": {
+          "type": "string",
+          "enum": [
+            "classic",
+            "otsu",
+            "neural"
+          ],
+          "description": "Tissue segmentation model used during tessellation: classic (HSV + fixed threshold), otsu (HSV + Otsu automatic threshold), or neural (DeepLabV3 neural network). If unset, Mussel uses its own default (classic) or the seg_config_group preset value. Requires Mussel v1.2.0+."
+        },
+        "slide_mpp_override": {
+          "type": "number",
+          "description": "If set, use this value (µm/px) as the slide's native MPP instead of reading from slide metadata. Use when a slide lacks MPP tags and the metadata-based fallback produces incorrect results."
+        },
         "save_slide_thumbnail": {
           "type": "boolean",
           "default": false,
@@ -184,13 +217,43 @@
           "items": {
             "type": "string",
             "enum": [
-              "quiltnet",
-              "gigapath",
-              "ctranspath",
               "resnet50",
+              "ctranspath",
+              "gigapath",
               "virchow",
-              "optimus"
-            ]
+              "virchow2",
+              "optimus",
+              "hoptimus1",
+              "h0mini",
+              "uni",
+              "uni2h",
+              "conch1_5",
+              "conch_v1",
+              "clip",
+              "googlepath",
+              "phikon",
+              "phikon_v2",
+              "midnight12k",
+              "gpfm",
+              "hibou_l",
+              "openmidnight",
+              "genbio_pathfm",
+              "kaiko_vits8",
+              "kaiko_vits16",
+              "kaiko_vitb8",
+              "kaiko_vitb16",
+              "kaiko_vitl14",
+              "lunit_vits8",
+              "lunit_vits16",
+              "gigapath_slide",
+              "titan_slide",
+              "prism_slide",
+              "feather_slide",
+              "chief_slide",
+              "madeleine_slide",
+              "abmil_slide"
+            ],
+            "description": "Patch encoders: resnet50, ctranspath, gigapath, virchow, virchow2, optimus, hoptimus1, h0mini, uni, uni2h, conch1_5, conch_v1, clip, googlepath, phikon, phikon_v2, midnight12k, gpfm, hibou_l, openmidnight, genbio_pathfm, kaiko_vits8, kaiko_vits16, kaiko_vitb8, kaiko_vitb16, kaiko_vitl14, lunit_vits8, lunit_vits16. Slide encoders: gigapath_slide, titan_slide, prism_slide, feather_slide, chief_slide, madeleine_slide, abmil_slide."
           }
         },
         "use_gpu": {

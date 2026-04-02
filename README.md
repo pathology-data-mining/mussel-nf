@@ -130,6 +130,65 @@ The CSV must have columns `slide_id` and `annotation_bmp_path`.
 4. Combine per-slide annotation mappings
 5. Benchmark logistic regression classifiers
 
+### WebDataset sharding
+
+After feature extraction, completed `.pt` slide-feature files (and optionally `.h5` patch-feature
+files) are packed into [paladin](https://github.com/pathology-data-mining/paladin)-compatible
+[WebDataset](https://github.com/webdataset/webdataset) `.tar` shards.
+
+Each tar entry contains:
+- `{slide_id}.features.npy` — float32 feature array (converted from `.pt`)
+- `{slide_id}.coords.npy` — int64 tile coordinates from `.h5` (when `wds.shard_h5=true`)
+
+Shards are directly readable by the `webdataset` Python library:
+
+```python
+import io, numpy as np, torch, webdataset as wds
+ds = wds.WebDataset("results/wds/optimus/all/{000000..000004}.tar")
+for sample in ds:
+    slide_id = sample["__key__"]
+    features = torch.from_numpy(np.load(io.BytesIO(sample["features.npy"])))
+```
+
+Enable and configure sharding via `params.wds`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `wds.enabled` | `false` | Enable WDS shard output |
+| `wds.group_by_oncotree` | `false` | Separate shard sets per `oncotree_code`; requires that column in `samples_csv` |
+| `wds.shard_h5` | `false` | Extract tile coords from `.h5` and store as `.coords.npy` |
+| `wds.max_shard_size` | `1000` | Max slides per `.tar` shard |
+| `wds.shard_prefix` | `""` | Filename prefix (`""` → `000000.tar`) |
+
+**Example — shard optimus features grouped by cancer type:**
+
+```bash
+nextflow run main.nf \
+  -profile cluster,slurm,apptainer \
+  --samples_csv samples.csv \
+  --featurize.model_types='["optimus"]' \
+  --wds.enabled=true \
+  --wds.group_by_oncotree=true \
+  --wds.max_shard_size=500
+```
+
+Output layout:
+
+```
+results/wds/optimus/BRCA/000000.tar
+results/wds/optimus/BRCA/000001.tar
+results/wds/optimus/LUAD/000000.tar
+...
+```
+
+Without grouping (`group_by_oncotree=false`):
+
+```
+results/wds/optimus/all/000000.tar
+results/wds/optimus/all/000001.tar
+...
+```
+
 
 ## Integration tests
 

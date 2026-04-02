@@ -7,6 +7,7 @@ include { TESSELLATE; FILTER_TILES } from './tessellation'
 
 include { TESSELLATE_FEATURIZE_BATCH } from './tessellate_featurize'
 
+include { WDS_SHARD } from './wds'
 
 
 workflow EXTRACT_FEATURES {
@@ -72,7 +73,8 @@ workflow EXTRACT_FEATURES {
             // Use indexed matching since output files may use staged names
             ch_pt_out = FEATURIZE_BATCH.out.pt
                 .flatMap { batch_meta, model_type, pt_files ->
-                    def sorted_files = pt_files.sort { it.name }
+                    def files_list = pt_files instanceof List ? pt_files : [pt_files]
+                    def sorted_files = files_list.sort { it.name }
                     [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                         tuple(meta, model_type, pt_file)
                     }
@@ -80,7 +82,8 @@ workflow EXTRACT_FEATURES {
 
             ch_h5_out = FEATURIZE_BATCH.out.h5
                 .flatMap { batch_meta, model_type, h5_files ->
-                    def sorted_files = h5_files.sort { it.name }
+                    def files_list = h5_files instanceof List ? h5_files : [h5_files]
+                    def sorted_files = files_list.sort { it.name }
                     [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
@@ -108,7 +111,8 @@ workflow EXTRACT_FEATURES {
             // Use indexed matching since output files may use staged names
             ch_pt_out = FEATURIZE_BATCH.out.pt
                 .flatMap { batch_meta, model_type, pt_files ->
-                    def sorted_files = pt_files.sort { it.name }
+                    def files_list = pt_files instanceof List ? pt_files : [pt_files]
+                    def sorted_files = files_list.sort { it.name }
                     [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                         tuple(meta, model_type, pt_file)
                     }
@@ -116,7 +120,8 @@ workflow EXTRACT_FEATURES {
 
             ch_h5_out = FEATURIZE_BATCH.out.h5
                 .flatMap { batch_meta, model_type, h5_files ->
-                    def sorted_files = h5_files.sort { it.name }
+                    def files_list = h5_files instanceof List ? h5_files : [h5_files]
+                    def sorted_files = files_list.sort { it.name }
                     [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
@@ -156,7 +161,8 @@ workflow EXTRACT_FEATURES_ONE_STEP {
         // Use indexed matching since output files may use staged names
         ch_pt_out = TESSELLATE_FEATURIZE_BATCH.out.pt
             .flatMap { batch_meta, model_type, pt_files ->
-                def sorted_files = pt_files.sort { it.name }
+                def files_list = pt_files instanceof List ? pt_files : [pt_files]
+                def sorted_files = files_list.sort { it.name }
                 [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                     tuple(meta, model_type, pt_file)
                 }
@@ -164,7 +170,8 @@ workflow EXTRACT_FEATURES_ONE_STEP {
 
         ch_h5_out = TESSELLATE_FEATURIZE_BATCH.out.h5
             .flatMap { batch_meta, model_type, h5_files ->
-                def sorted_files = h5_files.sort { it.name }
+                def files_list = h5_files instanceof List ? h5_files : [h5_files]
+                def sorted_files = files_list.sort { it.name }
                 [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                     tuple(meta, model_type, h5_file)
                 }
@@ -172,7 +179,8 @@ workflow EXTRACT_FEATURES_ONE_STEP {
 
         ch_patches_out = TESSELLATE_FEATURIZE_BATCH.out.tile_h5
             .flatMap { batch_meta, patch_h5_files ->
-                def sorted_files = patch_h5_files.sort { it.name }
+                def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
+                def sorted_files = files_list.sort { it.name }
                 [batch_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
                     tuple(meta, patch_h5_file)
                 }
@@ -213,5 +221,51 @@ workflow MUSSEL {
                 ch_features,
                 ch_patches)
         }
+
+        // ── WebDataset sharding (opt-in) ──────────────────────────────────────
+        ch_wds_shards = Channel.empty()
+        if (params.wds.enabled) {
+            // Determine group key per slide: oncotree_code or the fixed string "all"
+            ch_pt_keyed = ch_extract_feat.pt.map { meta, model_type, pt_file ->
+                def group = (params.wds.group_by_oncotree && meta.oncotree_code)
+                    ? meta.oncotree_code
+                    : "all"
+                tuple(group, model_type, meta.slide_id, pt_file)
+            }
+
+            if (params.wds.shard_h5) {
+                // Join pt and h5 channels by (group, model_type, slide_id)
+                ch_h5_keyed = ch_extract_feat.h5.map { meta, model_type, h5_file ->
+                    def group = (params.wds.group_by_oncotree && meta.oncotree_code)
+                        ? meta.oncotree_code
+                        : "all"
+                    tuple(group, model_type, meta.slide_id, h5_file)
+                }
+
+                // Collect per (group, model_type) — wait for all slides in each group
+                ch_wds_input = ch_pt_keyed
+                    .join(ch_h5_keyed, by: [0, 1, 2])         // key: [group, model_type, slide_id]
+                    .groupTuple(by: [0, 1])                    // group by (group, model_type)
+                    .map { group, model_type, slide_ids, pt_files, h5_files ->
+                        tuple(group, model_type, slide_ids, pt_files, h5_files)
+                    }
+            } else {
+                // pt only — collect per (group, model_type)
+                ch_wds_input = ch_pt_keyed
+                    .groupTuple(by: [0, 1])                    // group by (group, model_type)
+                    .map { group, model_type, slide_ids, pt_files ->
+                        // Pass an empty list for h5_files so WDS_SHARD input tuple is consistent
+                        tuple(group, model_type, slide_ids, pt_files, [])
+                    }
+            }
+
+            WDS_SHARD(ch_wds_input)
+            ch_wds_shards = WDS_SHARD.out.shards
+        }
+
+    emit:
+        pt         = ch_extract_feat.pt
+        h5         = ch_extract_feat.h5
+        wds_shards = ch_wds_shards
 }
 

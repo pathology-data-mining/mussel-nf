@@ -349,6 +349,39 @@
           "description": "mapping of annotation bmp IDs to class"
         }
       }
+    },
+    "wds": {
+      "title": "WebDataset sharding options",
+      "description": "Pack per-slide feature files into WebDataset-compatible .tar shards",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable WebDataset shard output. When true, per-slide .pt (and optionally .h5) feature files are collected and packed into .tar shards after extraction."
+        },
+        "group_by_oncotree": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, produce separate shard sets per oncotree_code from the sample sheet. Requires oncotree_code column in samples_csv. When false, all slides are sharded together under the group 'all'."
+        },
+        "shard_h5": {
+          "type": "boolean",
+          "default": false,
+          "description": "Extract tile coordinates from .h5 patch-feature files and store as .coords.npy in the shard alongside .features.npy. Note: .h5 files are large."
+        },
+        "max_shard_size": {
+          "type": "integer",
+          "default": 1000,
+          "minimum": 1,
+          "description": "Maximum number of slides per .tar shard."
+        },
+        "shard_prefix": {
+          "type": "string",
+          "default": "",
+          "description": "Filename prefix for shard tar files. Default '' produces 000000.tar (paladin-compatible naming)."
+        }
+      }
     }
   },
   "allOf": [

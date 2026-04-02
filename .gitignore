@@ -1,5 +1,7 @@
 work/
 .nextflow*
+.nf-test/
+.nf-test.log
 tests/data/*.svs
 tests/data/*.tiff
 tests/data/*.tif
@@ -7,3 +9,6 @@ tests/data/*.ndpi
 tests/data/*.scn
 tests/results/
 tests/results_two_step/
+tests/test*.csv
+bin/__pycache__/
+bin/nf-test

@@ -13,3 +13,4 @@ tests/test*.csv
 bin/__pycache__/
 bin/nf-test
 tests/results_multi_slide/
+tests/testdata/*_b.svs

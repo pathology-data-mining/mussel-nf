@@ -23,7 +23,7 @@ workflow {
 
     // Resolve data dir relative to the script location (tests/data/), not via params,
     // so this works regardless of launch directory or how projectDir resolves.
-    def dataDir = file("${workflow.projectDir}/data")
+    def dataDir = file("${workflow.projectDir}/testdata")
     dataDir.mkdirs()
 
     def svs_a = dataDir.resolve('948176.svs')
@@ -32,8 +32,8 @@ workflow {
     if (!svs_a.exists()) {
         log.error """\
             Test SVS not found: ${svs_a}
-            Copy it once with:
-              cp /path/to/Mussel/tests/testdata/948176.svs ${dataDir}/
+            The test slide should be vendored at tests/testdata/948176.svs.
+            Re-clone or restore it from the repository.
             """.stripIndent()
         System.exit(1)
     }

@@ -43,14 +43,8 @@ process MERGE_SAMPLE_FEATURES {
         'patch_features_h5_paths=${h5_paths_arg}' \\
         'sample_ids=${sample_ids_arg}' \\
         output_dir=. \\
+        save_pt=true \\
         ${max_tiles_str}
-
-    python3 -c "
-import h5py, torch, numpy as np
-with h5py.File('${sample_id}.features.h5', 'r') as f:
-    features = torch.from_numpy(np.array(f['features']))
-torch.save(features, '${sample_id}.features.pt')
-"
     """
 }
 

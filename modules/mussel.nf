@@ -73,7 +73,8 @@ workflow EXTRACT_FEATURES {
             // Use indexed matching since output files may use staged names
             ch_pt_out = FEATURIZE_BATCH.out.pt
                 .flatMap { batch_meta, model_type, pt_files ->
-                    def sorted_files = pt_files.sort { it.name }
+                    def files_list = pt_files instanceof List ? pt_files : [pt_files]
+                    def sorted_files = files_list.sort { it.name }
                     [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                         tuple(meta, model_type, pt_file)
                     }
@@ -81,7 +82,8 @@ workflow EXTRACT_FEATURES {
 
             ch_h5_out = FEATURIZE_BATCH.out.h5
                 .flatMap { batch_meta, model_type, h5_files ->
-                    def sorted_files = h5_files.sort { it.name }
+                    def files_list = h5_files instanceof List ? h5_files : [h5_files]
+                    def sorted_files = files_list.sort { it.name }
                     [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
@@ -109,7 +111,8 @@ workflow EXTRACT_FEATURES {
             // Use indexed matching since output files may use staged names
             ch_pt_out = FEATURIZE_BATCH.out.pt
                 .flatMap { batch_meta, model_type, pt_files ->
-                    def sorted_files = pt_files.sort { it.name }
+                    def files_list = pt_files instanceof List ? pt_files : [pt_files]
+                    def sorted_files = files_list.sort { it.name }
                     [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                         tuple(meta, model_type, pt_file)
                     }
@@ -117,7 +120,8 @@ workflow EXTRACT_FEATURES {
 
             ch_h5_out = FEATURIZE_BATCH.out.h5
                 .flatMap { batch_meta, model_type, h5_files ->
-                    def sorted_files = h5_files.sort { it.name }
+                    def files_list = h5_files instanceof List ? h5_files : [h5_files]
+                    def sorted_files = files_list.sort { it.name }
                     [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
@@ -157,7 +161,8 @@ workflow EXTRACT_FEATURES_ONE_STEP {
         // Use indexed matching since output files may use staged names
         ch_pt_out = TESSELLATE_FEATURIZE_BATCH.out.pt
             .flatMap { batch_meta, model_type, pt_files ->
-                def sorted_files = pt_files.sort { it.name }
+                def files_list = pt_files instanceof List ? pt_files : [pt_files]
+                def sorted_files = files_list.sort { it.name }
                 [batch_meta, sorted_files].transpose().collect { meta, pt_file ->
                     tuple(meta, model_type, pt_file)
                 }
@@ -165,7 +170,8 @@ workflow EXTRACT_FEATURES_ONE_STEP {
 
         ch_h5_out = TESSELLATE_FEATURIZE_BATCH.out.h5
             .flatMap { batch_meta, model_type, h5_files ->
-                def sorted_files = h5_files.sort { it.name }
+                def files_list = h5_files instanceof List ? h5_files : [h5_files]
+                def sorted_files = files_list.sort { it.name }
                 [batch_meta, sorted_files].transpose().collect { meta, h5_file ->
                     tuple(meta, model_type, h5_file)
                 }
@@ -173,7 +179,8 @@ workflow EXTRACT_FEATURES_ONE_STEP {
 
         ch_patches_out = TESSELLATE_FEATURIZE_BATCH.out.tile_h5
             .flatMap { batch_meta, patch_h5_files ->
-                def sorted_files = patch_h5_files.sort { it.name }
+                def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
+                def sorted_files = files_list.sort { it.name }
                 [batch_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
                     tuple(meta, patch_h5_file)
                 }

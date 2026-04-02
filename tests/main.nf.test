@@ -1,0 +1,123 @@
+// ── Slide resolution helpers ──────────────────────────────────────────────────
+// Reads MUSSEL_REPO / MUSSEL_TEST_SLIDE from the environment so the tests
+// are portable across any system where the Mussel repository is available.
+// Export them before running:
+//   export MUSSEL_REPO=/path/to/Mussel
+//   nf-test test tests/main.nf.test
+
+def resolveSlide() {
+    def repo = System.getenv('MUSSEL_REPO') ?: '/gpfs/mskmind_ess/limr/repos/Mussel'
+    return System.getenv('MUSSEL_TEST_SLIDE') ?: "${repo}/tests/testdata/948176.svs"
+}
+
+def makeCsv(String slide, boolean oncotree = false) {
+    def id  = new File(slide).name.replaceAll(/\.[^.]+$/, '')
+    def tmp = File.createTempFile('nftest_mussel_', '.csv')
+    tmp.deleteOnExit()
+    tmp.text = oncotree
+        ? "slide_id,slide_path,oncotree_code\n${id},${slide},BRCA\n"
+        : "slide_id,slide_path\n${id},${slide}\n"
+    return tmp.absolutePath
+}
+
+// ── Shard assertions ──────────────────────────────────────────────────────────
+// Checks a WDS shard directory: at least one .tar exists and each tar
+// contains at least one .pt entry.  Uses a plain File + 'tar tf' shell call
+// so this works in any Nextflow/JVM environment without extra dependencies.
+
+def assertShards(String shardDirPath) {
+    def dir = new File(shardDirPath)
+    assert dir.isDirectory() : "Shard directory missing: ${shardDirPath}"
+
+    def tars = dir.listFiles().findAll { it.name.endsWith('.tar') }
+    assert tars.size() > 0 : "No shard-*.tar files in ${shardDirPath}"
+
+    tars.each { tar ->
+        def proc = ['tar', 'tf', tar.absolutePath].execute()
+        proc.waitFor()
+        assert proc.exitValue() == 0 : "tar tf failed for ${tar.name}: ${proc.err.text}"
+        def members = proc.text.trim().split('\n') as List
+        assert members.any { it.endsWith('.pt') } :
+            "No .pt entries in ${tar.name} — found: ${members}"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+nextflow_pipeline {
+
+    name "mussel-nf integration tests"
+    script "../main.nf"
+
+    // ── Standard workflow modes ───────────────────────────────────────────────
+
+    test("one-step workflow produces slide features") {
+        options "-profile test"
+
+        when {
+            params {
+                samples_csv = makeCsv(resolveSlide())
+                outdir      = "${outputDir}"
+            }
+        }
+
+        then {
+            assert workflow.success
+
+            def featDir = new File("${params.outdir}/features/resnet50")
+            assert featDir.isDirectory()
+            assert featDir.listFiles().any { it.name.endsWith('.features.pt') }
+        }
+    }
+
+    test("two-step workflow produces slide features") {
+        options "-profile test_two_step"
+
+        when {
+            params {
+                samples_csv = makeCsv(resolveSlide())
+                outdir      = "${outputDir}"
+            }
+        }
+
+        then {
+            assert workflow.success
+            assert new File("${params.outdir}/features/resnet50").isDirectory()
+        }
+    }
+
+    // ── WebDataset sharding ───────────────────────────────────────────────────
+
+    test("WDS sharding packs features into shard-*.tar (group=all)") {
+        options "-profile test_wds"
+
+        when {
+            params {
+                samples_csv = makeCsv(resolveSlide())
+                outdir      = "${outputDir}"
+            }
+        }
+
+        then {
+            assert workflow.success
+            assertShards("${params.outdir}/wds/resnet50/all")
+        }
+    }
+
+    test("WDS grouped sharding creates per-oncotree shard-*.tar") {
+        options "-profile test_wds_grouped"
+
+        when {
+            params {
+                samples_csv = makeCsv(resolveSlide(), true)   // oncotree=true → BRCA
+                outdir      = "${outputDir}"
+            }
+        }
+
+        then {
+            assert workflow.success
+            assertShards("${params.outdir}/wds/resnet50/BRCA")
+        }
+    }
+
+}

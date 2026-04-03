@@ -277,7 +277,7 @@
           "description": "Number of slides to process together in a batch (controls both Type 2 and Type 3 batching)"
         },
         "max_tiles_per_sample": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "description": "Multi-slide: maximum number of tiles to keep per sample after concatenation. Null keeps all tiles.",
           "default": null
         },

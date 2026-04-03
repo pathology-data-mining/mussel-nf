@@ -117,6 +117,7 @@ workflow {
     new File(tmpdir).mkdirs()
     Channel.topic('slide_meta')
         .map { it[0..2] }
+        // Manifest columns: slide_id, sample_id, workflow_id, key, value
         .collectFile(storeDir: params.outdir, tempDir: tmpdir, sort: false, cache: true) {
             meta, key, value ->
             ["manifest-${timestamp}.csv", "${meta.slide_id},${meta.sample_id},${params.workflow_id},${key},${value}\n"]

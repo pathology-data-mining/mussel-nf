@@ -7,9 +7,7 @@
 //   nextflow run tests/multi_slide.nf -profile test_multi_slide,conda
 //   nextflow run tests/multi_slide.nf -profile test_multi_slide,slurm,cluster
 //
-// The only prerequisite is that tests/data/948176.svs exists.
-// Copy it once with:
-//   cp /path/to/Mussel/tests/testdata/948176.svs tests/data/
+// The only prerequisite is that tests/testdata/948176.svs exists (vendored in the repo).
 
 include { MUSSEL } from '../modules/mussel'
 

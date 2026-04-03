@@ -212,7 +212,7 @@ workflow MUSSEL {
         // feature H5 files (already computed above) into one per-sample output.
         // Groups by (sample_id, model_type) so each invocation handles one model.
         ch_sample_feat_h5 = ch_extract_feat.h5
-            .filter { meta, model_type, h5 -> meta.n_slides > 1 }
+            .filter { meta, model_type, h5 -> (meta.n_slides ?: 1) > 1 }
             .map { meta, model_type, h5 ->
                 tuple(groupKey([sample_id: meta.sample_id, model_type: model_type], meta.n_slides), meta, h5)
             }

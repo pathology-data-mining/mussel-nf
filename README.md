@@ -1,6 +1,6 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.3.0).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.3.2).
 
 ## Requirements
 
@@ -28,7 +28,8 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
     nextflow run main.nf -profile standard,docker --samples_csv samples.csv -resume
     ```
 
-    `samples.csv` must have columns `slide_id` and `slide_path` (required), plus optional `oncotree_code`.
+    `samples.csv` must have columns `slide_id` and `slide_path` (required), plus optional
+    `oncotree_code` and `sample_id`.
     Accepted slide extensions: `.svs`, `.tiff`, `.tif`, `.ndpi`, `.scn`.
 
 3. When the execution completes, results will be in `params.outdir` (default: `results/`).
@@ -190,15 +191,79 @@ results/wds/optimus/all/000001.tar
 ```
 
 
-## Integration tests
+### Multi-slide sample aggregation
 
-A single-slide integration test is included for both workflow modes:
+When a `samples_csv` contains multiple rows with the same `sample_id`, the pipeline produces
+both per-slide features and a merged sample-level output.
 
-```bash
-bash tests/run_integration_test.sh
+Add an optional `sample_id` column to your samples CSV:
+
+```csv
+slide_id,slide_path,sample_id
+biopsy_A,/data/biopsy_A.svs,PATIENT_001
+biopsy_B,/data/biopsy_B.svs,PATIENT_001
+resection,/data/resection.svs,PATIENT_002
 ```
 
-Requires `tests/data/1079807.svs` to be present (not tracked by git — copy or symlink a real slide file).
+Slides sharing a `sample_id` are processed individually through tessellation and feature extraction,
+then their per-slide feature H5 files are concatenated into one sample-level H5 and PT by
+`aggregate_sample_features` (CPU-only — no re-inference). When `sample_id` is omitted it defaults
+to `slide_id`, so existing CSVs continue to work without modification.
+
+Requires `params.featurize.save_features_to_h5 = true` (per-slide H5 files are the aggregation input).
+
+**Output** (in addition to per-slide outputs):
+```
+results/features/{model_type}/{sample_id}.features.h5
+results/features/{model_type}/{sample_id}.features.pt
+```
+
+**Subsampling** (when total tiles exceed a budget):
+
+| Parameter | Default | Description |
+|---|---|---|
+| `featurize.max_tiles_per_sample` | `null` | Max tiles per sample after concatenation |
+| `featurize.subsampling_strategy` | `"random"` | `"random"`, `"proportional"`, or `"equal"` |
+| `featurize.subsampling_seed` | `42` | Random seed for reproducibility |
+
+**Example:**
+```bash
+nextflow run main.nf \
+  --samples_csv multi_patient.csv \
+  --featurize.model_types='["optimus"]' \
+  --featurize.save_features_to_h5=true \
+  --featurize.max_tiles_per_sample=20000 \
+  --featurize.subsampling_strategy=proportional
+```
+
+
+## Integration tests
+
+Integration tests use [nf-test](https://www.nf-test.com) and are run via `make`:
+
+```bash
+make test                  # run all tests
+make test-standard         # one-step workflow
+make test-two-step         # two-step workflow
+make test-wds              # WebDataset flat sharding
+make test-wds-grouped      # WebDataset grouped sharding (by oncotree_code)
+make test-multi-slide      # multi-slide sample aggregation
+```
+
+Extra Nextflow profiles (e.g. `conda`, `slurm,cluster`) can be composed:
+
+```bash
+make test PROFILES=conda
+make test PROFILES=slurm,cluster
+make test-standard NXF_ARGS=-resume
+```
+
+The test slide (`tests/testdata/948176.svs`) is vendored in the repository.
+Override the slide used for the standard/two-step/WDS tests:
+
+```bash
+make test MUSSEL_TEST_SLIDE=/path/to/other.svs
+```
 
 ## Azure Batch support
 

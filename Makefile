@@ -6,6 +6,7 @@
 #   make test-two-step                 # two-step workflow test only
 #   make test-wds                      # WDS flat-sharding test only
 #   make test-wds-grouped              # WDS oncotree-grouped sharding test only
+#   make test-multi-slide              # multi-slide sample aggregation test only
 #
 #   make test          PROFILES=conda            # add extra Nextflow profiles
 #   make test          PROFILES=slurm,cluster
@@ -35,9 +36,9 @@ tests/test.csv:
 tests/test_oncotree.csv:
 	@printf 'slide_id,slide_path,oncotree_code\n$(SLIDE_ID),$(MUSSEL_TEST_SLIDE),BRCA\n' > $@
 
-.PHONY: test test-standard test-two-step test-wds test-wds-grouped help
+.PHONY: test test-standard test-two-step test-wds test-wds-grouped test-multi-slide help
 
-test: test-standard test-two-step test-wds test-wds-grouped
+test: test-standard test-two-step test-wds test-wds-grouped test-multi-slide
 
 test-standard: tests/test.csv
 	$(nf_test) test tests/pipeline.nf.test $(nf_flags)
@@ -51,6 +52,9 @@ test-wds: tests/test.csv
 test-wds-grouped: tests/test_oncotree.csv
 	$(nf_test) test tests/pipeline_wds_grouped.nf.test $(nf_flags)
 
+test-multi-slide:
+	$(nf_test) test tests/multi_slide.nf.test $(nf_flags)
+
 help:
 	@echo "mussel-nf integration tests"
 	@echo ""
@@ -60,6 +64,7 @@ help:
 	@echo "  make test-two-step      two-step workflow (main.nf -profile test_two_step)"
 	@echo "  make test-wds           WDS flat sharding (main.nf -profile test_wds)"
 	@echo "  make test-wds-grouped   WDS per-oncotree sharding (main.nf -profile test_wds_grouped)"
+	@echo "  make test-multi-slide   multi-slide sample aggregation (tests/multi_slide.nf)"
 	@echo ""
 	@echo "Variables:"
 	@echo "  MUSSEL_TEST_SLIDE=<path>  path to a test SVS slide (default: tests/testdata/948176.svs)"

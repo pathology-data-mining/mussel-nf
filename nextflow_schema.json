@@ -276,6 +276,22 @@
           "default": 8,
           "description": "Number of slides to process together in a batch (controls both Type 2 and Type 3 batching)"
         },
+        "max_tiles_per_sample": {
+          "type": ["integer", "null"],
+          "description": "Multi-slide: maximum number of tiles to keep per sample after concatenation. Null keeps all tiles.",
+          "default": null
+        },
+        "subsampling_strategy": {
+          "type": "string",
+          "default": "random",
+          "description": "Multi-slide: tile subsampling strategy when max_tiles_per_sample is set.",
+          "enum": ["random", "proportional", "equal"]
+        },
+        "subsampling_seed": {
+          "type": "integer",
+          "default": 42,
+          "description": "Multi-slide: random seed for subsampling reproducibility."
+        },
         "model_paths": {
           "type": "object",
           "description": "paths to models",

@@ -36,7 +36,9 @@ process MERGE_SAMPLE_FEATURES {
     h5_paths_arg = "[${h5_names.join(',')}]"
     sample_ids_arg = "[${h5_names.collect { sample_id }.join(',')}]"
 
-    max_tiles_str = (params.featurize.max_tiles_per_sample != null) ? "max_tiles=${params.featurize.max_tiles_per_sample}" : ""
+    max_tiles_str        = (params.featurize.max_tiles_per_sample != null) ? "max_tiles=${params.featurize.max_tiles_per_sample}" : ""
+    subsampling_strategy = params.featurize.subsampling_strategy ?: "random"
+    subsampling_seed     = params.featurize.subsampling_seed ?: 42
 
     """
     aggregate_sample_features \\
@@ -44,6 +46,8 @@ process MERGE_SAMPLE_FEATURES {
         'sample_ids=${sample_ids_arg}' \\
         output_dir=. \\
         save_pt=true \\
+        subsampling_strategy=${subsampling_strategy} \\
+        seed=${subsampling_seed} \\
         ${max_tiles_str}
     """
 }

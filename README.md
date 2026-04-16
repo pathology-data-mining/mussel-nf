@@ -9,6 +9,17 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
 * Nextflow ≥ 24.x (uses [nf-schema](https://nextflow-io.github.io/nf-schema/) plugin)
 * One of: Docker, Apptainer, or a Conda/Mamba environment
 
+### Conda environment
+
+Two environment files are provided depending on which models you need:
+
+| File | Extra | Supported models |
+|---|---|---|
+| `mussel_env.yaml` | `torch-gpu` | All models **except** `googlepath` |
+| `mussel_env_tf.yaml` | `tensorflow-gpu` | `googlepath` (Google Path Foundation, TensorFlow-based) |
+
+The `torch-gpu` and `tensorflow-gpu` extras are mutually exclusive — they cannot be installed together. Use `-profile conda` with the default `mussel_env.yaml` for most workflows, and switch to `mussel_env_tf.yaml` only when running `googlepath`.
+
 ## Quickstart
 
 1. Install Nextflow:

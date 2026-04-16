@@ -1,0 +1,6 @@
+name: mussel-tf
+dependencies:
+  - python=3.11.*
+  - pip
+  - pip:
+    - mussel[tensorflow-gpu] @ git+ssh://git@github.com/pathology-data-mining/Mussel.git@v1.3.2

@@ -1,0 +1,6 @@
+name: mussel-fastattn
+dependencies:
+  - python=3.11.*
+  - pip
+  - pip:
+    - mussel[fastattn] @ git+ssh://git@github.com/pathology-data-mining/Mussel.git@v1.3.2

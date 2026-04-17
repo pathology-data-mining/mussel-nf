@@ -9,7 +9,7 @@ process MERGE_ANNOTATION_FEATURES {
     path(class_mapping_yaml)
 
     output:
-    tuple val(model_type), path("${meta.slide_id}.annotation_features.parquet")
+    tuple val(model_type), path("${meta.slide_id}.annotation_features.parquet"), optional: true
 
     script:
     """
@@ -73,6 +73,7 @@ process LINEAR_PROBE_BENCHMARK {
     def n_seeds     = params.linear_probe.n_seeds ?: 5
     def n_bootstrap = params.linear_probe.n_bootstrap ?: 1000
     def pos_label   = params.linear_probe.positive_annotation_label ?: 1
+    def multiclass  = params.linear_probe.multiclass ? "true" : "false"
     """
     linear_probe_benchmark \
         features_annotation_parquet_path=${annotation_features} \
@@ -81,7 +82,8 @@ process LINEAR_PROBE_BENCHMARK {
         'penalties=[${penalties}]' \
         n_seeds=${n_seeds} \
         n_bootstrap=${n_bootstrap} \
-        positive_annotation_label=${pos_label}
+        positive_annotation_label=${pos_label} \
+        multiclass=${multiclass}
     """
 
 }

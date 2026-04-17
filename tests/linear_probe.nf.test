@@ -1,0 +1,94 @@
+nextflow_pipeline {
+    name   "LINEAR_PROBE workflow — end-to-end benchmark"
+    script "./linear_probe.nf"
+    profile "test_linear_probe"
+
+    test("workflow succeeds and produces all benchmark outputs") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            def benchDir = path("${outputDir}/linear_probe_benchmark/resnet50")
+
+            // ── Core classification reports ────────────────────────────────
+            assert benchDir.resolve("classification_report.csv").exists()
+            assert benchDir.resolve("classification_report_test.csv").exists()
+
+            // ── Confusion matrices ─────────────────────────────────────────
+            assert benchDir.resolve("confusion_matrix.png").exists()
+            assert benchDir.resolve("confusion_matrix_test.png").exists()
+
+            // ── Curve plots ────────────────────────────────────────────────
+            assert benchDir.resolve("roc_curve.png").exists()
+            assert benchDir.resolve("pr_curve.png").exists()
+
+            // ── Diagnostic plots ───────────────────────────────────────────
+            assert benchDir.resolve("calibration_curve.png").exists()
+            assert benchDir.resolve("feature_importance.png").exists()
+            assert benchDir.resolve("grid_search_heatmap.png").exists()
+
+            // ── Tabular results ────────────────────────────────────────────
+            assert benchDir.resolve("cv_results.csv").exists()
+
+            // ── Summary JSON — validate structure ──────────────────────────
+            def summaryJson = benchDir.resolve("results.json")
+            assert summaryJson.exists()
+
+            def summary = new groovy.json.JsonSlurper().parse(summaryJson.toFile())
+
+            assert summary.n_seeds == 1
+            assert summary.containsKey("best_params")
+            assert summary.containsKey("best_cv_auc")
+
+            for (split in ["val", "test"]) {
+                assert summary.containsKey(split), "Missing '${split}' key in results.json"
+                def m = summary[split]
+                assert m.containsKey("tile_auc_roc"),           "Missing tile_auc_roc in ${split}"
+                assert m.containsKey("tile_f1"),                "Missing tile_f1 in ${split}"
+                assert m.containsKey("tile_average_precision"), "Missing tile_average_precision in ${split}"
+                def auc = m.tile_auc_roc.mean as double
+                assert auc >= 0.0 && auc <= 1.0,               "AUC out of [0,1] range in ${split}: ${auc}"
+            }
+
+            // Bootstrap CI present on test split (primary seed)
+            def ci = summary.test.tile_auc_roc.bootstrap_ci_95
+            assert ci != null && ci.size() == 2, "Bootstrap CI missing or malformed"
+            assert (ci[0] as double) <= (ci[1] as double), "Bootstrap CI lower > upper"
+
+            // ── Intermediate parquet (stacked annotation features) ─────────
+            assert path("${outputDir}/annotation_features/resnet50/annotation_features.parquet").exists()
+        }
+    }
+
+    test("both annotation classes present after class-mapping overlay") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            // Verify that the stacked parquet contains both mapped classes (0 and 1),
+            // confirming the class-mapping branch in merge_annotation_features works.
+            def parquet = path("${outputDir}/annotation_features/resnet50/annotation_features.parquet")
+            assert parquet.exists()
+
+            // Read with Python and check annotation values
+            def result = ["python3", "-c", """
+import geopandas as gpd
+gdf = gpd.read_parquet('${parquet}')
+vals = set(gdf['annotation'].unique().tolist())
+assert 0 in vals, f'Non-tumour annotation (0) missing; found {vals}'
+assert 1 in vals, f'Tumour annotation (1) missing; found {vals}'
+print('OK annotation values:', sorted(vals))
+"""].execute()
+            result.waitFor()
+            assert result.exitValue() == 0 : "Annotation class check failed:\n${result.err.text}"
+        }
+    }
+}

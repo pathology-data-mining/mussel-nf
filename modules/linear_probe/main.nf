@@ -57,11 +57,32 @@ process LINEAR_PROBE_BENCHMARK {
     output:
     path "classification_report.csv"
     path "confusion_matrix.png"
+    path "classification_report_test.csv"
+    path "confusion_matrix_test.png"
+    path "roc_curve.png"
+    path "pr_curve.png"
+    path "grid_search_heatmap.png"
+    path "feature_importance.png"
+    path "calibration_curve.png"
+    path "cv_results.csv"
+    path "results.json"
 
     script:
+    def cv          = params.linear_probe.cv ?: 5
+    def C_values    = (params.linear_probe.C_values ?: [0.001, 0.01, 0.1, 1.0, 10.0]).join(",")
+    def penalties   = (params.linear_probe.penalties ?: ["l2"]).join(",")
+    def n_seeds     = params.linear_probe.n_seeds ?: 5
+    def n_bootstrap = params.linear_probe.n_bootstrap ?: 1000
+    def pos_label   = params.linear_probe.positive_annotation_label ?: 1
     """
     linear_probe_benchmark \
-        features_annotation_parquet_path=${annotation_features}
+        features_annotation_parquet_path=${annotation_features} \
+        cv=${cv} \
+        'C_values=[${C_values}]' \
+        'penalties=[${penalties}]' \
+        n_seeds=${n_seeds} \
+        n_bootstrap=${n_bootstrap} \
+        positive_annotation_label=${pos_label}
     """
 
 }

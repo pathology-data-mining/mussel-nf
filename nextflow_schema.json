@@ -363,6 +363,36 @@
         "annotation_class_mapping_yaml": {
           "type": "string",
           "description": "mapping of annotation bmp IDs to class"
+        },
+        "cv": {
+          "type": "integer",
+          "default": 5,
+          "description": "Cross-validation folds for GridSearchCV hyperparameter tuning"
+        },
+        "C_values": {
+          "type": "array",
+          "default": [0.001, 0.01, 0.1, 1.0, 10.0],
+          "description": "Regularisation strengths to search in GridSearchCV"
+        },
+        "penalties": {
+          "type": "array",
+          "default": ["l2"],
+          "description": "Penalty types to search in GridSearchCV (l1, l2, elasticnet, none)"
+        },
+        "n_seeds": {
+          "type": "integer",
+          "default": 5,
+          "description": "Number of random seeds; mean +/- std reported across seeds"
+        },
+        "n_bootstrap": {
+          "type": "integer",
+          "default": 1000,
+          "description": "Bootstrap resamples for 95% CI on test AUC-ROC (primary seed)"
+        },
+        "positive_annotation_label": {
+          "type": "integer",
+          "default": 1,
+          "description": "Annotation value treated as the positive class. Default 1 for class-mapped 0/1 annotations; set to 2 for raw (unmapped) BMP annotation values."
         }
       }
     },

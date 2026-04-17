@@ -67,13 +67,14 @@ process LINEAR_PROBE_BENCHMARK {
     path "results.json"
 
     script:
-    def cv          = params.linear_probe.cv ?: 5
-    def C_values    = (params.linear_probe.C_values ?: [0.001, 0.01, 0.1, 1.0, 10.0]).join(",")
-    def penalties   = (params.linear_probe.penalties ?: ["l2"]).join(",")
-    def n_seeds     = params.linear_probe.n_seeds ?: 5
-    def n_bootstrap = params.linear_probe.n_bootstrap ?: 1000
-    def pos_label   = params.linear_probe.positive_annotation_label ?: 1
-    def multiclass  = params.linear_probe.multiclass ? "true" : "false"
+    def cv           = params.linear_probe.cv ?: 5
+    def C_values     = (params.linear_probe.C_values ?: [0.001, 0.01, 0.1, 1.0, 10.0]).join(",")
+    def penalties    = (params.linear_probe.penalties ?: ["l2"]).join(",")
+    def n_seeds      = params.linear_probe.n_seeds ?: 5
+    def n_bootstrap  = params.linear_probe.n_bootstrap ?: 1000
+    def random_state = params.linear_probe.random_state ?: 42
+    def pos_label    = params.linear_probe.positive_annotation_label ?: 1
+    def multiclass   = params.linear_probe.multiclass ? "true" : "false"
     """
     linear_probe_benchmark \
         features_annotation_parquet_path=${annotation_features} \
@@ -82,6 +83,7 @@ process LINEAR_PROBE_BENCHMARK {
         'penalties=[${penalties}]' \
         n_seeds=${n_seeds} \
         n_bootstrap=${n_bootstrap} \
+        random_state=${random_state} \
         positive_annotation_label=${pos_label} \
         multiclass=${multiclass}
     """

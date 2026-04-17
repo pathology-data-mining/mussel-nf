@@ -36,11 +36,10 @@ process STACK_ANNOTATION_FEATURES {
     script:
     """
     #!/usr/bin/env python
-    import geopandas as gpd
     import pandas as pd
     files = "${annotation_features}".split()
-    dfs = [gpd.read_parquet(file) for file in files]
-    df = pd.concat(dfs)
+    dfs = [pd.read_parquet(file) for file in files]
+    df = pd.concat(dfs, ignore_index=True)
     df.to_parquet("annotation_features.parquet")
     """
 

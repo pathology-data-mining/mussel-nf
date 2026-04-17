@@ -80,8 +80,8 @@ nextflow_pipeline {
 
             // Read with Python and check annotation values
             def result = ["python3", "-c", """
-import geopandas as gpd
-gdf = gpd.read_parquet('${parquet}')
+import pandas as pd
+gdf = pd.read_parquet('${parquet}')
 vals = set(gdf['annotation'].unique().tolist())
 assert 0 in vals, f'Non-tumour annotation (0) missing; found {vals}'
 assert 1 in vals, f'Tumour annotation (1) missing; found {vals}'

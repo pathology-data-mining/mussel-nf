@@ -14,13 +14,20 @@ HEIGHT     = PATCH_SIZE             # 64
 RNG        = np.random.default_rng(42)
 
 SLIDE_IDS  = [f"lp_slide_{i:04d}" for i in range(1, N_SLIDES + 1)]
-POS_SLIDES = set(SLIDE_IDS[:N_SLIDES // 2])
+# First 10 slides: majority positive (7 class-1 tiles, 3 class-4 tiles).
+# Last  10 slides: majority negative (3 class-1 tiles, 7 class-4 tiles).
+# Every slide has BOTH classes so any val/test split always has positive examples.
+POS_TILES  = {sid: 7 if i < N_SLIDES // 2 else 3
+              for i, sid in enumerate(SLIDE_IDS)}
 
 for slide_id in SLIDE_IDS:
-    positive = slide_id in POS_SLIDES
-    # Features drawn from class-specific Gaussians so there is a weak real signal
-    mean     = 0.5 if positive else -0.5
-    features = RNG.normal(loc=mean, scale=1.0, size=(N_TILES, N_FEATURES)).astype("float32")
+    n_pos = POS_TILES[slide_id]
+    n_neg = N_TILES - n_pos
+
+    # Features: positive tiles drawn from N(+1,1), negative from N(-1,1).
+    pos_feat = RNG.normal(loc=+1.0, scale=1.0, size=(n_pos, N_FEATURES)).astype("float32")
+    neg_feat = RNG.normal(loc=-1.0, scale=1.0, size=(n_neg, N_FEATURES)).astype("float32")
+    features = np.vstack([pos_feat, neg_feat])
     coords   = np.array([[i * PATCH_SIZE, 0] for i in range(N_TILES)], dtype="float32")
 
     h5_path = os.path.join(OUT, f"{slide_id}.h5")
@@ -29,11 +36,9 @@ for slide_id in SLIDE_IDS:
         ds.attrs["patch_size"] = PATCH_SIZE
         f.create_dataset("features", data=features)
 
-    # BMP: positive slides -> left half class-1 (tumour), right half class-4 (non-tumour)
-    #      negative slides -> entirely class-4
+    # BMP: first n_pos tiles → class-1 (tumour), remaining → class-4 (non-tumour).
     bmp = np.full((HEIGHT, WIDTH), 4, dtype="uint8")
-    if positive:
-        bmp[:, : WIDTH // 2] = 1
+    bmp[:, : n_pos * PATCH_SIZE] = 1
     bmp_path = os.path.join(OUT, f"{slide_id}.bmp")
     Image.fromarray(bmp).save(bmp_path)
 

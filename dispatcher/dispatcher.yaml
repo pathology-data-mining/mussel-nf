@@ -1,0 +1,43 @@
+# mussel-dispatcher configuration
+# Copy this file and edit paths before running.
+
+repo_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf
+nextflow_profiles: cluster,conda
+outdir: /gpfs/mskmind_ess/limr/repos/mussel-nf/results
+work_base_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf/work/dispatcher
+dispatch_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf/dispatcher/batches
+state_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf/dispatcher/state
+log_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf/dispatcher/logs
+
+# Parallelism
+max_concurrent_runs: 2
+
+# Batching
+batch_size: 20           # dispatch when this many slides accumulate
+min_batch_size: 1        # don't dispatch fewer than this (unless forced on shutdown)
+max_wait_seconds: 300    # dispatch after this many seconds regardless of batch_size
+
+# Behaviour
+retry_failed: true       # re-queue slides whose batch failed on restart
+cleanup_work_dir: false  # delete per-batch work/ dirs after success
+# combined_manifest_path: /gpfs/mskmind_ess/limr/repos/mussel-nf/results/manifest-combined.csv
+#   ^ defaults to {outdir}/manifest-combined.csv if not set
+
+watchers:
+  - type: local
+    path: /gpfs/incoming/slides
+    poll_interval_seconds: 60
+    extensions: [.svs, .tiff, .tif, .ndpi, .scn]
+    recursive: true
+    stability_wait_seconds: 30   # seconds between two identical size+mtime polls
+    min_file_size_mb: 10         # skip files smaller than this
+
+  # Uncomment and edit to add an S3 (or on-prem ECS) watcher:
+  # - type: s3
+  #   bucket: my-bucket
+  #   prefix: incoming/slides/
+  #   poll_interval_seconds: 120
+  #   extensions: [.svs, .ndpi]
+  #   min_file_size_bytes: 10000000
+  #   # aws_profile: my-profile
+  #   # endpoint_url: http://pmindecs.mskcc.org:9020

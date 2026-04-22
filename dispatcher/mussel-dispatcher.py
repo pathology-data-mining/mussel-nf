@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
@@ -271,6 +272,10 @@ class ReadinessChecker:
         # stable — check elapsed
         return (now - prev[2]) >= self.stability_wait
 
+    def discard(self, path: str) -> None:
+        """Remove a path from the snapshot cache once it has been accepted/queued."""
+        self._snapshots.pop(path, None)
+
 
 # ---------------------------------------------------------------------------
 # Local Watcher
@@ -318,6 +323,7 @@ class LocalWatcher(threading.Thread):
                     slide_id = Path(path).stem
                     log.info("New slide ready: %s", path)
                     self.state.add_slide(path, slide_id)
+                    self.checker.discard(path)
                     self.pending.append({"slide_path": path, "slide_id": slide_id})
 
 
@@ -429,13 +435,12 @@ def collect_manifests(outdir: str, combined_path: str) -> int:
     for mf in manifest_files:
         try:
             with open(mf, newline="") as f:
-                for line in f:
-                    line = line.rstrip("\n")
-                    if not line:
+                reader = csv.reader(f)
+                for parts in reader:
+                    if not parts:
                         continue
-                    parts = line.split(",", 3)
                     if len(parts) != 4:
-                        log.warning("collect_manifests: skipping malformed line in %s: %r", mf, line)
+                        log.warning("collect_manifests: skipping malformed line in %s: %r", mf, parts)
                         continue
                     slide_id, workflow_id, key, value = parts
                     rows[(slide_id, key)] = {
@@ -612,7 +617,7 @@ class BatchScheduler:
         if batch:
             log.info("Dispatching batch of %d slides (force=%s, size_trigger=%s, time_trigger=%s)",
                      len(batch), force, size_trigger, time_trigger)
-            batch_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+            batch_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
             self.run_manager.submit(batch_id, batch)
 
 
@@ -657,9 +662,12 @@ class RunManager:
 # Recovery
 # ---------------------------------------------------------------------------
 
-def recover_in_flight(state: StateStore, pending_deque: deque):
+def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: bool = True):
     """
     On restart, find batches that were RUNNING and reset their slides to PENDING.
+    When retry_failed=True (default), the recovered slides are re-enqueued so
+    they will be dispatched again.  Set retry_failed=False to skip re-enqueueing
+    (slides remain in the state DB as PENDING but won't be dispatched this run).
     """
     running = state.get_running_batches()
     if not running:
@@ -672,10 +680,13 @@ def recover_in_flight(state: StateStore, pending_deque: deque):
         # Mark the batch itself as failed so it won't linger as RUNNING
         state.complete_batch(batch_id, exit_code=-1)
 
-    # Re-enqueue recovered pending slides
-    for slide in state.get_pending_slides():
-        pending_deque.append(slide)
-    log.info("Re-enqueued %d recovered slides.", len(pending_deque))
+    if retry_failed:
+        # Re-enqueue recovered pending slides
+        for slide in state.get_pending_slides():
+            pending_deque.append(slide)
+        log.info("Re-enqueued %d recovered slides.", len(pending_deque))
+    else:
+        log.info("retry_failed=False — recovered slides left as PENDING; not re-enqueuing.")
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +734,7 @@ def main():
     pending_deque: deque = deque()
 
     # Recovery
-    recover_in_flight(state, pending_deque)
+    recover_in_flight(state, pending_deque, cfg.retry_failed)
 
     # RunManager
     run_manager = RunManager(cfg, state)

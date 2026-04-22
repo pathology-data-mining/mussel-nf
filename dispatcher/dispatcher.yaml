@@ -1,13 +1,14 @@
 # mussel-dispatcher configuration
 # Copy this file and edit paths before running.
+# All /path/to/... entries are placeholders — replace with absolute paths for your site.
 
-repo_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf
+repo_dir: /path/to/mussel-nf          # root of this repository checkout
 nextflow_profiles: cluster,conda
-outdir: /gpfs/mskmind_ess/limr/repos/mussel-nf/results
-work_base_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf/work/dispatcher
-dispatch_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf/dispatcher/batches
-state_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf/dispatcher/state
-log_dir: /gpfs/mskmind_ess/limr/repos/mussel-nf/dispatcher/logs
+outdir: /path/to/results              # nextflow --outdir; manifest CSVs are written here
+work_base_dir: /path/to/work/dispatcher
+dispatch_dir: /path/to/dispatcher/batches
+state_dir: /path/to/dispatcher/state
+log_dir: /path/to/dispatcher/logs
 
 # Parallelism
 max_concurrent_runs: 2
@@ -20,12 +21,12 @@ max_wait_seconds: 300    # dispatch after this many seconds regardless of batch_
 # Behaviour
 retry_failed: true       # re-queue slides whose batch failed on restart
 cleanup_work_dir: false  # delete per-batch work/ dirs after success
-# combined_manifest_path: /gpfs/mskmind_ess/limr/repos/mussel-nf/results/manifest-combined.csv
+# combined_manifest_path: /path/to/results/manifest-combined.csv
 #   ^ defaults to {outdir}/manifest-combined.csv if not set
 
 watchers:
   - type: local
-    path: /gpfs/incoming/slides
+    path: /path/to/incoming/slides
     poll_interval_seconds: 60
     extensions: [.svs, .tiff, .tif, .ndpi, .scn]
     recursive: true

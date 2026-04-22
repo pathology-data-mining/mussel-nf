@@ -65,6 +65,15 @@ process TESSELLATE {
         ${save_tile_param} \
         ${stitch_tile_param}
     """
+
+    stub:
+    publish_path = "tiles/"
+    """
+    #!/usr/bin/env python3
+    import h5py, numpy as np
+    with h5py.File("${meta.slide_id}.patch.h5", "w") as f:
+        f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+    """
 }
 
 process FILTER_TILES {
@@ -93,6 +102,17 @@ process FILTER_TILES {
         output_pt_path=${meta.slide_id}.features.pt \
         classifier_threshold=${params.tiling.filter_threshold} \
         classifier_pkl=${params.tiling.filter_model_path}
+    """
+
+    stub:
+    tiles_publish_path = "filter_tiles/"
+    pt_publish_path    = "features/${model_type}/"
+    """
+    #!/usr/bin/env python3
+    import h5py, numpy as np, torch
+    with h5py.File("${meta.slide_id}.patch.h5", "w") as f:
+        f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+    torch.save(torch.zeros(1, 8), "${meta.slide_id}.features.pt")
     """
 }
 

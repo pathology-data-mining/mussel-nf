@@ -91,6 +91,8 @@ process FEATURIZE_BATCH {
 
     stub:
     stub_slide_ids = slide_batch.collect { meta, slide, patch_h5 -> meta.slide_id }.join(',')
+    batch_metadata = slide_batch.collect { meta, slide, patch_h5 -> meta }
+    model_type = (params.featurize.slide_to_patch_mapping && params.featurize.slide_to_patch_mapping[model_type_input]) ? params.featurize.slide_to_patch_mapping[model_type_input] : model_type_input
     """
     #!/usr/bin/env python3
     import os, torch, h5py, numpy as np

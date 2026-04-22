@@ -123,3 +123,64 @@ jobs:
       - name: Run pipeline stub test
         run: |
           nf-test test tests/pipeline_stub.nf.test --profile test_stub
+
+  # ── All other stub tests (two-step, filter, WDS, WDS-grouped, CLIP, multi-slide) ──
+  nf-test-stub-variants:
+    name: nf-test — pipeline stub variants
+    runs-on: ubuntu-latest
+
+    env:
+      NXF_ANSI_LOG: false
+      NXF_OPTS: "-Xmx2g"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python stub dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install h5py numpy
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          nextflow -version
+
+      - name: Install nf-test
+        run: |
+          curl -fsSL https://code.askimed.com/install/nf-test | bash
+          sudo mv nf-test /usr/local/bin/
+          nf-test version
+
+      - name: Generate test samplesheets
+        run: |
+          SLIDE="${GITHUB_WORKSPACE}/tests/testdata/948176.svs"
+          SLIDE_B="${GITHUB_WORKSPACE}/tests/testdata/948176_b.svs"
+          echo "slide_id,slide_path"                                   > tests/test.csv
+          echo "948176,${SLIDE}"                                       >> tests/test.csv
+          echo "slide_id,slide_path,oncotree_code"                     > tests/test_oncotree.csv
+          echo "948176,${SLIDE},BRCA"                                  >> tests/test_oncotree.csv
+          echo "slide_id,slide_path,sample_id"                         > tests/test_multi_slide.csv
+          echo "948176_A,${SLIDE},PATIENT_STUB"                        >> tests/test_multi_slide.csv
+          echo "948176_B,${SLIDE_B},PATIENT_STUB"                      >> tests/test_multi_slide.csv
+
+      - name: Run stub variant tests
+        run: |
+          nf-test test \
+            tests/pipeline_stub_two_step.nf.test \
+            tests/pipeline_stub_filter.nf.test \
+            tests/pipeline_stub_wds.nf.test \
+            tests/pipeline_stub_wds_grouped.nf.test \
+            tests/pipeline_stub_clip.nf.test \
+            tests/pipeline_stub_multi_slide.nf.test

@@ -50,5 +50,14 @@ process MERGE_SAMPLE_FEATURES {
         seed=${subsampling_seed} \\
         ${max_tiles_str}
     """
+
+    stub:
+    """
+    #!/usr/bin/env python3
+    import torch, h5py, numpy as np
+    torch.save(torch.zeros(1, 8), "${sample_id}.features.pt")
+    with h5py.File("${sample_id}.features.h5", "w") as f:
+        f.create_dataset("features", data=np.zeros((1, 8), dtype="float32"))
+    """
 }
 

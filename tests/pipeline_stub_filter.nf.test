@@ -1,0 +1,19 @@
+nextflow_pipeline {
+    name   "MUSSEL two-step + filter-tiles — stub mode"
+    script "../main.nf"
+    profile "test_stub_filter"
+    options "-stub"
+
+    // Exercises: TESSELLATE → FILTER_FEATURIZE → FILTER_TILES → FEATURIZE_BATCH
+    test("filter-tiles stub workflow succeeds and publishes filtered features") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            assert path("${outputDir}/features/resnet50/948176.features.pt").exists()
+            assert path("${outputDir}/features/resnet50/948176.features.h5").exists()
+            assert path("${outputDir}/filter_tiles/9481/948176.patch.h5").exists()
+        }
+    }
+}

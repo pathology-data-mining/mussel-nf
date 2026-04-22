@@ -13,4 +13,11 @@ tests/test*.csv
 bin/__pycache__/
 bin/nf-test
 tests/results_multi_slide/
+tests/results_stub/
+tests/results_stub_two_step/
+tests/results_stub_filter/
+tests/results_stub_wds/
+tests/results_stub_wds_grouped/
+tests/results_stub_clip/
+tests/results_stub_multi_slide/
 tests/testdata/*_b.svs

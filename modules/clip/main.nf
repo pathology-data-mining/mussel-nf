@@ -22,6 +22,13 @@ process CREATE_CLASS_EMBEDDINGS {
         output_pt_path=${oncotree_code}.${model_type}.class_embedding.pt \
         classes="${classes}"
     """
+
+    stub:
+    """
+    #!/usr/bin/env python3
+    import torch
+    torch.save(torch.zeros(1, 8), "${oncotree_code}.${model_type}.class_embedding.pt")
+    """
 }
 
 process ANNOTATE {
@@ -46,6 +53,12 @@ process ANNOTATE {
         classes="${classes}" \
         class_embedding_pt_path=$class_embedding \
         output_csv_path=${meta.slide_id}.annotation.csv
+    """
+
+    stub:
+    """
+    echo "class,score" > ${meta.slide_id}.annotation.csv
+    echo "stub,1.0"   >> ${meta.slide_id}.annotation.csv
     """
 }
 
@@ -77,6 +90,15 @@ process CACHE_TILES {
         output_pt_path=${meta.slide_id}.cache.pt \
         num_workers=${task.cpus} \
         limit_to_class="${classes}"
+    """
+
+    stub:
+    """
+    #!/usr/bin/env python3
+    import json, torch
+    with open("${meta.slide_id}.indices.json", "w") as f:
+        json.dump({}, f)
+    torch.save(torch.zeros(1, 8), "${meta.slide_id}.cache.pt")
     """
 }
 

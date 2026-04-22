@@ -59,4 +59,15 @@ process WDS_SHARD {
         --prefix '${prefix}' \\
         ${h5_arg}
     """
+
+    stub:
+    """
+    #!/usr/bin/env python3
+    import tarfile, io
+    with tarfile.open("${prefix}000000.tar", "w") as t:
+        data = b""
+        info = tarfile.TarInfo(name="stub.txt")
+        info.size = 0
+        t.addfile(info, io.BytesIO(data))
+    """
 }

@@ -66,10 +66,9 @@ jobs:
           pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install "mussel @ git+https://github.com/pathology-data-mining/Mussel.git@v1.3.3"
+          echo "MUSSEL_VENV=$HOME/.mussel-venv" >> $GITHUB_ENV
 
       - name: Run linear probe integration test
-        env:
-          MUSSEL_VENV: ${{ env.HOME }}/.mussel-venv
         run: |
           nf-test test tests/linear_probe.nf.test --profile test_linear_probe
 
@@ -114,6 +113,9 @@ jobs:
         run: |
           echo "slide_id,slide_path" > tests/test.csv
           echo "948176,${GITHUB_WORKSPACE}/tests/testdata/948176.svs" >> tests/test.csv
+
+      - name: Set dummy HF_TOKEN secret for stub run
+        run: nextflow secrets set HF_TOKEN "stub_ci_token_not_real"
 
       - name: Run pipeline stub test
         run: |
@@ -163,6 +165,9 @@ jobs:
           printf 'slide_id,slide_path\n948176,%s\n' "$SLIDE" > tests/test.csv
           printf 'slide_id,slide_path,oncotree_code\n948176,%s,BRCA\n' "$SLIDE" > tests/test_oncotree.csv
           printf 'slide_id,slide_path,sample_id\n948176_A,%s,PATIENT_STUB\n948176_B,%s,PATIENT_STUB\n' "$SLIDE" "$SLIDE_B" > tests/test_multi_slide.csv
+
+      - name: Set dummy HF_TOKEN secret for stub run
+        run: nextflow secrets set HF_TOKEN "stub_ci_token_not_real"
 
       - name: Run stub variant tests
         run: |

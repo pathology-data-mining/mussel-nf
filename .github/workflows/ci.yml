@@ -26,7 +26,7 @@ jobs:
           pip install numpy pandas pytest webdataset
 
       - name: Run pytest
-        run: pytest tests/test_tcga_scripts.py -v
+        run: pytest tests/ -v --ignore=tests/testdata
 
   # ── Linear probe integration test (no GPU, no real slides) ────────────────
   nf-test-linear-probe:
@@ -57,7 +57,7 @@ jobs:
 
       - name: Install nf-test
         run: |
-          curl -fsSL https://code.askimed.com/install/nf-test | bash
+          curl -fsSL https://github.com/askimed/nf-test/releases/download/v0.9.5/nf-test-0.9.5.tar.gz | tar -xz
           sudo mv nf-test /usr/local/bin/
           nf-test version
 
@@ -111,7 +111,7 @@ jobs:
 
       - name: Install nf-test
         run: |
-          curl -fsSL https://code.askimed.com/install/nf-test | bash
+          curl -fsSL https://github.com/askimed/nf-test/releases/download/v0.9.5/nf-test-0.9.5.tar.gz | tar -xz
           sudo mv nf-test /usr/local/bin/
           nf-test version
 
@@ -159,7 +159,7 @@ jobs:
 
       - name: Install nf-test
         run: |
-          curl -fsSL https://code.askimed.com/install/nf-test | bash
+          curl -fsSL https://github.com/askimed/nf-test/releases/download/v0.9.5/nf-test-0.9.5.tar.gz | tar -xz
           sudo mv nf-test /usr/local/bin/
           nf-test version
 

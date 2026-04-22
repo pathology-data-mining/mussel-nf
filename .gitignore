@@ -21,3 +21,7 @@ tests/results_stub_wds_grouped/
 tests/results_stub_clip/
 tests/results_stub_multi_slide/
 tests/testdata/*_b.svs
+# Local run config / override files — not for version control
+class_mapping.yaml
+filter_workflow.yaml
+*_params.yaml

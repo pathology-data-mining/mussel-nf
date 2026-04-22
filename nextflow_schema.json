@@ -1,340 +1,459 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/pathology-data-mining/mussel-nf/main/nextflow_schema.json",
-  "title": "pathology-data-mining/mussel-nf pipeline parameters",
-  "description": "pipeline for running Mussel to extract features and build a reef",
-  "type": "object",
-  "$defs": {
-    "input_output_options": {
-      "title": "Input/output options",
-      "type": "object",
-      "fa_icon": "fas fa-terminal",
-      "description": "Define where the pipeline should find input data and save output data.",
-      "required": [
-        "outdir"
-      ],
-      "properties": {
-        "outdir": {
-          "type": "string",
-          "format": "directory-path",
-          "description": "The output directory where the results will be saved. You have to use absolute paths to storage on Cloud infrastructure.",
-          "fa_icon": "fas fa-folder-open",
-          "default": "results"
-        },
-        "publish_mode": {
-          "type": "string",
-          "default": "copy",
-          "enum": [
-            "copy",
-            "copyNoFollow",
-            "link",
-            "move",
-            "rellink",
-            "symlink"
-          ],
-          "description": "mode used to publish output files"
-        },
-        "samples_csv": {
-          "type": "string",
-          "description": "samples csv file with slides to process",
-          "format": "file-path",
-          "schema": "assets/schema_input.json"
-        },
-        "samples_csv_watch_path": {
-          "type": "string",
-          "description": "watch this path for sample csv files"
-        },
-        "watch_path": {
-          "type": "string",
-          "description": "watch this path for sample svs files"
-        },
-        "publish_slide_prefix": {
-          "type": "boolean",
-          "description": "include first 4 digits of the slide ID in the publish dir",
-          "default": true
-        },
-        "scratch_dir": {
-          "type": "string",
-          "description": "Path to fast local scratch storage for WSI caching (e.g., /scratch/$USER). When set, input WSI files are staged to this directory before processing.",
-          "default": null
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://raw.githubusercontent.com/pathology-data-mining/mussel-nf/main/nextflow_schema.json",
+    "title": "pathology-data-mining/mussel-nf pipeline parameters",
+    "description": "pipeline for running Mussel to extract features and build a reef",
+    "type": "object",
+    "$defs": {
+        "input_output_options": {
+            "title": "Input/output options",
+            "type": "object",
+            "fa_icon": "fas fa-terminal",
+            "description": "Define where the pipeline should find input data and save output data.",
+            "required": [
+                "outdir"
+            ],
+            "properties": {
+                "outdir": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "description": "The output directory where the results will be saved. You have to use absolute paths to storage on Cloud infrastructure.",
+                    "fa_icon": "fas fa-folder-open",
+                    "default": "results"
+                },
+                "publish_mode": {
+                    "type": "string",
+                    "default": "copy",
+                    "enum": [
+                        "copy",
+                        "copyNoFollow",
+                        "link",
+                        "move",
+                        "rellink",
+                        "symlink"
+                    ],
+                    "description": "mode used to publish output files"
+                },
+                "samples_csv": {
+                    "type": "string",
+                    "description": "samples csv file with slides to process",
+                    "format": "file-path",
+                    "schema": "assets/schema_input.json"
+                },
+                "samples_csv_watch_path": {
+                    "type": "string",
+                    "description": "watch this path for sample csv files"
+                },
+                "watch_path": {
+                    "type": "string",
+                    "description": "watch this path for sample svs files"
+                },
+                "publish_slide_prefix": {
+                    "type": "boolean",
+                    "description": "include first 4 digits of the slide ID in the publish dir",
+                    "default": true
+                },
+                "scratch_dir": {
+                    "type": "string",
+                    "description": "Path to fast local scratch storage for WSI caching (e.g., /scratch/$USER). When set, input WSI files are staged to this directory before processing.",
+                    "default": null
+                },
+                "test_data_dir": {
+                    "type": "string",
+                    "default": "null",
+                    "hidden": true,
+                    "description": "Path to slide files used by test profiles (test_multi_slide). Ignored in normal runs."
+                }
+            }
         }
-      }
-    }
-  },
-  "properties": {
-    "workflow_id": {
-      "type": "string",
-      "description": "workflow ID",
-      "help_text": "Identifier for this workflow run",
-      "default": "reef"
     },
-    "use_one_step_workflow": {
-      "type": "boolean",
-      "description": "Use one-step tessellation and featurization workflow",
-      "help_text": "When true, uses TESSELLATE_FEATURIZE_BATCH for combined tessellation and feature extraction. When false, uses separate TESSELLATE and FEATURIZE_BATCH processes.",
-      "default": false
-    },
-    "tiling": {
-      "title": "Tessellation options",
-      "type": "object",
-      "description": "Define tessellation options",
-      "properties": {
-        "filter_model_type": {
-          "type": "string",
-          "default": "ctranspath",
-          "description": "filter tiles using features extracted with this model"
-        },
-        "filter_model_path": {
-          "type": "string",
-          "description": "pkl file containing model used to filter tiles"
-        },
-        "filter_threshold": {
-          "type": "number",
-          "default": 0.75,
-          "description": "threshold to use for filtering tiles"
-        },
-        "filter_tiles": {
-          "type": "boolean",
-          "default": false,
-          "description": "filter tiles"
-        },
-        "seg_config_group": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Segmentation configuration preset",
-          "help_text": "Use a predefined segmentation configuration: 'default', 'biopsy', 'resection', or 'tcga'. When null, uses individual segmentation parameters.",
-          "enum": [
-            null,
-            "default",
-            "biopsy",
-            "resection",
-            "tcga"
-          ]
-        },
-        "patch_size": {
-          "type": "integer",
-          "default": 224,
-          "description": "Patch size"
-        },
-        "mpp": {
-          "type": "number",
-          "default": 0.5,
-          "description": "microns per pixel"
-        },
-        "segment_threshold": {
-          "type": "integer",
-          "default": 15,
-          "description": "segment threshold"
-        },
-        "median_blur_ksize": {
-          "type": "integer",
-          "default": 11,
-          "description": "median blur k-size"
-        },
-        "morphology_ex_kernel": {
-          "type": "integer",
-          "default": 2,
-          "description": "morphology ex kernel"
-        },
-        "tissue_area_threshold": {
-          "type": "integer",
-          "default": 1,
-          "description": "tissue area threshold"
-        },
-        "hole_area_threshold": {
-          "type": "integer",
-          "default": 1,
-          "description": "hole area threshold"
-        },
-        "max_num_holes": {
-          "type": "integer",
-          "default": 2,
-          "description": "maximum number of holes"
-        },
-        "save_slide_thumbnail": {
-          "type": "boolean",
-          "default": false,
-          "description": "save slide thumbnails"
-        },
-        "save_tile_png": {
-          "type": "boolean",
-          "default": false,
-          "description": "save tiles as png"
-        },
-        "stitch_tiles": {
-          "type": "boolean",
-          "default": false,
-          "description": "generate stitched tiles"
-        }
-      }
-    },
-    "featurize": {
-      "title": "Extract features options",
-      "type": "object",
-      "description": "Define extract features options",
-      "properties": {
-        "model_types": {
-          "type": "array",
-          "description": "models to use for feature extraction",
-          "default": [
-            "optimus"
-          ],
-          "items": {
+    "properties": {
+        "workflow_id": {
             "type": "string",
-            "enum": [
-              "quiltnet",
-              "gigapath",
-              "ctranspath",
-              "resnet50",
-              "virchow",
-              "optimus"
-            ]
-          }
+            "description": "workflow ID",
+            "help_text": "Identifier for this workflow run",
+            "default": "reef"
         },
-        "use_gpu": {
-          "type": "boolean",
-          "default": true,
-          "description": "use the GPU for feature extraction"
+        "use_one_step_workflow": {
+            "type": "boolean",
+            "description": "Use one-step tessellation and featurization workflow",
+            "help_text": "When true, uses TESSELLATE_FEATURIZE_BATCH for combined tessellation and feature extraction. When false, uses separate TESSELLATE and FEATURIZE_BATCH processes.",
+            "default": false
         },
-        "batch_size": {
-          "type": "integer",
-          "default": 64,
-          "description": "Batch size for tile/patch feature extraction"
+        "tiling": {
+            "title": "Tessellation options",
+            "type": "object",
+            "description": "Define tessellation options",
+            "properties": {
+                "filter_model_type": {
+                    "type": "string",
+                    "default": "ctranspath",
+                    "description": "Patch encoder used to extract features for legacy tile filtering (e.g. ctranspath)."
+                },
+                "filter_model_path": {
+                    "type": "string",
+                    "description": "Path to the .pkl sklearn classifier used by legacy tile filtering."
+                },
+                "filter_threshold": {
+                    "type": "number",
+                    "default": 0.75,
+                    "description": "Confidence threshold for the legacy tile classifier (0\u20131). Tiles below this score are discarded."
+                },
+                "filter_tiles": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable legacy classifier-based tile filtering. After tessellation, extracts patch features with filter_model_type and applies a .pkl classifier to discard non-tissue tiles."
+                },
+                "seg_config_group": {
+                    "type": [
+                        "string",
+                        "null"
+                    ],
+                    "description": "Segmentation configuration preset",
+                    "help_text": "Use a predefined segmentation configuration: 'default', 'biopsy', 'resection', or 'tcga'. When null, uses individual segmentation parameters.",
+                    "enum": [
+                        null,
+                        "default",
+                        "biopsy",
+                        "resection",
+                        "tcga"
+                    ]
+                },
+                "patch_size": {
+                    "type": "integer",
+                    "default": 224,
+                    "description": "Patch size"
+                },
+                "mpp": {
+                    "type": "number",
+                    "default": 0.5,
+                    "description": "microns per pixel"
+                },
+                "segment_threshold": {
+                    "type": "integer",
+                    "default": 15,
+                    "description": "segment threshold"
+                },
+                "median_blur_ksize": {
+                    "type": "integer",
+                    "default": 11,
+                    "description": "median blur k-size"
+                },
+                "morphology_ex_kernel": {
+                    "type": "integer",
+                    "default": 2,
+                    "description": "morphology ex kernel"
+                },
+                "tissue_area_threshold": {
+                    "type": "integer",
+                    "default": 1,
+                    "description": "tissue area threshold"
+                },
+                "hole_area_threshold": {
+                    "type": "integer",
+                    "default": 1,
+                    "description": "hole area threshold"
+                },
+                "max_num_holes": {
+                    "type": "integer",
+                    "default": 2,
+                    "description": "maximum number of holes"
+                },
+                "overlap": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Patch overlap in pixels. Default 0 (no overlap). Requires Mussel v1.2.0+."
+                },
+                "min_tissue_proportion": {
+                    "type": "number",
+                    "default": 0.0,
+                    "description": "Minimum fraction of a patch that must be tissue to be retained. Default 0.0 (keep all). Requires Mussel v1.2.0+."
+                },
+                "remove_artifacts": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Use GrandQC neural artifact remover to exclude artifact regions from the tissue mask during tessellation. Does not require a separate classifier model. Requires Mussel v1.2.0+."
+                },
+                "remove_penmarks": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Detect and exclude pen mark regions before tessellation. Requires Mussel v1.2.0+."
+                },
+                "seg_model": {
+                    "type": "string",
+                    "enum": [
+                        "classic",
+                        "otsu",
+                        "neural"
+                    ],
+                    "description": "Tissue segmentation model used during tessellation: classic (HSV + fixed threshold), otsu (HSV + Otsu automatic threshold), or neural (DeepLabV3 neural network). If unset, Mussel uses its own default (classic) or the seg_config_group preset value. Requires Mussel v1.2.0+."
+                },
+                "slide_mpp_override": {
+                    "type": "number",
+                    "description": "If set, use this value (\u00b5m/px) as the slide's native MPP instead of reading from slide metadata. Use when a slide lacks MPP tags and the metadata-based fallback produces incorrect results."
+                },
+                "save_slide_thumbnail": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "save slide thumbnails"
+                },
+                "save_tile_png": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "save tiles as png"
+                },
+                "stitch_tiles": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "generate stitched tiles"
+                }
+            }
         },
-        "workflow_batch_size": {
-          "type": "integer",
-          "default": 8,
-          "description": "Number of slides grouped into a single Nextflow task. Reduces scheduler overhead."
+        "featurize": {
+            "title": "Extract features options",
+            "type": "object",
+            "description": "Define extract features options",
+            "properties": {
+                "model_types": {
+                    "type": "array",
+                    "description": "models to use for feature extraction",
+                    "default": [
+                        "optimus"
+                    ],
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "resnet50",
+                            "ctranspath",
+                            "gigapath",
+                            "virchow",
+                            "virchow2",
+                            "optimus",
+                            "hoptimus1",
+                            "h0mini",
+                            "uni",
+                            "uni2h",
+                            "conch1_5",
+                            "conch_v1",
+                            "clip",
+                            "googlepath",
+                            "phikon",
+                            "phikon_v2",
+                            "midnight12k",
+                            "gpfm",
+                            "hibou_l",
+                            "openmidnight",
+                            "genbio_pathfm",
+                            "kaiko_vits8",
+                            "kaiko_vits16",
+                            "kaiko_vitb8",
+                            "kaiko_vitb16",
+                            "kaiko_vitl14",
+                            "lunit_vits8",
+                            "lunit_vits16",
+                            "gigapath_slide",
+                            "titan_slide",
+                            "prism_slide",
+                            "feather_slide",
+                            "chief_slide",
+                            "madeleine_slide",
+                            "abmil_slide"
+                        ],
+                        "description": "Patch encoders: resnet50, ctranspath, gigapath, virchow, virchow2, optimus, hoptimus1, h0mini, uni, uni2h, conch1_5, conch_v1, clip, googlepath, phikon, phikon_v2, midnight12k, gpfm, hibou_l, openmidnight, genbio_pathfm, kaiko_vits8, kaiko_vits16, kaiko_vitb8, kaiko_vitb16, kaiko_vitl14, lunit_vits8, lunit_vits16. Slide encoders: gigapath_slide, titan_slide, prism_slide, feather_slide, chief_slide, madeleine_slide, abmil_slide."
+                    }
+                },
+                "use_gpu": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "use the GPU for feature extraction"
+                },
+                "batch_size": {
+                    "type": "integer",
+                    "default": 64,
+                    "description": "Batch size for tile/patch feature extraction"
+                },
+                "workflow_batch_size": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "Number of slides grouped into a single Nextflow task. Reduces scheduler overhead."
+                },
+                "slide_batch_size": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "Number of slides to process together in a batch (controls both Type 2 and Type 3 batching)"
+                },
+                "max_tiles_per_sample": {
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "description": "Multi-slide: maximum number of tiles to keep per sample after concatenation. Null keeps all tiles.",
+                    "default": null
+                },
+                "subsampling_strategy": {
+                    "type": "string",
+                    "default": "random",
+                    "description": "Multi-slide: tile subsampling strategy when max_tiles_per_sample is set.",
+                    "enum": [
+                        "random",
+                        "proportional",
+                        "equal"
+                    ]
+                },
+                "subsampling_seed": {
+                    "type": "integer",
+                    "default": 42,
+                    "description": "Multi-slide: random seed for subsampling reproducibility."
+                },
+                "model_paths": {
+                    "type": "object",
+                    "description": "paths to models",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "model_batch_sizes": {
+                    "type": "object",
+                    "description": "Per-model batch sizes for feature extraction. Keys are model names (e.g., ctranspath, optimus), values are integers. If not specified, uses default batch_size.",
+                    "additionalProperties": {
+                        "type": "integer"
+                    }
+                },
+                "slide_model_paths": {
+                    "type": "object",
+                    "description": "Paths to slide-level models",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                }
+            }
         },
-        "slide_batch_size": {
-          "type": "integer",
-          "default": 8,
-          "description": "Number of slides to process together in a batch (controls both Type 2 and Type 3 batching)"
+        "clip": {
+            "title": "CLIP-based model options",
+            "description": "Define CLIP-based model options",
+            "type": "object",
+            "properties": {
+                "model_types": {
+                    "type": "array",
+                    "description": "models that are designated as CLIP-based",
+                    "default": [
+                        "quiltnet"
+                    ]
+                },
+                "default_classes": {
+                    "type": "array",
+                    "description": "default classes to use for prompt-engineering",
+                    "default": [
+                        "invasive carcinoma",
+                        "stroma",
+                        "other"
+                    ]
+                },
+                "oncotree_class_csv": {
+                    "type": "string",
+                    "description": "mapping of oncotree codes to classes to use for prompt-engineering",
+                    "format": "file-path",
+                    "schema": "assets/schema_oncotree_map.json"
+                },
+                "skip_tile_caching": {
+                    "type": "boolean",
+                    "description": "skip the tile caching",
+                    "default": true
+                }
+            }
         },
-        "model_paths": {
-          "type": "object",
-          "description": "paths to models",
-          "additionalProperties": {
-            "type": "string"
-          }
+        "linear_probe": {
+            "title": "linear probing benchmark options",
+            "description": "Define linear probe benchmarking options",
+            "type": "object",
+            "properties": {
+                "annotations_csv": {
+                    "type": "string",
+                    "description": "mapping of slide IDs to annotation bmp file",
+                    "format": "file-path",
+                    "schema": "assets/schema_annotations.json"
+                },
+                "annotation_class_mapping_yaml": {
+                    "type": "string",
+                    "description": "mapping of annotation bmp IDs to class"
+                },
+                "cv": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Cross-validation folds for GridSearchCV hyperparameter tuning"
+                },
+                "C_values": {
+                    "type": "array",
+                    "default": [
+                        0.001,
+                        0.01,
+                        0.1,
+                        1.0,
+                        10.0
+                    ],
+                    "description": "Regularisation strengths to search in GridSearchCV"
+                },
+                "penalties": {
+                    "type": "array",
+                    "default": [
+                        "l2"
+                    ],
+                    "description": "Penalty types to search in GridSearchCV (l1, l2, elasticnet, none)"
+                },
+                "n_seeds": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of random seeds; mean +/- std reported across seeds"
+                },
+                "n_bootstrap": {
+                    "type": "integer",
+                    "default": 1000,
+                    "description": "Bootstrap resamples for 95% CI on test AUC-ROC (primary seed)"
+                },
+                "positive_annotation_label": {
+                    "type": "integer",
+                    "default": 1,
+                    "description": "Annotation value treated as the positive class. Default 1 for class-mapped 0/1 annotations; set to 2 for raw (unmapped) BMP annotation values."
+                }
+            }
         },
-        "model_batch_sizes": {
-          "type": "object",
-          "description": "Per-model batch sizes for feature extraction. Keys are model names (e.g., ctranspath, optimus), values are integers. If not specified, uses default batch_size.",
-          "additionalProperties": {
-            "type": "integer"
-          }
-        },
-        "slide_model_paths": {
-          "type": "object",
-          "description": "Paths to slide-level models",
-          "additionalProperties": {
-            "type": "string"
-          }
+        "wds": {
+            "title": "WebDataset sharding options",
+            "description": "Pack per-slide feature files into WebDataset-compatible .tar shards",
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable WebDataset shard output. When true, per-slide .pt (and optionally .h5) feature files are collected and packed into .tar shards after extraction."
+                },
+                "group_by_oncotree": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, produce separate shard sets per oncotree_code from the sample sheet. Requires oncotree_code column in samples_csv. When false, all slides are sharded together under the group 'all'."
+                },
+                "shard_h5": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Extract tile coordinates from .h5 patch-feature files and store as .coords.npy in the shard alongside .features.npy. Note: .h5 files are large."
+                },
+                "max_shard_size": {
+                    "type": "integer",
+                    "default": 1000,
+                    "minimum": 1,
+                    "description": "Maximum number of slides per .tar shard."
+                },
+                "shard_prefix": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Filename prefix for shard tar files. Default '' produces 000000.tar (paladin-compatible naming)."
+                }
+            }
         }
-      }
     },
-    "clip": {
-      "title": "CLIP-based model options",
-      "description": "Define CLIP-based model options",
-      "type": "object",
-      "properties": {
-        "model_types": {
-          "type": "array",
-          "description": "models that are designated as CLIP-based",
-          "default": [
-            "quiltnet"
-          ]
-        },
-        "default_classes": {
-          "type": "array",
-          "description": "default classes to use for prompt-engineering",
-          "default": [
-            "invasive carcinoma",
-            "stroma",
-            "other"
-          ]
-        },
-        "oncotree_class_csv": {
-          "type": "string",
-          "description": "mapping of oncotree codes to classes to use for prompt-engineering",
-          "format": "file-path",
-          "schema": "assets/schema_oncotree_map.json"
-        },
-        "skip_tile_caching": {
-          "type": "boolean",
-          "description": "skip the tile caching",
-          "default": true
+    "allOf": [
+        {
+            "$ref": "#/$defs/input_output_options"
         }
-      }
-    },
-    "linear_probe": {
-      "title": "linear probing benchmark options",
-      "description": "Define linear probe benchmarking options",
-      "type": "object",
-      "properties": {
-        "annotations_csv": {
-          "type": "string",
-          "description": "mapping of slide IDs to annotation bmp file",
-          "format": "file-path",
-          "schema": "assets/schema_annotations.json"
-        },
-        "annotation_class_mapping_yaml": {
-          "type": "string",
-          "description": "mapping of annotation bmp IDs to class"
-        },
-        "test_size": {
-          "type": "number",
-          "default": 0.2,
-          "description": "Fraction of annotated tiles held out for testing the logistic regression classifier."
-        },
-        "val_size": {
-          "type": "number",
-          "default": 0.1,
-          "description": "Fraction of annotated tiles used for validation during logistic regression training."
-        },
-        "random_state": {
-          "type": "integer",
-          "default": 42,
-          "description": "Random seed for train/val/test split reproducibility."
-        },
-        "annotation_percent_filter_threshold": {
-          "type": "number",
-          "default": 0.5,
-          "description": "Minimum fraction of annotated pixels required in a tile for it to be included in training."
-        },
-        "C": {
-          "type": "number",
-          "default": 1.0,
-          "description": "Inverse regularization strength for logistic regression (smaller = stronger regularization)."
-        },
-        "max_iter": {
-          "type": "integer",
-          "default": 5000,
-          "description": "Maximum number of solver iterations for logistic regression."
-        },
-        "penalty": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null,
-          "enum": [
-            "l1",
-            "l2",
-            "elasticnet",
-            null
-          ],
-          "description": "Regularization penalty type for logistic regression. Null uses the solver default."
-        }
-      }
-    }
-  },
-  "allOf": [
-    {
-      "$ref": "#/$defs/input_output_options"
-    }
-  ]
+    ]
 }

@@ -9,8 +9,8 @@ process MERGE_ANNOTATION_FEATURES {
     path(class_mapping_yaml)
 
     output:
-    tuple val(model_type), path("${meta.slide_id}.annotation_features.parquet"), emit: parquet
-    tuple val(meta), val("${model_type}_annotation_features_path"), val("annotation_features/${model_type}/${meta.slide_id}.annotation_features.parquet"), path("${meta.slide_id}.annotation_features.parquet"), topic: slide_meta
+    tuple val(model_type), path("${meta.slide_id}.annotation_features.parquet"), optional: true, emit: parquet
+    tuple val(meta), val("${model_type}_annotation_features_path"), val("annotation_features/${model_type}/${meta.slide_id}.annotation_features.parquet"), path("${meta.slide_id}.annotation_features.parquet"), optional: true, topic: slide_meta
 
     script:
     class_mapping_str = class_mapping_yaml.name != 'NO_FILE' ? "class_mapping_yaml_path='${class_mapping_yaml}'" : ""
@@ -38,11 +38,11 @@ process STACK_ANNOTATION_FEATURES {
     script:
     """
     #!/usr/bin/env python3
-    import geopandas as gpd
     import pandas as pd
     files = "${annotation_features}".split()
-    dfs = [gpd.read_parquet(f) for f in files]
-    pd.concat(dfs).to_parquet("annotation_features.parquet")
+    dfs = [pd.read_parquet(file) for file in files]
+    df = pd.concat(dfs, ignore_index=True)
+    df.to_parquet("annotation_features.parquet")
     """
 
 }
@@ -58,19 +58,36 @@ process LINEAR_PROBE_BENCHMARK {
     output:
     path "classification_report.csv"
     path "confusion_matrix.png"
+    path "classification_report_test.csv"
+    path "confusion_matrix_test.png"
+    path "roc_curve.png"
+    path "pr_curve.png"
+    path "grid_search_heatmap.png"
+    path "feature_importance.png"
+    path "calibration_curve.png"
+    path "cv_results.csv"
+    path "results.json"
 
     script:
-    penalty_str = params.linear_probe.penalty ? "penalty=${params.linear_probe.penalty}" : ""
+    def cv           = params.linear_probe.cv ?: 5
+    def C_values     = (params.linear_probe.C_values ?: [0.001, 0.01, 0.1, 1.0, 10.0]).join(",")
+    def penalties    = (params.linear_probe.penalties ?: ["l2"]).join(",")
+    def n_seeds      = params.linear_probe.n_seeds ?: 5
+    def n_bootstrap  = params.linear_probe.n_bootstrap ?: 1000
+    def random_state = params.linear_probe.random_state ?: 42
+    def pos_label    = params.linear_probe.positive_annotation_label ?: 1
+    def multiclass   = params.linear_probe.multiclass ? "true" : "false"
     """
     linear_probe_benchmark \
         features_annotation_parquet_path=${annotation_features} \
-        test_size=${params.linear_probe.test_size} \
-        val_size=${params.linear_probe.val_size} \
-        random_state=${params.linear_probe.random_state} \
-        annotation_percent_filter_threshold=${params.linear_probe.annotation_percent_filter_threshold} \
-        C=${params.linear_probe.C} \
-        max_iter=${params.linear_probe.max_iter} \
-        ${penalty_str}
+        cv=${cv} \
+        'C_values=[${C_values}]' \
+        'penalties=[${penalties}]' \
+        n_seeds=${n_seeds} \
+        n_bootstrap=${n_bootstrap} \
+        random_state=${random_state} \
+        positive_annotation_label=${pos_label} \
+        multiclass=${multiclass}
     """
 
 }

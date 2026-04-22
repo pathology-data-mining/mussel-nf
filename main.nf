@@ -76,7 +76,20 @@ workflow {
     ch_annotations = Channel.empty()
 
     if (params.samples_csv) {
-        ch_samples = Channel.fromList(samplesheetToList(params.samples_csv, "assets/schema_input.json"))
+        // Load samplesheet and enrich meta with sample_id (defaults to slide_id) and n_slides
+        def raw_list = samplesheetToList(params.samples_csv, "assets/schema_input.json")
+        // Count how many slides belong to each sample_id
+        def sample_counts = [:]
+        raw_list.each { meta, slide ->
+            def sid = meta.sample_id ?: meta.slide_id.toString()
+            sample_counts[sid] = (sample_counts[sid] ?: 0) + 1
+        }
+        def enriched = raw_list.collect { meta, slide ->
+            def sid = meta.sample_id ?: meta.slide_id.toString()
+            def enriched_meta = meta + [sample_id: sid, n_slides: sample_counts[sid]]
+            tuple(enriched_meta, slide)
+        }
+        ch_samples = Channel.fromList(enriched)
     }
 
     if (params.linear_probe.annotations_csv) {
@@ -88,7 +101,18 @@ workflow {
 
     if (params.samples_csv_watch_path) {
         ch_samples = Channel.watchPath("${params.samples_csv_watch_path}/*.csv", 'create,modify')
-            .flatMap { samplesheetToList(it, "assets/schema_input.json") }
+            .flatMap { csv ->
+                def raw_list = samplesheetToList(csv, "assets/schema_input.json")
+                def sample_counts = [:]
+                raw_list.each { meta, slide ->
+                    def sid = meta.sample_id ?: meta.slide_id.toString()
+                    sample_counts[sid] = (sample_counts[sid] ?: 0) + 1
+                }
+                raw_list.collect { meta, slide ->
+                    def sid = meta.sample_id ?: meta.slide_id.toString()
+                    tuple(meta + [sample_id: sid, n_slides: sample_counts[sid]], slide)
+                }
+            }
     }
 
 
@@ -96,9 +120,10 @@ workflow {
     new File(tmpdir).mkdirs()
     Channel.topic('slide_meta')
         .map { it[0..2] }
+        // Manifest columns: slide_id, sample_id, workflow_id, key, value
         .collectFile(storeDir: params.outdir, tempDir: tmpdir, sort: false, cache: true) {
             meta, key, value ->
-            ["manifest-${timestamp}.csv", "${meta.slide_id},${params.workflow_id},${key},${value}\n"]
+            ["manifest-${timestamp}.csv", "${meta.slide_id},${meta.sample_id},${params.workflow_id},${key},${value}\n"]
         }
 
 

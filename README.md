@@ -1,6 +1,6 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.1.2).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.3.2).
 
 ## Requirements
 
@@ -8,6 +8,18 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
 * Java 17+
 * Nextflow ≥ 24.x (uses [nf-schema](https://nextflow-io.github.io/nf-schema/) plugin)
 * One of: Docker, Apptainer, or a Conda/Mamba environment
+
+### Conda environment
+
+Two environment files are provided depending on which models you need:
+
+| File | Extra | Supported models |
+|---|---|---|
+| `mussel_env.yaml` | `torch-gpu` | All models **except** `googlepath`, `gigapath`, `gigapath_slide` |
+| `mussel_env_tf.yaml` | `tensorflow-gpu` | `googlepath` (Google Path Foundation, TensorFlow-based) |
+| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn + torch 2.11) |
+
+The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive — they cannot be installed together. Use `-profile conda` with the default `mussel_env.yaml` for most workflows, and switch to the appropriate env file when running `googlepath` or `gigapath`.
 
 ## Quickstart
 
@@ -28,10 +40,30 @@ A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel)
     nextflow run main.nf -profile standard,docker --samples_csv samples.csv -resume
     ```
 
-    `samples.csv` must have columns `slide_id` and `slide_path` (required), plus optional `oncotree_code`.
+    `samples.csv` must have columns `slide_id` and `slide_path` (required), plus optional
+    `oncotree_code` and `sample_id`.
     Accepted slide extensions: `.svs`, `.tiff`, `.tif`, `.ndpi`, `.scn`.
 
 3. When the execution completes, results will be in `params.outdir` (default: `results/`).
+
+## Supported Models
+
+**Patch encoders** (`params.featurize.model_types`):
+`resnet50`, `ctranspath`, `gigapath`, `virchow`, `virchow2`, `optimus`, `hoptimus1`, `h0mini`, `uni`, `uni2h`, `conch1_5`, `conch_v1`, `clip`, `googlepath`, `phikon`, `phikon_v2`, `midnight12k`, `gpfm`, `hibou_l`, `openmidnight`, `genbio_pathfm`, `kaiko_vits8`, `kaiko_vits16`, `kaiko_vitb8`, `kaiko_vitb16`, `kaiko_vitl14`, `lunit_vits8`, `lunit_vits16`
+
+**Slide encoders** (specified in `model_types`; patch encoder auto-resolved):
+
+| Model key | Patch encoder |
+|---|---|
+| `gigapath_slide` | `gigapath` |
+| `titan_slide` | `conch1_5` |
+| `prism_slide` | `virchow` |
+| `feather_slide` | `conch1_5` |
+| `chief_slide` | `ctranspath` |
+| `madeleine_slide` | `clip` |
+| `abmil_slide` | (encoder-agnostic — specify patch encoder separately) |
+
+See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 
 ## Misc Notes
 
@@ -65,12 +97,31 @@ The standard workflow tessellates slides and extracts features for `params.featu
 
 ### Tile filtering
 
-When `params.tiling.filter_tiles = true` (default: `false`):
+There are two independent mechanisms for filtering out non-tissue or low-quality tiles:
+
+#### Legacy classifier-based filtering (`params.tiling.filter_tiles`)
+
+A post-tessellation step that uses a pre-trained sklearn classifier to score tiles:
 
 1. Tessellation
-2. Feature extraction for `params.tiling.filter_model_type` (default: `ctranspath`)
-3. Filter tiles using a classifier (`.pkl` at `params.tiling.filter_model_path`, threshold `params.tiling.filter_threshold`)
-4. Feature extraction for `params.featurize.model_types`
+2. Feature extraction using `params.tiling.filter_model_type` (default: `ctranspath`)
+3. Classify tiles with the `.pkl` model at `params.tiling.filter_model_path`; discard tiles below `params.tiling.filter_threshold`
+4. Feature extraction for `params.featurize.model_types` on surviving tiles
+
+Requires a pre-trained `.pkl` classifier. Set `filter_tiles = true` to enable.
+
+#### Segmentation-integrated artifact removal (`params.tiling.remove_artifacts` / `remove_penmarks`)
+
+These options remove artifacts **during tessellation** by refining the tissue mask before patches are extracted. No separate classifier model is needed.
+
+- **`remove_artifacts`**: runs the GrandQC neural artifact remover to exclude ink, air bubbles, and other slide artifacts from the tissue mask
+- **`remove_penmarks`**: detects and excludes pen mark regions before tessellation
+- **`seg_model`**: tissue segmentation backend — `'classic'` (HSV + fixed threshold, default), `'otsu'` (HSV + Otsu automatic threshold), or `'neural'` (DeepLabV3 neural network)
+- **`min_tissue_proportion`**: drop patches where less than this fraction of pixels are tissue (default `0.0`)
+- **`overlap`**: extract overlapping patches (pixels, default `0`)
+- **`slide_mpp_override`**: override the slide's MPP value when metadata is missing or incorrect
+
+These options can be combined with legacy tile filtering or used independently.
 
 ### CLIP-based annotation
 
@@ -92,16 +143,139 @@ The CSV must have columns `slide_id` and `annotation_bmp_path`.
 4. Combine per-slide annotation mappings
 5. Benchmark logistic regression classifiers
 
+### WebDataset sharding
+
+After feature extraction, completed `.pt` slide-feature files (and optionally `.h5` patch-feature
+files) are packed into [paladin](https://github.com/pathology-data-mining/paladin)-compatible
+[WebDataset](https://github.com/webdataset/webdataset) `.tar` shards.
+
+Each tar entry contains:
+- `{slide_id}.features.npy` — float32 feature array (converted from `.pt`)
+- `{slide_id}.coords.npy` — int64 tile coordinates from `.h5` (when `wds.shard_h5=true`)
+
+Shards are directly readable by the `webdataset` Python library:
+
+```python
+import io, numpy as np, torch, webdataset as wds
+ds = wds.WebDataset("results/wds/optimus/all/{000000..000004}.tar")
+for sample in ds:
+    slide_id = sample["__key__"]
+    features = torch.from_numpy(np.load(io.BytesIO(sample["features.npy"])))
+```
+
+Enable and configure sharding via `params.wds`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `wds.enabled` | `false` | Enable WDS shard output |
+| `wds.group_by_oncotree` | `false` | Separate shard sets per `oncotree_code`; requires that column in `samples_csv` |
+| `wds.shard_h5` | `false` | Extract tile coords from `.h5` and store as `.coords.npy` |
+| `wds.max_shard_size` | `1000` | Max slides per `.tar` shard |
+| `wds.shard_prefix` | `""` | Filename prefix (`""` → `000000.tar`) |
+
+**Example — shard optimus features grouped by cancer type:**
+
+```bash
+nextflow run main.nf \
+  -profile cluster,slurm,apptainer \
+  --samples_csv samples.csv \
+  --featurize.model_types='["optimus"]' \
+  --wds.enabled=true \
+  --wds.group_by_oncotree=true \
+  --wds.max_shard_size=500
+```
+
+Output layout:
+
+```
+results/wds/optimus/BRCA/000000.tar
+results/wds/optimus/BRCA/000001.tar
+results/wds/optimus/LUAD/000000.tar
+...
+```
+
+Without grouping (`group_by_oncotree=false`):
+
+```
+results/wds/optimus/all/000000.tar
+results/wds/optimus/all/000001.tar
+...
+```
+
+
+### Multi-slide sample aggregation
+
+When a `samples_csv` contains multiple rows with the same `sample_id`, the pipeline produces
+both per-slide features and a merged sample-level output.
+
+Add an optional `sample_id` column to your samples CSV:
+
+```csv
+slide_id,slide_path,sample_id
+biopsy_A,/data/biopsy_A.svs,PATIENT_001
+biopsy_B,/data/biopsy_B.svs,PATIENT_001
+resection,/data/resection.svs,PATIENT_002
+```
+
+Slides sharing a `sample_id` are processed individually through tessellation and feature extraction,
+then their per-slide feature H5 files are concatenated into one sample-level H5 and PT by
+`aggregate_sample_features` (CPU-only — no re-inference). When `sample_id` is omitted it defaults
+to `slide_id`, so existing CSVs continue to work without modification.
+
+Requires `params.featurize.save_features_to_h5 = true` (per-slide H5 files are the aggregation input).
+
+**Output** (in addition to per-slide outputs):
+```
+results/features/{model_type}/{sample_id}.features.h5
+results/features/{model_type}/{sample_id}.features.pt
+```
+
+**Subsampling** (when total tiles exceed a budget):
+
+| Parameter | Default | Description |
+|---|---|---|
+| `featurize.max_tiles_per_sample` | `null` | Max tiles per sample after concatenation |
+| `featurize.subsampling_strategy` | `"random"` | `"random"`, `"proportional"`, or `"equal"` |
+| `featurize.subsampling_seed` | `42` | Random seed for reproducibility |
+
+**Example:**
+```bash
+nextflow run main.nf \
+  --samples_csv multi_patient.csv \
+  --featurize.model_types='["optimus"]' \
+  --featurize.save_features_to_h5=true \
+  --featurize.max_tiles_per_sample=20000 \
+  --featurize.subsampling_strategy=proportional
+```
+
 
 ## Integration tests
 
-A single-slide integration test is included for both workflow modes:
+Integration tests use [nf-test](https://www.nf-test.com) and are run via `make`:
 
 ```bash
-bash tests/run_integration_test.sh
+make test                  # run all tests
+make test-standard         # one-step workflow
+make test-two-step         # two-step workflow
+make test-wds              # WebDataset flat sharding
+make test-wds-grouped      # WebDataset grouped sharding (by oncotree_code)
+make test-multi-slide      # multi-slide sample aggregation
 ```
 
-Requires `tests/data/1079807.svs` to be present (not tracked by git — copy or symlink a real slide file).
+Extra Nextflow profiles (e.g. `conda`, `slurm,cluster`) can be composed:
+
+```bash
+make test PROFILES=conda
+make test PROFILES=slurm,cluster
+make test-standard NXF_ARGS=-resume
+```
+
+The test slide (`tests/testdata/948176.svs`) is vendored in the repository.
+Override the slide used for the standard/two-step/WDS tests:
+
+```bash
+make test MUSSEL_TEST_SLIDE=/path/to/other.svs
+```
 
 ## Azure Batch support
 

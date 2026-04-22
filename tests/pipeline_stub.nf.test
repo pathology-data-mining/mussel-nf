@@ -1,0 +1,75 @@
+nextflow_pipeline {
+    name   "MUSSEL main pipeline — stub mode (no GPU)"
+    script "../main.nf"
+    profile "test_stub"
+
+    // Run all processes in stub mode: GPU processes produce minimal fake
+    // .pt / .h5 files via their stub: blocks instead of calling mussel CLI.
+    // Validates workflow routing, channel logic, and publish paths without
+    // requiring a GPU, real model weights, or the mussel venv.
+    options "-stub"
+
+    test("stub workflow succeeds and publishes feature files") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            // Slide-level feature tensor published to correct path
+            assert path("${outputDir}/features/resnet50/948176.features.pt").exists()
+
+            // Patch-level HDF5 with coords published
+            assert path("${outputDir}/features/resnet50/948176.features.h5").exists()
+
+            // Tile-level patch HDF5 published under tiles/
+            assert path("${outputDir}/tiles/9481/948176.patch.h5").exists()
+        }
+    }
+
+    test("stub feature tensor has expected torch structure") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            def pt = path("${outputDir}/features/resnet50/948176.features.pt")
+            assert pt.exists()
+
+            // Verify the file is a valid torch tensor (loadable with Python)
+            def result = ["python3", "-c", """
+import torch
+t = torch.load('${pt}', weights_only=True)
+assert t.ndim == 2, f'Expected 2D tensor, got shape {tuple(t.shape)}'
+print('OK shape:', tuple(t.shape))
+"""].execute()
+            result.waitFor()
+            assert result.exitValue() == 0 : "Tensor check failed:\n${result.err.text}"
+        }
+    }
+
+    test("stub patch HDF5 has coords dataset") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            def result = ["python3", "-c", """
+import h5py
+with h5py.File('${outputDir}/tiles/9481/948176.patch.h5', 'r') as f:
+    assert 'coords' in f, f'coords dataset missing; keys: {list(f.keys())}'
+    print('OK coords shape:', f['coords'].shape)
+"""].execute()
+            result.waitFor()
+            assert result.exitValue() == 0 : "HDF5 check failed:\n${result.err.text}"
+        }
+    }
+}

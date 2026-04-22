@@ -65,6 +65,14 @@ process TESSELLATE {
         ${save_tile_param} \
         ${stitch_tile_param}
     """
+
+    stub:
+    """
+    #!/usr/bin/env python3
+    import h5py, numpy as np
+    with h5py.File("${meta.slide_id}.patch.h5", "w") as f:
+        f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+    """
 }
 
 process FILTER_TILES {

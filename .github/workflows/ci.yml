@@ -75,3 +75,51 @@ jobs:
           MUSSEL_VENV: ${{ env.HOME }}/.mussel-venv
         run: |
           nf-test test tests/linear_probe.nf.test --profile test_linear_probe
+
+  # ── Main pipeline stub test (no GPU, no mussel CLI) ───────────────────────
+  nf-test-stub:
+    name: nf-test — pipeline stub
+    runs-on: ubuntu-latest
+
+    env:
+      NXF_ANSI_LOG: false
+      NXF_OPTS: "-Xmx2g"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python stub dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install h5py numpy
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          nextflow -version
+
+      - name: Install nf-test
+        run: |
+          curl -fsSL https://code.askimed.com/install/nf-test | bash
+          sudo mv nf-test /usr/local/bin/
+          nf-test version
+
+      - name: Generate tests/test.csv
+        run: |
+          echo "slide_id,slide_path" > tests/test.csv
+          echo "948176,${GITHUB_WORKSPACE}/tests/testdata/948176.svs" >> tests/test.csv
+
+      - name: Run pipeline stub test
+        run: |
+          nf-test test tests/pipeline_stub.nf.test --profile test_stub

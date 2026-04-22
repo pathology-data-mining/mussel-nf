@@ -1,0 +1,62 @@
+nextflow_pipeline {
+    name   "TCGA scripts consume stub pipeline output"
+    script "../main.nf"
+    profile "test_stub"
+    options "-stub"
+
+    // Exercises the integration between the mussel-nf stub output and
+    // tcga_append_wds.py: runs the pipeline in stub mode, then calls the
+    // TCGA append script against the stub .pt / .h5 files to verify that
+    // the file structure produced by the pipeline is compatible with the
+    // downstream TCGA ingestion scripts.
+
+    test("tcga_append_wds can shard stub pipeline output into WDS tars") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            // Stub pipeline must produce the .pt and .h5 files that
+            // tcga_append_wds expects.
+            def ptFile = path("${outputDir}/features/resnet50/948176.features.pt")
+            def h5File = path("${outputDir}/features/resnet50/948176.features.h5")
+            assert ptFile.exists()
+            assert h5File.exists()
+
+            // Build a minimal inventory CSV mapping slide 948176 → project BRCA
+            def wdsDir  = new File("${outputDir}/wds_tcga")
+            def invFile = new File("${outputDir}/tcga_inventory.csv")
+            wdsDir.mkdirs()
+            invFile.text = "file_name,project_id\n948176.svs,BRCA\n"
+
+            // Run tcga_append_wds against the stub output
+            def result = [
+                "python3", "-m", "scripts.tcga.tcga_append_wds",
+                "--pt-dir",    "${outputDir}/features/resnet50",
+                "--h5-dir",    "${outputDir}/features/resnet50",
+                "--inventory", invFile.absolutePath,
+                "--wds-dest",  wdsDir.absolutePath,
+                "--model-type", "resnet50",
+                "--max-shard-bytes", "10485760"  // 10 MB
+            ].execute(null, new File("${projectDir}"))
+            result.waitFor()
+            assert result.exitValue() == 0 : "tcga_append_wds failed:\n${result.err.text}"
+
+            // WDS index must be written
+            def indexFile = new File("${wdsDir}/resnet50/wds_index.json")
+            assert indexFile.exists() : "wds_index.json not found at ${indexFile}"
+
+            // Index must contain our slide
+            def index = new groovy.json.JsonSlurper().parse(indexFile)
+            assert index.containsKey("948176") : "948176 not in wds_index.json; keys=${index.keySet()}"
+
+            // At least one shard tar must exist in the BRCA subdirectory
+            def shards = new File("${wdsDir}/resnet50/BRCA").listFiles()
+                           ?.findAll { it.name.endsWith(".tar") }
+            assert shards && shards.size() > 0 : "No shard tars created in BRCA/"
+        }
+    }
+}

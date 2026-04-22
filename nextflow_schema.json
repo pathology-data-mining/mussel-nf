@@ -449,6 +449,29 @@
                     "description": "Filename prefix for shard tar files. Default '' produces 000000.tar (paladin-compatible naming)."
                 }
             }
+        },
+        "download": {
+            "title": "GDC slide download options",
+            "description": "Settings for the DOWNLOAD_SLIDE process, which fetches TCGA slides via gdc-client when slides are not yet on disk or S3.",
+            "type": "object",
+            "properties": {
+                "local_dir": {
+                    "type": "string",
+                    "default": "tcga-slides",
+                    "description": "Root directory where downloaded slides are cached. Files land at <local_dir>/<file_id>/<file_name>. Shared across pipeline runs via storeDir."
+                },
+                "gdc_token_file": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to GDC user token file for controlled-access data. Leave empty for open-access TCGA slides."
+                },
+                "n_connections": {
+                    "type": "integer",
+                    "default": 8,
+                    "minimum": 1,
+                    "description": "Number of parallel connections per gdc-client download invocation."
+                }
+            }
         }
     },
     "allOf": [

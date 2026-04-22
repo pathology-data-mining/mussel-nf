@@ -61,10 +61,11 @@ process WDS_SHARD {
     """
 
     stub:
+    stub_prefix = params.wds.shard_prefix != null ? params.wds.shard_prefix : ""
     """
     #!/usr/bin/env python3
     import tarfile, io
-    with tarfile.open("${prefix}000000.tar", "w") as t:
+    with tarfile.open("${stub_prefix}000000.tar", "w") as t:
         data = b""
         info = tarfile.TarInfo(name="stub.txt")
         info.size = 0

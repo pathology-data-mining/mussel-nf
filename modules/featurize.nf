@@ -90,13 +90,14 @@ process FEATURIZE_BATCH {
     """
 
     stub:
+    stub_slide_ids = slide_batch.collect { meta, slide, patch_h5 -> meta.slide_id }.join(',')
     """
     #!/usr/bin/env python3
     import os, torch, h5py, numpy as np
     os.makedirs("pt", exist_ok=True)
     os.makedirs("h5", exist_ok=True)
     n_feat = 8
-    for sid in "${slide_ids_str}".split(","):
+    for sid in "${stub_slide_ids}".split(","):
         torch.save(torch.zeros(1, n_feat), f"pt/{sid}.features.pt")
         with h5py.File(f"h5/{sid}.features.h5", "w") as f:
             f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))

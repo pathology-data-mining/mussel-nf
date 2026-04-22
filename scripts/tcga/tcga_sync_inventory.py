@@ -16,6 +16,47 @@ Exit codes
     0  -- success, at least one new / updated slide found
     1  -- error
     2  -- success, no changes detected (useful for cron skip logic)
+
+Output columns (tcga_inventory.csv)
+------------------------------------
+File identity
+    file_id             GDC file UUID (unique primary key)
+    file_name           Original filename, e.g. TCGA-BR-A44T-01Z-00-DX1.<uuid>.svs
+    slide_type          Slide type code parsed from filename (DX1, DX2, BS1, TS1, …)
+    file_size           File size in bytes
+    md5sum              MD5 checksum as reported by GDC
+    updated_datetime    ISO-8601 timestamp of last GDC metadata update
+
+Case / project
+    case_submitter_id   TCGA case barcode (e.g. TCGA-BR-A44T)
+    project_id          TCGA project (e.g. TCGA-BRCA, TCGA-LUAD)
+    primary_site        Organ / tissue of origin (e.g. Breast, Lung)
+    disease_type        Disease classification (e.g. Breast Invasive Carcinoma)
+
+Patient demographics
+    gender              Reported sex (female / male)
+    age_at_index        Age in years at the time of diagnosis
+    vital_status        Last known vital status (Alive / Dead)
+    race                Self-reported race (white, black or african american, …)
+    ethnicity           Self-reported ethnicity (hispanic or latino / not hispanic or latino)
+
+Diagnosis
+    primary_diagnosis   Histological diagnosis free-text (ICD-O-3 description)
+    morphology          ICD-O-3 morphology code (e.g. 8500/3)
+    ajcc_pathologic_stage  AJCC pathological stage (Stage I – Stage IV with sub-stages)
+    tumor_grade         Histological grade (G1–G4), often absent for many projects
+
+Sample
+    sample_type         Sample type (Primary Tumor, Metastatic, Blood Derived Normal, …)
+    tissue_type         Tissue category (Tumor / Normal)
+    tumor_descriptor    Tumor context (Primary, Recurrence, Metastatic, …)
+
+Slide-level pathology estimates  (frequently absent/null; estimated by pathologist)
+    section_location    Section position on the block (TOP / BOTTOM)
+    percent_tumor_cells Estimated % of slide area occupied by tumor cells
+    percent_stromal_cells  Estimated % stromal cells
+    percent_necrosis    Estimated % necrotic tissue
+    percent_normal_cells   Estimated % normal cells
 """
 
 import argparse

@@ -55,7 +55,7 @@ workflow {
 
     MERGE_ANNOTATION_FEATURES(ch_joined, classMappingYaml)
 
-    MERGE_ANNOTATION_FEATURES.out
+    MERGE_ANNOTATION_FEATURES.out.parquet
         | map { model_type, parquet -> tuple(model_type, parquet) }
         | groupTuple
         | STACK_ANNOTATION_FEATURES

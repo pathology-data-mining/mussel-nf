@@ -61,6 +61,39 @@ nextflow_pipeline {
 
             // ── Intermediate parquet (stacked annotation features) ─────────
             assert path("${outputDir}/annotation_features/resnet50/annotation_features.parquet").exists()
+
+            // ── Cross-model summary ────────────────────────────────────────
+            def summaryDir = path("${outputDir}/linear_probe_benchmark")
+            assert summaryDir.resolve("summary.csv").exists()
+            assert summaryDir.resolve("summary.png").exists()
+        }
+    }
+
+    test("summary CSV contains expected columns and model row") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            def summaryLines = path("${outputDir}/linear_probe_benchmark/summary.csv")
+                .text.trim().split("\n")
+
+            // Header row must include model and at least one metric column
+            def header = summaryLines[0].split(",")
+            assert "model" in header : "summary.csv missing 'model' column"
+            assert header.any { it.contains("auc_roc") || it.contains("average_precision") } \
+                : "summary.csv missing AUC/AP metric column; found: ${header}"
+
+            // Exactly one data row (one model type: resnet50)
+            assert summaryLines.size() == 2 : \
+                "Expected 1 data row in summary.csv, got ${summaryLines.size() - 1}"
+
+            def dataRow = summaryLines[1].split(",")
+            assert dataRow[0] == "resnet50" : \
+                "Expected model 'resnet50' in summary row, got '${dataRow[0]}'"
         }
     }
 

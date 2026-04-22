@@ -39,19 +39,67 @@ GDC_FIELDS = ",".join([
     "file_size",
     "md5sum",
     "updated_datetime",
+    # Case / project
     "cases.submitter_id",
     "cases.project.project_id",
+    "cases.project.primary_site",
+    "cases.project.disease_type",
+    # Demographics
+    "cases.demographic.gender",
+    "cases.demographic.age_at_index",
+    "cases.demographic.vital_status",
+    "cases.demographic.race",
+    "cases.demographic.ethnicity",
+    # Diagnosis
+    "cases.diagnoses.primary_diagnosis",
+    "cases.diagnoses.morphology",
+    "cases.diagnoses.ajcc_pathologic_stage",
+    "cases.diagnoses.tumor_grade",
+    # Sample / slide pathology
+    "cases.samples.sample_type",
+    "cases.samples.tissue_type",
+    "cases.samples.tumor_descriptor",
+    "cases.samples.portions.slides.section_location",
+    "cases.samples.portions.slides.percent_tumor_cells",
+    "cases.samples.portions.slides.percent_stromal_cells",
+    "cases.samples.portions.slides.percent_necrosis",
+    "cases.samples.portions.slides.percent_normal_cells",
 ])
 
 INVENTORY_COLUMNS = [
+    # File identity
     "file_id",
     "file_name",
-    "case_submitter_id",
-    "project_id",
     "slide_type",
     "file_size",
     "md5sum",
     "updated_datetime",
+    # Case / project
+    "case_submitter_id",
+    "project_id",
+    "primary_site",
+    "disease_type",
+    # Demographics
+    "gender",
+    "age_at_index",
+    "vital_status",
+    "race",
+    "ethnicity",
+    # Diagnosis
+    "primary_diagnosis",
+    "morphology",
+    "ajcc_pathologic_stage",
+    "tumor_grade",
+    # Sample
+    "sample_type",
+    "tissue_type",
+    "tumor_descriptor",
+    # Slide-level pathology estimates
+    "section_location",
+    "percent_tumor_cells",
+    "percent_stromal_cells",
+    "percent_necrosis",
+    "percent_normal_cells",
 ]
 
 _SLIDE_TYPE_RE = re.compile(r"-([A-Z]{2}\d+)\.")
@@ -89,19 +137,61 @@ def _fetch_page(filters: dict, from_: int, size: int, retries: int = 3) -> dict:
     raise RuntimeError("unreachable")
 
 
+def _first(lst: list, key: str, default="") -> str:
+    """Return the first non-null value of *key* from a list of dicts."""
+    for item in lst or []:
+        v = item.get(key)
+        if v is not None:
+            return v
+    return default
+
+
 def _parse_hit(hit: dict) -> dict:
     cases = hit.get("cases") or [{}]
     case = cases[0]
     project = case.get("project") or {}
+    demographic = case.get("demographic") or {}
+    diagnoses = case.get("diagnoses") or [{}]
+    samples = case.get("samples") or [{}]
+    sample = samples[0]
+    portions = sample.get("portions") or [{}]
+    slides = (portions[0] or {}).get("slides") or [{}]
+    slide_path = slides[0] or {}
+
     return {
-        "file_id": hit.get("file_id", ""),
-        "file_name": hit.get("file_name", ""),
-        "case_submitter_id": case.get("submitter_id", ""),
-        "project_id": project.get("project_id", ""),
-        "slide_type": _slide_type(hit.get("file_name", "")),
-        "file_size": hit.get("file_size", 0),
-        "md5sum": hit.get("md5sum", ""),
+        # File identity
+        "file_id":        hit.get("file_id", ""),
+        "file_name":      hit.get("file_name", ""),
+        "slide_type":     _slide_type(hit.get("file_name", "")),
+        "file_size":      hit.get("file_size", 0),
+        "md5sum":         hit.get("md5sum", ""),
         "updated_datetime": hit.get("updated_datetime", ""),
+        # Case / project
+        "case_submitter_id": case.get("submitter_id", ""),
+        "project_id":     project.get("project_id", ""),
+        "primary_site":   project.get("primary_site", ""),
+        "disease_type":   project.get("disease_type", ""),
+        # Demographics
+        "gender":         demographic.get("gender", ""),
+        "age_at_index":   demographic.get("age_at_index", ""),
+        "vital_status":   demographic.get("vital_status", ""),
+        "race":           demographic.get("race", ""),
+        "ethnicity":      demographic.get("ethnicity", ""),
+        # Diagnosis (first entry that has the field)
+        "primary_diagnosis":    _first(diagnoses, "primary_diagnosis"),
+        "morphology":           _first(diagnoses, "morphology"),
+        "ajcc_pathologic_stage": _first(diagnoses, "ajcc_pathologic_stage"),
+        "tumor_grade":          _first(diagnoses, "tumor_grade"),
+        # Sample
+        "sample_type":     sample.get("sample_type", ""),
+        "tissue_type":     sample.get("tissue_type", ""),
+        "tumor_descriptor": sample.get("tumor_descriptor", ""),
+        # Slide-level pathology estimates
+        "section_location":       slide_path.get("section_location", ""),
+        "percent_tumor_cells":    slide_path.get("percent_tumor_cells", ""),
+        "percent_stromal_cells":  slide_path.get("percent_stromal_cells", ""),
+        "percent_necrosis":       slide_path.get("percent_necrosis", ""),
+        "percent_normal_cells":   slide_path.get("percent_normal_cells", ""),
     }
 
 

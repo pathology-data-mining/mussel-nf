@@ -30,43 +30,48 @@ import torch
 # ---------------------------------------------------------------------------
 
 INVENTORY_ROWS = [
-    # file_id, file_name, project_id, slide_type, file_size, md5sum
+    # file_id, file_name, project_id, slide_type, file_size, md5sum, primary_site, disease_type,
+    # gender, age_at_index, vital_status, primary_diagnosis, ajcc_pathologic_stage,
+    # sample_type, percent_tumor_cells
     (
         "aaaa0000-0000-0000-0000-000000000001",
         "TCGA-BR-A44T-01Z-00-DX1.1A2B3C4D-0000-0000-0000-000000000000.svs",
-        "TCGA-BRCA",
-        "DX1",
-        1_000_000,
-        "abc123",
+        "TCGA-BRCA", "DX1", 1_000_000, "abc123",
+        "Breast", "Breast Invasive Carcinoma",
+        "female", "52", "Alive", "Infiltrating duct carcinoma, NOS", "Stage IIA",
+        "Primary Tumor", "60.0",
     ),
     (
         "bbbb0000-0000-0000-0000-000000000002",
         "TCGA-BR-A44U-01Z-00-DX1.2B3C4D5E-0000-0000-0000-000000000000.svs",
-        "TCGA-BRCA",
-        "DX1",
-        2_000_000,
-        "def456",
+        "TCGA-BRCA", "DX1", 2_000_000, "def456",
+        "Breast", "Breast Invasive Carcinoma",
+        "female", "67", "Dead", "Lobular carcinoma, NOS", "Stage IIIA",
+        "Primary Tumor", "75.0",
     ),
     (
         "cccc0000-0000-0000-0000-000000000003",
         "TCGA-LU-A5YX-01Z-00-DX1.3C4D5E6F-0000-0000-0000-000000000000.svs",
-        "TCGA-LUAD",
-        "DX1",
-        3_000_000,
-        "ghi789",
+        "TCGA-LUAD", "DX1", 3_000_000, "ghi789",
+        "Lung", "Lung Adenocarcinoma",
+        "male", "71", "Dead", "Adenocarcinoma, NOS", "Stage IB",
+        "Primary Tumor", "55.0",
     ),
     (
         "dddd0000-0000-0000-0000-000000000004",
         "TCGA-LU-A5YY-01Z-00-DX1.4D5E6F7G-0000-0000-0000-000000000000.svs",
-        "TCGA-LUAD",
-        "DX1",
-        4_000_000,
-        "jkl012",
+        "TCGA-LUAD", "DX1", 4_000_000, "jkl012",
+        "Lung", "Lung Adenocarcinoma",
+        "male", "58", "Alive", "Adenocarcinoma, NOS", "Stage IA",
+        "Primary Tumor", "70.0",
     ),
 ]
 
 INVENTORY_COLUMNS = [
     "file_id", "file_name", "project_id", "slide_type", "file_size", "md5sum",
+    "primary_site", "disease_type",
+    "gender", "age_at_index", "vital_status", "primary_diagnosis", "ajcc_pathologic_stage",
+    "sample_type", "percent_tumor_cells",
 ]
 
 
@@ -87,6 +92,102 @@ def make_h5_file(path: Path, n_patches: int = 8) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as f:
         f.create_dataset("coords", data=np.random.randint(0, 1000, (n_patches, 2)))
+
+
+# ---------------------------------------------------------------------------
+# 0. tcga_sync_inventory — _parse_hit()
+# ---------------------------------------------------------------------------
+
+class TestParseHit:
+    """_parse_hit() correctly extracts all metadata fields from a GDC API hit."""
+
+    def _make_hit(self, **overrides):
+        hit = {
+            "file_id": "aaaa-0001",
+            "file_name": "TCGA-BR-A44T-01Z-00-DX1.uuid.svs",
+            "file_size": 500_000_000,
+            "md5sum": "abc123",
+            "updated_datetime": "2021-10-14T18:00:00",
+            "cases": [{
+                "submitter_id": "TCGA-BR-A44T",
+                "project": {
+                    "project_id": "TCGA-BRCA",
+                    "primary_site": "Breast",
+                    "disease_type": "Breast Invasive Carcinoma",
+                },
+                "demographic": {
+                    "gender": "female",
+                    "age_at_index": 63,
+                    "vital_status": "Alive",
+                    "race": "white",
+                    "ethnicity": "not hispanic or latino",
+                },
+                "diagnoses": [{
+                    "primary_diagnosis": "Infiltrating duct carcinoma, NOS",
+                    "morphology": "8500/3",
+                    "ajcc_pathologic_stage": "Stage IA",
+                    "tumor_grade": None,
+                }],
+                "samples": [{
+                    "sample_type": "Primary Tumor",
+                    "tissue_type": "Tumor",
+                    "tumor_descriptor": "Primary",
+                    "portions": [{"slides": [{
+                        "section_location": "TOP",
+                        "percent_tumor_cells": 50.0,
+                        "percent_stromal_cells": 35.0,
+                        "percent_necrosis": 10.0,
+                        "percent_normal_cells": 5.0,
+                    }]}],
+                }],
+            }],
+        }
+        hit.update(overrides)
+        return hit
+
+    def test_all_columns_present(self):
+        from scripts.tcga.tcga_sync_inventory import _parse_hit, INVENTORY_COLUMNS
+        row = _parse_hit(self._make_hit())
+        assert set(row.keys()) == set(INVENTORY_COLUMNS)
+
+    def test_core_fields(self):
+        from scripts.tcga.tcga_sync_inventory import _parse_hit
+        row = _parse_hit(self._make_hit())
+        assert row["file_id"] == "aaaa-0001"
+        assert row["project_id"] == "TCGA-BRCA"
+        assert row["slide_type"] == "DX1"
+        assert row["file_size"] == 500_000_000
+
+    def test_metadata_fields(self):
+        from scripts.tcga.tcga_sync_inventory import _parse_hit
+        row = _parse_hit(self._make_hit())
+        assert row["primary_site"] == "Breast"
+        assert row["disease_type"] == "Breast Invasive Carcinoma"
+        assert row["gender"] == "female"
+        assert row["age_at_index"] == 63
+        assert row["vital_status"] == "Alive"
+        assert row["primary_diagnosis"] == "Infiltrating duct carcinoma, NOS"
+        assert row["ajcc_pathologic_stage"] == "Stage IA"
+        assert row["sample_type"] == "Primary Tumor"
+        assert row["percent_tumor_cells"] == 50.0
+        assert row["percent_stromal_cells"] == 35.0
+
+    def test_missing_optional_fields_default_empty(self):
+        from scripts.tcga.tcga_sync_inventory import _parse_hit
+        # Minimal hit — no demographic, diagnoses, samples
+        hit = {
+            "file_id": "x",
+            "file_name": "TCGA-XX-0001-01Z-00-DX1.uuid.svs",
+            "file_size": 0,
+            "md5sum": "",
+            "updated_datetime": "",
+            "cases": [{"submitter_id": "TCGA-XX-0001",
+                        "project": {"project_id": "TCGA-TEST"}}],
+        }
+        row = _parse_hit(hit)
+        assert row["gender"] == ""
+        assert row["ajcc_pathologic_stage"] == ""
+        assert row["percent_tumor_cells"] == ""
 
 
 # ---------------------------------------------------------------------------

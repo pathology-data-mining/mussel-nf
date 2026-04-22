@@ -3,10 +3,12 @@
 import csv
 import importlib.util
 import os
+import sys
 import tempfile
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,6 +31,7 @@ LocalWatcher = _mod.LocalWatcher
 collect_manifests = _mod.collect_manifests
 BatchScheduler = _mod.BatchScheduler
 NextflowRunner = _mod.NextflowRunner
+TcgaWatcher = _mod.TcgaWatcher
 recover_in_flight = _mod.recover_in_flight
 
 
@@ -582,3 +585,237 @@ class TestRecoverInFlight:
         recover_in_flight(store, pending)
         # Batch is not RUNNING, so no recovery occurs
         assert len(pending) == 0
+
+
+# ---------------------------------------------------------------------------
+# TcgaWatcher tests
+# ---------------------------------------------------------------------------
+
+class TestTcgaWatcher:
+    """TcgaWatcher polls TCGA scripts, resolves paths, enqueues or downloads."""
+
+    def _make_watcher(self, tmp_path, **kwargs):
+        pass  # TcgaWatcher, WatcherConfig, StateStore already imported at top
+        cfg = WatcherConfig(
+            type="tcga",
+            inventory_csv=str(tmp_path / "inventory.csv"),
+            status_csv=str(tmp_path / "status.csv"),
+            results_dir=str(tmp_path / "results"),
+            model="ctranspath",
+            scripts_dir=str(tmp_path / "scripts"),
+            **kwargs,
+        )
+        state = StateStore(str(tmp_path / "test.db"))
+        stop_event = threading.Event()
+        pending: deque = deque()
+        watcher = TcgaWatcher(cfg, pending, state, stop_event, repo_dir=str(tmp_path))
+        return watcher, pending, state, stop_event
+
+    def _write_meta_csv(self, path: Path, rows: list[dict]):
+        import csv as _csv
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = ["slide_id", "slide_path", "needs_download", "file_id", "file_name", "project_id"]
+        with open(path, "w", newline="") as f:
+            writer = _csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+
+    def test_enqueues_ready_slides(self, tmp_path):
+        pass  # TcgaWatcher, WatcherConfig, StateStore already imported at top
+        # Patch _run_script to succeed and produce a meta CSV
+        meta_csv = tmp_path / "status_dispatcher.meta.csv"
+        self._write_meta_csv(meta_csv, [
+            {"slide_id": "slide-A", "slide_path": "/slides/A.svs", "needs_download": "false"},
+            {"slide_id": "slide-B", "slide_path": "/slides/B.svs", "needs_download": "false"},
+        ])
+        watcher, pending, state, _ = self._make_watcher(tmp_path)
+
+        def fake_run_script(script, args):
+            return 0
+
+        watcher._run_script = fake_run_script
+        # Point meta CSV path to what _poll will compute
+        import unittest.mock as mock
+        with mock.patch.object(watcher, "_run_script", side_effect=fake_run_script):
+            # Override the meta_csv path by patching open — instead, just call _poll
+            # and monkey-patch the path computation
+            orig_poll = watcher._poll
+
+            def patched_poll():
+                # fake _run_script side effects: produce the meta CSV
+                import csv as _csv
+                samples_csv = str(tmp_path / "status_dispatcher.csv")
+                # write meta csv that _poll looks for
+                self._write_meta_csv(
+                    Path(samples_csv.replace(".csv", ".meta.csv")),
+                    [
+                        {"slide_id": "slide-A", "slide_path": "/slides/A.svs",
+                         "needs_download": "false"},
+                        {"slide_id": "slide-B", "slide_path": "/slides/B.svs",
+                         "needs_download": "false"},
+                    ],
+                )
+                # patch cfg.status_csv so samples_csv resolves correctly
+                watcher.cfg.status_csv = str(tmp_path / "status.csv")
+                orig_poll()
+
+            watcher._poll = patched_poll
+            watcher._poll()
+
+        assert len(pending) == 2
+        slide_ids = {s["slide_id"] for s in pending}
+        assert slide_ids == {"slide-A", "slide-B"}
+
+    def test_skips_already_known_slides(self, tmp_path):
+        pass  # TcgaWatcher, WatcherConfig, StateStore already imported at top
+        import unittest.mock as mock
+
+        watcher, pending, state, _ = self._make_watcher(tmp_path)
+        state.add_slide("/slides/A.svs", "slide-A")  # already known
+
+        samples_csv = str(tmp_path / "status_dispatcher.csv")
+        self._write_meta_csv(
+            Path(samples_csv.replace(".csv", ".meta.csv")),
+            [{"slide_id": "slide-A", "slide_path": "/slides/A.svs", "needs_download": "false"}],
+        )
+
+        with mock.patch.object(watcher, "_run_script", return_value=0):
+            watcher.cfg.status_csv = str(tmp_path / "status.csv")
+            watcher._poll()
+
+        assert len(pending) == 0  # slide-A is already known, not re-enqueued
+
+    def test_download_enabled_submits_needs_download_slides(self, tmp_path):
+        pass  # TcgaWatcher, WatcherConfig, StateStore already imported at top
+        import unittest.mock as mock
+
+        watcher, pending, state, _ = self._make_watcher(
+            tmp_path, download_enabled=True, download_dir=str(tmp_path / "dl")
+        )
+
+        samples_csv = str(tmp_path / "status_dispatcher.csv")
+        self._write_meta_csv(
+            Path(samples_csv.replace(".csv", ".meta.csv")),
+            [{"slide_id": "slide-C", "slide_path": str(tmp_path / "dl/uuid/C.svs"),
+              "needs_download": "true", "file_id": "uuid", "file_name": "C.svs"}],
+        )
+
+        submitted = []
+
+        def fake_submit(fn, slide):
+            submitted.append(slide["slide_id"])
+
+        with mock.patch.object(watcher, "_run_script", return_value=0), \
+             mock.patch.object(watcher._download_executor, "submit", side_effect=fake_submit):
+            watcher.cfg.status_csv = str(tmp_path / "status.csv")
+            watcher._poll()
+
+        assert "slide-C" in submitted
+
+    def test_download_and_enqueue_succeeds(self, tmp_path):
+        pass  # TcgaWatcher, WatcherConfig, StateStore already imported at top
+        import unittest.mock as mock
+
+        dest = tmp_path / "dl" / "uuid123" / "slide.svs"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        watcher, pending, state, _ = self._make_watcher(
+            tmp_path, download_enabled=True, download_dir=str(tmp_path / "dl")
+        )
+        state.add_slide(str(dest), "slide-D")
+
+        slide = {"slide_id": "slide-D", "slide_path": str(dest),
+                 "file_id": "uuid123", "file_name": "slide.svs"}
+
+        def fake_run(cmd, **kwargs):
+            dest.write_bytes(b"fake")  # simulate gdc-client writing the file
+            return mock.Mock(returncode=0, stderr="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            watcher._download_and_enqueue(slide)
+
+        assert len(pending) == 1
+        assert pending[0]["slide_id"] == "slide-D"
+
+    def test_download_failure_does_not_enqueue(self, tmp_path):
+        pass  # TcgaWatcher, WatcherConfig, StateStore already imported at top
+        import unittest.mock as mock
+
+        watcher, pending, state, _ = self._make_watcher(
+            tmp_path, download_enabled=True, download_dir=str(tmp_path / "dl")
+        )
+        slide = {"slide_id": "slide-E", "slide_path": str(tmp_path / "dl/u/E.svs"),
+                 "file_id": "u", "file_name": "E.svs"}
+
+        fake_result = mock.Mock(returncode=1, stderr="network error")
+        with mock.patch("subprocess.run", return_value=fake_result):
+            watcher._download_and_enqueue(slide)
+
+        assert len(pending) == 0
+
+
+# ---------------------------------------------------------------------------
+# post_batch_hooks tests
+# ---------------------------------------------------------------------------
+
+class TestPostBatchHooks:
+    """_run_post_batch_hooks runs commands with template substitution."""
+
+    def _make_runner(self, tmp_path, hooks):
+        pass  # NextflowRunner, Config, StateStore already imported at top
+        cfg = Config(
+            repo_dir=str(tmp_path),
+            nextflow_profiles="standard",
+            outdir=str(tmp_path / "results"),
+            work_base_dir=str(tmp_path / "work"),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            post_batch_hooks=hooks,
+        )
+        state = StateStore(str(tmp_path / "state" / "test.db"))
+        return NextflowRunner(cfg, "batch-001", [], state)
+
+    def test_hook_runs_command_with_substitution(self, tmp_path):
+        import unittest.mock as mock
+        sentinel = tmp_path / "hook_ran.txt"
+        hook = {
+            "command": sys.executable,
+            "args": ["-c", f"open('{sentinel}', 'w').write('{{batch_id}}')"],
+        }
+        runner = self._make_runner(tmp_path, [hook])
+        runner._run_post_batch_hooks("/fake/batch.csv")
+        assert sentinel.exists()
+        assert sentinel.read_text() == "batch-001"
+
+    def test_hook_substitutes_all_vars(self, tmp_path):
+        import unittest.mock as mock
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stderr="")
+
+        hook = {
+            "command": "echo",
+            "args": ["{batch_csv}", "{batch_id}", "{outdir}", "{repo_dir}"],
+        }
+        runner = self._make_runner(tmp_path, [hook])
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            runner._run_post_batch_hooks("/my/batch.csv")
+
+        assert calls[0] == ["echo", "/my/batch.csv", "batch-001",
+                             str(tmp_path / "results"), str(tmp_path)]
+
+    def test_hook_failure_logged_not_raised(self, tmp_path):
+        import unittest.mock as mock
+        hook = {"command": "false", "args": []}
+        runner = self._make_runner(tmp_path, [hook])
+        fake_result = mock.Mock(returncode=1, stderr="fail")
+        with mock.patch("subprocess.run", return_value=fake_result):
+            runner._run_post_batch_hooks("/batch.csv")  # must not raise
+
+    def test_no_hooks_is_noop(self, tmp_path):
+        runner = self._make_runner(tmp_path, [])
+        runner._run_post_batch_hooks("/batch.csv")  # must not raise or call anything

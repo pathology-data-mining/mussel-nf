@@ -1,0 +1,97 @@
+# tcga_dispatcher.yaml — streaming TCGA feature extraction via mussel-dispatcher
+#
+# Replaces the sequential tcga_run.py loop with a streaming architecture:
+#   - TcgaWatcher polls the GDC inventory and resolves slide paths
+#   - Slides available on disk/S3 are enqueued immediately
+#   - Slides needing download are fetched in a background thread pool,
+#     then enqueued as each download completes
+#   - BatchScheduler accumulates slides and fires nextflow runs when
+#     batch_size is reached or max_wait_seconds elapses
+#   - RunManager runs up to max_concurrent_runs NF jobs in parallel
+#   - post_batch_hooks append features to WDS shards after each NF run
+#
+# Net effect: downloads for the next batch overlap with featurization of
+# the current batch, and multiple NF runs execute concurrently.
+#
+# Usage:
+#   python dispatcher/mussel-dispatcher.py dispatcher/tcga_dispatcher.yaml
+#
+# All /path/to/... entries are placeholders — replace before running.
+
+repo_dir: /path/to/mussel-nf
+nextflow_profiles: cluster,apptainer
+outdir: /path/to/tcga-results
+work_base_dir: /path/to/dispatcher/work
+dispatch_dir: /path/to/dispatcher/batches
+state_dir: /path/to/dispatcher/state
+log_dir: /path/to/dispatcher/logs
+
+# Run up to 2 Nextflow jobs simultaneously
+max_concurrent_runs: 2
+
+# Dispatch when 50 slides have accumulated, or after 10 minutes
+batch_size: 50
+min_batch_size: 1
+max_wait_seconds: 600
+
+retry_failed: true
+cleanup_work_dir: false
+
+watchers:
+  - type: tcga
+    # CSV files managed by the TCGA scripts
+    inventory_csv: /path/to/tcga_inventory.csv
+    status_csv: /path/to/tcga_status.csv
+    results_dir: /path/to/tcga-results
+
+    # Feature model to check completion status against
+    model: ctranspath
+
+    # Slide source — at least one of local_slides_dir or s3_base must be set.
+    # Slides are resolved: local disk → S3 → needs_download (in that order).
+    local_slides_dir: /path/to/slides
+    # s3_base: s3://bucket/path/to/slides
+    # s3_endpoint: http://your-ecs-endpoint:9020
+    # s3_access_key: ...   # or set ECS_ACCESS_KEY env var
+    # s3_secret_key: ...   # or set ECS_SECRET_KEY env var
+
+    # Optional: restrict to a single project or slide type
+    # project: TCGA-BRCA
+    slide_type: DX1
+
+    # How often to poll the GDC inventory (seconds)
+    poll_interval_seconds: 3600
+
+    # Skip re-fetching the GDC inventory if it is younger than this many hours
+    gdc_max_age_hours: 24.0
+
+    # Download slides not yet on disk or S3.
+    # Each download runs in a background thread; slides are enqueued individually
+    # as they complete, so featurization of ready slides is not blocked.
+    download_enabled: true
+    download_dir: /path/to/downloads
+    download_concurrency: 4
+    # gdc_token_file: /path/to/gdc-user-token.txt
+
+# Post-batch hooks run after each successful Nextflow job.
+# Template variables: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
+#
+# {batch_csv} is the dispatcher's samples CSV for the batch — it has a
+# slide_id column, which tcga_append_wds --slide-ids-csv uses to restrict
+# the WDS append to only the slides in this batch.
+post_batch_hooks:
+  - command: "python {repo_dir}/scripts/tcga/tcga_append_wds.py"
+    args:
+      - "--pt-dir={outdir}/features/ctranspath/pt"
+      - "--h5-dir={outdir}/features/ctranspath/tile_h5"
+      - "--inventory=/path/to/tcga_inventory.csv"
+      - "--wds-dest=s3://your-bucket/wds/ctranspath"
+      - "--model-type=ctranspath"
+      - "--slide-ids-csv={batch_csv}"
+
+  # Uncomment to sync inventory + status to Databricks after each batch:
+  # - command: "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py"
+  #   args:
+  #     - "--inventory=/path/to/tcga_inventory.csv"
+  #     - "--status=/path/to/tcga_status.csv"
+  #     - "--volume-path=/dbfs/mnt/your-volume/tcga"

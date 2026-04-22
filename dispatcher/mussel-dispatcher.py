@@ -50,7 +50,7 @@ log = logging.getLogger("mussel-dispatcher")
 
 @dataclass
 class WatcherConfig:
-    type: str                          # "local" or "s3"
+    type: str                          # "local", "s3", or "tcga"
     # local
     path: Optional[str] = None
     recursive: bool = True
@@ -65,6 +65,24 @@ class WatcherConfig:
     # shared
     poll_interval_seconds: int = 60
     extensions: list = field(default_factory=lambda: [".svs", ".tiff", ".tif", ".ndpi", ".scn"])
+    # tcga watcher
+    inventory_csv: str = ""
+    status_csv: str = ""
+    results_dir: str = ""
+    model: str = "ctranspath"
+    local_slides_dir: str = ""
+    s3_base: str = ""
+    s3_endpoint: str = ""
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    project: str = ""
+    slide_type: str = "DX1"
+    download_enabled: bool = False
+    download_dir: str = ""
+    download_concurrency: int = 4
+    gdc_token_file: str = ""
+    gdc_max_age_hours: float = 24.0
+    scripts_dir: str = ""  # path to scripts/tcga/; defaults to {repo_dir}/scripts/tcga
 
 
 @dataclass
@@ -84,6 +102,13 @@ class Config:
     retry_failed: bool = True
     cleanup_work_dir: bool = False
     combined_manifest_path: Optional[str] = None  # defaults to {outdir}/manifest-combined.csv
+    post_batch_hooks: list = field(default_factory=list)
+    # list of {"command": "...", "args": ["..."]}
+    # template vars available in command and args strings:
+    #   {batch_csv}  — path to the batch samples CSV
+    #   {batch_id}   — unique batch identifier
+    #   {outdir}     — nextflow output directory
+    #   {repo_dir}   — repository root
 
     watchers: list = field(default_factory=list)
 
@@ -402,6 +427,217 @@ class S3Watcher(threading.Thread):
                 self.pending.append({"slide_path": s3_path, "slide_id": slide_id})
 
 
+
+# ---------------------------------------------------------------------------
+# TCGA watcher
+# ---------------------------------------------------------------------------
+
+class TcgaWatcher(threading.Thread):
+    """
+    Polls the TCGA GDC inventory for slides pending feature extraction and
+    feeds them into the dispatcher pipeline.
+
+    For each pending slide it:
+      1. Syncs the GDC inventory (respects gdc_max_age_hours to avoid
+         hammering the API on every poll).
+      2. Updates the per-slide status from the local results directory.
+      3. Calls tcga_prepare_samples to resolve each slide's path
+         (local disk → S3 → needs_download).
+      4. Enqueues slides that are already available (local / S3) directly.
+      5. Optionally downloads slides via gdc-client (download_enabled=true),
+         then enqueues each on completion.
+
+    Because downloads happen in a background thread pool and enqueue slides
+    individually as they finish, featurization of already-downloaded slides
+    can overlap with downloads of the next batch — the key scheduling win
+    over the sequential tcga_run.py loop.
+    """
+
+    def __init__(
+        self,
+        cfg: WatcherConfig,
+        pending: deque,
+        state: StateStore,
+        stop_event: threading.Event,
+        repo_dir: str,
+    ):
+        super().__init__(name="tcga-watcher", daemon=True)
+        self.cfg = cfg
+        self.pending = pending
+        self.state = state
+        self.stop_event = stop_event
+        self._scripts_dir = cfg.scripts_dir or str(Path(repo_dir) / "scripts" / "tcga")
+        self._download_executor = ThreadPoolExecutor(
+            max_workers=max(1, cfg.download_concurrency),
+            thread_name_prefix="gdc-download",
+        )
+
+    def run(self):
+        log.info(
+            "TcgaWatcher started (poll_interval=%ds, download_enabled=%s)",
+            self.cfg.poll_interval_seconds,
+            self.cfg.download_enabled,
+        )
+        self._poll()  # poll immediately on startup
+        while not self.stop_event.is_set():
+            self.stop_event.wait(self.cfg.poll_interval_seconds)
+            if not self.stop_event.is_set():
+                self._poll()
+        self._download_executor.shutdown(wait=False)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _run_script(self, script: str, args: list) -> int:
+        cmd = [sys.executable, str(Path(self._scripts_dir) / script)] + args
+        log.info("TcgaWatcher: $ %s", " ".join(str(a) for a in cmd))
+        env = dict(os.environ)
+        if self.cfg.s3_access_key:
+            env["ECS_ACCESS_KEY"] = self.cfg.s3_access_key
+        if self.cfg.s3_secret_key:
+            env["ECS_SECRET_KEY"] = self.cfg.s3_secret_key
+        if self.cfg.s3_endpoint:
+            env.setdefault("ECS_ENDPOINT_URL", self.cfg.s3_endpoint)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if result.returncode not in (0, 2):
+            log.error(
+                "TcgaWatcher: %s failed (exit %d):\n%s",
+                script, result.returncode, result.stderr[-500:],
+            )
+        return result.returncode
+
+    def _poll(self):
+        log.info("TcgaWatcher: polling GDC inventory…")
+
+        # 1. Sync inventory (skip if fresh)
+        sync_args = [
+            "--output", self.cfg.inventory_csv,
+            "--max-age-hours", str(self.cfg.gdc_max_age_hours),
+        ]
+        if self.cfg.project:
+            sync_args += ["--project", self.cfg.project]
+        rc = self._run_script("tcga_sync_inventory.py", sync_args)
+        if rc not in (0, 2):
+            log.error("TcgaWatcher: inventory sync failed — skipping this poll")
+            return
+
+        # 2. Update per-slide status from results directory
+        rc = self._run_script("tcga_update_status.py", [
+            "--inventory", self.cfg.inventory_csv,
+            "--results-dir", self.cfg.results_dir,
+            "--output", self.cfg.status_csv,
+        ])
+        if rc != 0:
+            log.error("TcgaWatcher: status update failed — skipping this poll")
+            return
+
+        # 3. Resolve slide paths (local / S3 / needs_download)
+        samples_csv = str(Path(self.cfg.status_csv).with_suffix("")) + "_dispatcher.csv"
+        prepare_args = [
+            "--inventory", self.cfg.inventory_csv,
+            "--status", self.cfg.status_csv,
+            "--output", samples_csv,
+            "--model", self.cfg.model,
+            "--skip-done",
+        ]
+        if self.cfg.local_slides_dir:
+            prepare_args += ["--local-slides-dir", self.cfg.local_slides_dir]
+        if self.cfg.s3_base:
+            prepare_args += ["--s3-base", self.cfg.s3_base]
+        if self.cfg.s3_endpoint:
+            prepare_args += ["--s3-endpoint", self.cfg.s3_endpoint]
+        if self.cfg.project:
+            prepare_args += ["--project", self.cfg.project]
+        if self.cfg.slide_type and self.cfg.slide_type.lower() != "all":
+            prepare_args += ["--slide-type", self.cfg.slide_type]
+
+        rc = self._run_script("tcga_prepare_samples.py", prepare_args)
+        if rc == 2:
+            log.info("TcgaWatcher: no pending slides this poll")
+            return
+        if rc != 0:
+            log.error("TcgaWatcher: prepare_samples failed — skipping this poll")
+            return
+
+        # 4. Read sidecar meta CSV (slide_id, slide_path, needs_download, file_id, ...)
+        meta_csv = samples_csv.replace(".csv", ".meta.csv")
+        if not Path(meta_csv).exists():
+            log.warning("TcgaWatcher: meta CSV not found: %s", meta_csv)
+            return
+
+        with open(meta_csv, newline="") as f:
+            slides = list(csv.DictReader(f))
+
+        ready = [s for s in slides if s.get("needs_download", "").lower() != "true"]
+        needs_dl = [s for s in slides if s.get("needs_download", "").lower() == "true"]
+        log.info("TcgaWatcher: %d ready, %d need download", len(ready), len(needs_dl))
+
+        # Enqueue slides already on disk / S3
+        for s in ready:
+            if not self.state.is_known(s["slide_path"]):
+                self.state.add_slide(s["slide_path"], s["slide_id"])
+                self.pending.append({"slide_id": s["slide_id"], "slide_path": s["slide_path"]})
+
+        # Kick off downloads for slides not yet available
+        if self.cfg.download_enabled and needs_dl:
+            for s in needs_dl:
+                if not self.state.is_known(s["slide_path"]):
+                    self.state.add_slide(s["slide_path"], s["slide_id"])
+                    self._download_executor.submit(self._download_and_enqueue, s)
+        elif needs_dl:
+            log.info(
+                "TcgaWatcher: %d slides need download but download_enabled=false — skipped",
+                len(needs_dl),
+            )
+
+    def _download_and_enqueue(self, slide: dict) -> None:
+        """Download a single slide via gdc-client, then enqueue it for processing."""
+        file_id = slide.get("file_id", "")
+        file_name = slide.get("file_name", "")
+        slide_id = slide["slide_id"]
+        download_root = self.cfg.download_dir or self.cfg.local_slides_dir
+
+        if not file_id or not download_root:
+            log.error(
+                "TcgaWatcher: cannot download %s — missing file_id or download directory",
+                slide_id,
+            )
+            return
+
+        # gdc-client writes to <download_root>/<file_id>/<file_name>
+        dest_path = Path(download_root) / file_id / file_name
+        if dest_path.exists():
+            log.info("TcgaWatcher: %s already on disk, enqueuing", slide_id)
+            self.pending.append({"slide_id": slide_id, "slide_path": str(dest_path)})
+            return
+
+        cmd = [
+            "gdc-client", "download",
+            "--no-related-files",
+            "-n", str(max(1, self.cfg.download_concurrency)),
+            "-d", str(download_root),
+        ]
+        if self.cfg.gdc_token_file:
+            cmd += ["-t", self.cfg.gdc_token_file]
+        cmd.append(file_id)
+
+        log.info("TcgaWatcher: downloading %s (%s)…", slide_id, file_id)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            log.error(
+                "TcgaWatcher: gdc-client failed for %s (exit %d):\n%s",
+                slide_id, result.returncode, result.stderr[-300:],
+            )
+            return
+
+        if dest_path.exists():
+            log.info("TcgaWatcher: downloaded %s → %s", slide_id, dest_path)
+            self.pending.append({"slide_id": slide_id, "slide_path": str(dest_path)})
+        else:
+            log.error("TcgaWatcher: gdc-client exited 0 but %s not found", dest_path)
+
+
 # ---------------------------------------------------------------------------
 # Manifest collection
 # ---------------------------------------------------------------------------
@@ -516,6 +752,7 @@ class NextflowRunner:
         if exit_code == 0:
             log.info("Batch %s completed successfully.", self.batch_id)
             self._collect_manifest(run_started_at)
+            self._run_post_batch_hooks(csv_path)
             if self.cfg.cleanup_work_dir:
                 import shutil
                 shutil.rmtree(work_dir, ignore_errors=True)
@@ -523,6 +760,39 @@ class NextflowRunner:
             log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
 
         return exit_code
+
+    def _run_post_batch_hooks(self, batch_csv: str) -> None:
+        """Run any configured post-batch hooks after a successful NF run."""
+        if not self.cfg.post_batch_hooks:
+            return
+
+        def _sub(s: str) -> str:
+            return s.format(
+                batch_csv=batch_csv,
+                batch_id=self.batch_id,
+                outdir=self.cfg.outdir,
+                repo_dir=self.cfg.repo_dir,
+            )
+
+        for hook in self.cfg.post_batch_hooks:
+            cmd_str = hook.get("command", "")
+            if not cmd_str:
+                log.warning("Post-batch hook has no 'command' key — skipping")
+                continue
+            cmd = [_sub(p) for p in cmd_str.split()] + [_sub(a) for a in hook.get("args", [])]
+            log.info("Batch %s: running post-batch hook: %s", self.batch_id, " ".join(cmd))
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, cwd=self.cfg.repo_dir)
+                if result.returncode != 0:
+                    log.error(
+                        "Post-batch hook failed (exit %d):\n%s",
+                        result.returncode,
+                        result.stderr[-1000:],
+                    )
+                else:
+                    log.info("Post-batch hook succeeded")
+            except Exception as exc:
+                log.error("Post-batch hook raised: %s", exc)
 
     def _collect_manifest(self, run_started_at: float):
         """Find the manifest-*.csv written by this batch and update the combined manifest."""
@@ -759,6 +1029,8 @@ def main():
             watcher = LocalWatcher(w_cfg, pending_deque, state, stop_event)
         elif w_cfg.type == "s3":
             watcher = S3Watcher(w_cfg, pending_deque, state, stop_event)
+        elif w_cfg.type == "tcga":
+            watcher = TcgaWatcher(w_cfg, pending_deque, state, stop_event, cfg.repo_dir)
         else:
             log.warning("Unknown watcher type '%s', skipping.", w_cfg.type)
             continue

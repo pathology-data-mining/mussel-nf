@@ -52,6 +52,7 @@ process MERGE_SAMPLE_FEATURES {
     """
 
     stub:
+    sample_meta = [slide_id: sample_id, sample_id: sample_id]
     """
     #!/usr/bin/env python3
     import torch, h5py, numpy as np

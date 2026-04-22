@@ -67,7 +67,7 @@ process TESSELLATE {
     """
 
     stub:
-    publish_path = "tiles/"
+    publish_path = "tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     #!/usr/bin/env python3
     import h5py, numpy as np
@@ -105,8 +105,8 @@ process FILTER_TILES {
     """
 
     stub:
-    tiles_publish_path = "filter_tiles/"
-    pt_publish_path    = "features/${model_type}/"
+    tiles_publish_path = "filter_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
+    pt_publish_path    = "features/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     #!/usr/bin/env python3
     import h5py, numpy as np, torch

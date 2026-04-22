@@ -24,6 +24,7 @@ process CREATE_CLASS_EMBEDDINGS {
     """
 
     stub:
+    model_type = model_config[0]
     """
     #!/usr/bin/env python3
     import torch
@@ -56,6 +57,7 @@ process ANNOTATE {
     """
 
     stub:
+    publish_path = "annotate/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     echo "class,score" > ${meta.slide_id}.annotation.csv
     echo "stub,1.0"   >> ${meta.slide_id}.annotation.csv
@@ -93,6 +95,7 @@ process CACHE_TILES {
     """
 
     stub:
+    publish_path = "cache_tiles/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     #!/usr/bin/env python3
     import json, torch
@@ -146,7 +149,14 @@ workflow CLIP {
             ch_clip_model_configs)
 
         ch_slide_oncotree = ch_oncotree_slide.combine(ch_class_embeddings, by: 0).map {[it[1], it[2], it[0], it[3]]} // slide_id and model type first
-        ch_annotations = ANNOTATE(ch_features.join(ch_slide_oncotree, by: [0,1]), oncotree_class_map).csv
+        // Join on slide_id (string) — remap ch_features to use slide_id as key before joining
+        ch_annot_input = ch_features
+            .map { meta, model_type, pt -> [meta.slide_id, model_type, meta, pt] }
+            .join(ch_slide_oncotree, by: [0, 1])
+            .map { slide_id, model_type, meta, pt, oncotree_code, class_embedding ->
+                tuple(meta, model_type, pt, oncotree_code, class_embedding)
+            }
+        ch_annotations = ANNOTATE(ch_annot_input, oncotree_class_map).csv
 
         ch_tile_cache = params.clip.skip_tile_caching ? Channel.empty() : CACHE_TILES(ch_annotations.join(ch_slides).join(ch_patches), oncotree_class_map)
 

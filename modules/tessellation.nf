@@ -67,6 +67,7 @@ process TESSELLATE {
     """
 
     stub:
+    publish_path = "tiles/"
     """
     #!/usr/bin/env python3
     import h5py, numpy as np
@@ -104,6 +105,8 @@ process FILTER_TILES {
     """
 
     stub:
+    tiles_publish_path = "filter_tiles/"
+    pt_publish_path    = "features/${model_type}/"
     """
     #!/usr/bin/env python3
     import h5py, numpy as np, torch

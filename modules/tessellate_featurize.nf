@@ -150,6 +150,8 @@ process TESSELLATE_FEATURIZE_BATCH {
     stub_slide_ids = slide_batch.collect { meta, path -> meta.slide_id }.join(',')
     batch_metadata = slide_batch.collect { meta, path -> meta }
     model_type = (params.featurize.slide_to_patch_mapping && params.featurize.slide_to_patch_mapping[model_type_input]) ? params.featurize.slide_to_patch_mapping[model_type_input] : model_type_input
+    model_type_name = model_type_input
+    patch_encoder_name = model_type
     """
     #!/usr/bin/env python3
     import os, torch, h5py, numpy as np

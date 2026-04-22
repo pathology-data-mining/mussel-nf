@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Python unit tests ──────────────────────────────────────────────────────
+  pytest:
+    name: Python unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy pandas pytest webdataset h5py
+
+      - name: Run pytest
+        run: pytest tests/ -v --ignore=tests/testdata
+
+  # ── Linear probe integration test (no GPU, no real slides) ────────────────
+  nf-test-linear-probe:
+    name: nf-test — linear probe
+    runs-on: ubuntu-latest
+
+    env:
+      NXF_ANSI_LOG: false
+      NXF_OPTS: "-Xmx2g"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          nextflow -version
+
+      - uses: nf-core/setup-nf-test@v2
+        with:
+          version: "0.9.5"
+
+      - name: Install Mussel and dependencies
+        run: |
+          python -m venv $HOME/.mussel-venv
+          source $HOME/.mussel-venv/bin/activate
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "mussel @ git+https://github.com/pathology-data-mining/Mussel.git@v1.3.3"
+          echo "MUSSEL_VENV=$HOME/.mussel-venv" >> $GITHUB_ENV
+
+      - name: Run linear probe integration test
+        run: |
+          nf-test test tests/linear_probe.nf.test --profile test_linear_probe
+
+  # ── Main pipeline stub test (no GPU, no mussel CLI) ───────────────────────
+  nf-test-stub:
+    name: nf-test — pipeline stub
+    runs-on: ubuntu-latest
+
+    env:
+      NXF_ANSI_LOG: false
+      NXF_OPTS: "-Xmx2g"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python stub dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install h5py numpy
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          nextflow -version
+
+      - uses: nf-core/setup-nf-test@v2
+        with:
+          version: "0.9.5"
+
+      - name: Generate tests/test.csv
+        run: |
+          echo "slide_id,slide_path" > tests/test.csv
+          echo "948176,${GITHUB_WORKSPACE}/tests/testdata/948176.svs" >> tests/test.csv
+
+      - name: Set dummy HF_TOKEN secret for stub run
+        run: nextflow secrets set HF_TOKEN "stub_ci_token_not_real"
+
+      - name: Run pipeline stub test
+        run: |
+          nf-test test tests/pipeline_stub.nf.test --profile test_stub
+
+  # ── All other stub tests (two-step, filter, WDS, WDS-grouped, CLIP, multi-slide) ──
+  nf-test-stub-variants:
+    name: nf-test -- pipeline stub variants
+    runs-on: ubuntu-latest
+
+    env:
+      NXF_ANSI_LOG: false
+      NXF_OPTS: "-Xmx2g"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python stub dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install h5py numpy
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          nextflow -version
+
+      - uses: nf-core/setup-nf-test@v2
+        with:
+          version: "0.9.5"
+
+      - name: Generate test samplesheets
+        run: |
+          SLIDE="${GITHUB_WORKSPACE}/tests/testdata/948176.svs"
+          SLIDE_B="${GITHUB_WORKSPACE}/tests/testdata/948176_b.svs"
+          printf 'slide_id,slide_path\n948176,%s\n' "$SLIDE" > tests/test.csv
+          printf 'slide_id,slide_path,oncotree_code\n948176,%s,BRCA\n' "$SLIDE" > tests/test_oncotree.csv
+          printf 'slide_id,slide_path,sample_id\n948176_A,%s,PATIENT_STUB\n948176_B,%s,PATIENT_STUB\n' "$SLIDE" "$SLIDE_B" > tests/test_multi_slide.csv
+
+      - name: Set dummy HF_TOKEN secret for stub run
+        run: nextflow secrets set HF_TOKEN "stub_ci_token_not_real"
+
+      - name: Run stub variant tests
+        run: |
+          nf-test test \
+            tests/pipeline_stub_two_step.nf.test \
+            tests/pipeline_stub_filter.nf.test \
+            tests/pipeline_stub_wds.nf.test \
+            tests/pipeline_stub_wds_grouped.nf.test \
+            tests/pipeline_stub_clip.nf.test \
+            tests/pipeline_stub_multi_slide.nf.test

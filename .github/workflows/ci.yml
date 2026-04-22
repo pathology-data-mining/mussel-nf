@@ -55,18 +55,15 @@ jobs:
           sudo mv nextflow /usr/local/bin/
           nextflow -version
 
-      - name: Install nf-test
-        run: |
-          curl -fsSL https://github.com/askimed/nf-test/releases/download/v0.9.5/nf-test-0.9.5.tar.gz | tar -xz
-          sudo mv nf-test /usr/local/bin/
-          nf-test version
+      - uses: nf-core/setup-nf-test@v2
+        with:
+          version: "0.9.5"
 
       - name: Install Mussel and dependencies
         run: |
           python -m venv $HOME/.mussel-venv
           source $HOME/.mussel-venv/bin/activate
           pip install --upgrade pip
-          # Install CPU-only torch first to avoid pulling in the CUDA build
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install "mussel @ git+https://github.com/pathology-data-mining/Mussel.git@v1.3.3"
 
@@ -109,11 +106,9 @@ jobs:
           sudo mv nextflow /usr/local/bin/
           nextflow -version
 
-      - name: Install nf-test
-        run: |
-          curl -fsSL https://github.com/askimed/nf-test/releases/download/v0.9.5/nf-test-0.9.5.tar.gz | tar -xz
-          sudo mv nf-test /usr/local/bin/
-          nf-test version
+      - uses: nf-core/setup-nf-test@v2
+        with:
+          version: "0.9.5"
 
       - name: Generate tests/test.csv
         run: |
@@ -126,7 +121,7 @@ jobs:
 
   # ── All other stub tests (two-step, filter, WDS, WDS-grouped, CLIP, multi-slide) ──
   nf-test-stub-variants:
-    name: nf-test — pipeline stub variants
+    name: nf-test -- pipeline stub variants
     runs-on: ubuntu-latest
 
     env:
@@ -157,23 +152,17 @@ jobs:
           sudo mv nextflow /usr/local/bin/
           nextflow -version
 
-      - name: Install nf-test
-        run: |
-          curl -fsSL https://github.com/askimed/nf-test/releases/download/v0.9.5/nf-test-0.9.5.tar.gz | tar -xz
-          sudo mv nf-test /usr/local/bin/
-          nf-test version
+      - uses: nf-core/setup-nf-test@v2
+        with:
+          version: "0.9.5"
 
       - name: Generate test samplesheets
         run: |
           SLIDE="${GITHUB_WORKSPACE}/tests/testdata/948176.svs"
           SLIDE_B="${GITHUB_WORKSPACE}/tests/testdata/948176_b.svs"
-          echo "slide_id,slide_path"                                   > tests/test.csv
-          echo "948176,${SLIDE}"                                       >> tests/test.csv
-          echo "slide_id,slide_path,oncotree_code"                     > tests/test_oncotree.csv
-          echo "948176,${SLIDE},BRCA"                                  >> tests/test_oncotree.csv
-          echo "slide_id,slide_path,sample_id"                         > tests/test_multi_slide.csv
-          echo "948176_A,${SLIDE},PATIENT_STUB"                        >> tests/test_multi_slide.csv
-          echo "948176_B,${SLIDE_B},PATIENT_STUB"                      >> tests/test_multi_slide.csv
+          printf 'slide_id,slide_path\n948176,%s\n' "$SLIDE" > tests/test.csv
+          printf 'slide_id,slide_path,oncotree_code\n948176,%s,BRCA\n' "$SLIDE" > tests/test_oncotree.csv
+          printf 'slide_id,slide_path,sample_id\n948176_A,%s,PATIENT_STUB\n948176_B,%s,PATIENT_STUB\n' "$SLIDE" "$SLIDE_B" > tests/test_multi_slide.csv
 
       - name: Run stub variant tests
         run: |

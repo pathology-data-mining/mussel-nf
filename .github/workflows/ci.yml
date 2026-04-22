@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Python unit tests ──────────────────────────────────────────────────────
+  pytest:
+    name: Python unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy pandas pytest webdataset
+
+      - name: Run pytest
+        run: pytest tests/test_tcga_scripts.py -v
+
+  # ── Linear probe integration test (no GPU, no real slides) ────────────────
+  nf-test-linear-probe:
+    name: nf-test — linear probe
+    runs-on: ubuntu-latest
+
+    env:
+      NXF_ANSI_LOG: false
+      NXF_OPTS: "-Xmx2g"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          nextflow -version
+
+      - name: Install nf-test
+        run: |
+          curl -fsSL https://code.askimed.com/install/nf-test | bash
+          sudo mv nf-test /usr/local/bin/
+          nf-test version
+
+      - name: Install Mussel and dependencies
+        run: |
+          python -m venv $HOME/.mussel-venv
+          source $HOME/.mussel-venv/bin/activate
+          pip install --upgrade pip
+          # Install CPU-only torch first to avoid pulling in the CUDA build
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "mussel @ git+https://github.com/pathology-data-mining/Mussel.git@v1.3.3"
+
+      - name: Run linear probe integration test
+        env:
+          MUSSEL_VENV: ${{ env.HOME }}/.mussel-venv
+        run: |
+          nf-test test tests/linear_probe.nf.test --profile test_linear_probe

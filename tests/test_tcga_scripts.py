@@ -32,7 +32,7 @@ import torch
 INVENTORY_ROWS = [
     # file_id, file_name, project_id, slide_type, file_size, md5sum, primary_site, disease_type,
     # gender, age_at_index, vital_status, primary_diagnosis, ajcc_pathologic_stage,
-    # sample_type, percent_tumor_cells
+    # sample_type, percent_tumor_cells, first_seen_date, removed_date
     (
         "aaaa0000-0000-0000-0000-000000000001",
         "TCGA-BR-A44T-01Z-00-DX1.1A2B3C4D-0000-0000-0000-000000000000.svs",
@@ -40,6 +40,7 @@ INVENTORY_ROWS = [
         "Breast", "Breast Invasive Carcinoma",
         "female", "52", "Alive", "Infiltrating duct carcinoma, NOS", "Stage IIA",
         "Primary Tumor", "60.0",
+        "2024-01-01", "",
     ),
     (
         "bbbb0000-0000-0000-0000-000000000002",
@@ -48,6 +49,7 @@ INVENTORY_ROWS = [
         "Breast", "Breast Invasive Carcinoma",
         "female", "67", "Dead", "Lobular carcinoma, NOS", "Stage IIIA",
         "Primary Tumor", "75.0",
+        "2024-01-01", "",
     ),
     (
         "cccc0000-0000-0000-0000-000000000003",
@@ -56,6 +58,7 @@ INVENTORY_ROWS = [
         "Lung", "Lung Adenocarcinoma",
         "male", "71", "Dead", "Adenocarcinoma, NOS", "Stage IB",
         "Primary Tumor", "55.0",
+        "2024-01-01", "",
     ),
     (
         "dddd0000-0000-0000-0000-000000000004",
@@ -64,6 +67,7 @@ INVENTORY_ROWS = [
         "Lung", "Lung Adenocarcinoma",
         "male", "58", "Alive", "Adenocarcinoma, NOS", "Stage IA",
         "Primary Tumor", "70.0",
+        "2024-01-01", "",
     ),
 ]
 
@@ -72,6 +76,7 @@ INVENTORY_COLUMNS = [
     "primary_site", "disease_type",
     "gender", "age_at_index", "vital_status", "primary_diagnosis", "ajcc_pathologic_stage",
     "sample_type", "percent_tumor_cells",
+    "first_seen_date", "removed_date",
 ]
 
 
@@ -146,9 +151,9 @@ class TestParseHit:
         return hit
 
     def test_all_columns_present(self):
-        from scripts.tcga.tcga_sync_inventory import _parse_hit, INVENTORY_COLUMNS
+        from scripts.tcga.tcga_sync_inventory import _parse_hit, GDC_COLUMNS
         row = _parse_hit(self._make_hit())
-        assert set(row.keys()) == set(INVENTORY_COLUMNS)
+        assert set(row.keys()) == set(GDC_COLUMNS)
 
     def test_core_fields(self):
         from scripts.tcga.tcga_sync_inventory import _parse_hit
@@ -188,6 +193,113 @@ class TestParseHit:
         assert row["gender"] == ""
         assert row["ajcc_pathologic_stage"] == ""
         assert row["percent_tumor_cells"] == ""
+
+
+
+# ---------------------------------------------------------------------------
+# 0b. tcga_sync_inventory — merge_inventory()
+# ---------------------------------------------------------------------------
+
+def _make_gdc_row(file_id: str, project_id: str = "TCGA-BRCA",
+                  updated: str = "2024-01-01T00:00:00") -> dict:
+    """Minimal GDC-column row (no temporal columns) for merge tests."""
+    from scripts.tcga.tcga_sync_inventory import GDC_COLUMNS
+    base = {c: "" for c in GDC_COLUMNS}
+    base.update({"file_id": file_id, "project_id": project_id, "updated_datetime": updated})
+    return base
+
+
+class TestMergeInventory:
+    """merge_inventory() correctly tracks new, removed, and re-appearing slides."""
+
+    def _old(self, rows: list[dict]) -> pd.DataFrame:
+        from scripts.tcga.tcga_sync_inventory import INVENTORY_COLUMNS
+        return pd.DataFrame(rows, columns=INVENTORY_COLUMNS).astype(str).fillna("")
+
+    def _new(self, rows: list[dict]) -> pd.DataFrame:
+        from scripts.tcga.tcga_sync_inventory import GDC_COLUMNS
+        return pd.DataFrame(rows, columns=GDC_COLUMNS).astype(str).fillna("")
+
+    def test_new_slide_gets_first_seen_date(self):
+        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        old = self._old([{**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": ""}])
+        new = self._new([_make_gdc_row("aaa"), _make_gdc_row("bbb")])
+        merged, added, _, _ = merge_inventory(old, new, "2024-06-01")
+        bbb = merged[merged["file_id"] == "bbb"].iloc[0]
+        assert bbb["first_seen_date"] == "2024-06-01"
+        assert bbb["removed_date"] == ""
+        assert len(added) == 1 and added.iloc[0]["file_id"] == "bbb"
+
+    def test_removed_slide_gets_removed_date(self):
+        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        old = self._old([
+            {**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": ""},
+            {**_make_gdc_row("bbb"), "first_seen_date": "2024-01-01", "removed_date": ""},
+        ])
+        new = self._new([_make_gdc_row("aaa")])  # bbb is gone
+        merged, _, removed, _ = merge_inventory(old, new, "2024-06-01")
+        bbb = merged[merged["file_id"] == "bbb"].iloc[0]
+        assert bbb["removed_date"] == "2024-06-01"
+        assert len(removed) == 1 and removed.iloc[0]["file_id"] == "bbb"
+
+    def test_already_removed_not_double_stamped(self):
+        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        old = self._old([
+            {**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": ""},
+            {**_make_gdc_row("bbb"), "first_seen_date": "2024-01-01", "removed_date": "2024-03-01"},
+        ])
+        new = self._new([_make_gdc_row("aaa")])  # bbb still absent
+        merged, _, removed, _ = merge_inventory(old, new, "2024-06-01")
+        bbb = merged[merged["file_id"] == "bbb"].iloc[0]
+        assert bbb["removed_date"] == "2024-03-01"  # original stamp preserved
+        assert len(removed) == 0  # not newly removed this run
+
+    def test_reappearing_slide_clears_removed_date(self):
+        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        old = self._old([
+            {**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": "2024-03-01"},
+        ])
+        new = self._new([_make_gdc_row("aaa")])  # aaa is back
+        merged, added, removed, _ = merge_inventory(old, new, "2024-06-01")
+        aaa = merged[merged["file_id"] == "aaa"].iloc[0]
+        assert aaa["removed_date"] == ""
+        assert aaa["first_seen_date"] == "2024-01-01"  # preserved
+        assert len(added) == 0  # not counted as brand-new
+        assert len(removed) == 0
+
+    def test_first_seen_date_preserved_on_update(self):
+        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        old = self._old([
+            {**_make_gdc_row("aaa", updated="2024-01-01T00:00:00"),
+             "first_seen_date": "2023-11-01", "removed_date": ""},
+        ])
+        new = self._new([_make_gdc_row("aaa", updated="2024-05-01T00:00:00")])
+        merged, _, _, updated = merge_inventory(old, new, "2024-06-01")
+        aaa = merged[merged["file_id"] == "aaa"].iloc[0]
+        assert aaa["first_seen_date"] == "2023-11-01"
+        assert len(updated) == 1
+
+    def test_snapshot_query(self):
+        """Simulate point-in-time snapshot: first_seen_date <= T AND removed_date empty or > T."""
+        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        old = self._old([
+            {**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": ""},
+            {**_make_gdc_row("bbb"), "first_seen_date": "2024-01-01", "removed_date": "2024-04-01"},
+        ])
+        new = self._new([_make_gdc_row("aaa"), _make_gdc_row("ccc")])
+        merged, _, _, _ = merge_inventory(old, new, "2024-06-01")
+
+        # Snapshot at 2024-03-01: aaa + bbb (bbb removed in April)
+        T = "2024-03-01"
+        snap = merged[(merged["first_seen_date"] <= T) &
+                      ((merged["removed_date"] == "") | (merged["removed_date"] > T))]
+        assert set(snap["file_id"]) == {"aaa", "bbb"}
+
+        # Snapshot at today: aaa + ccc
+        T = "2024-06-01"
+        snap = merged[(merged["first_seen_date"] <= T) &
+                      ((merged["removed_date"] == "") | (merged["removed_date"] > T))]
+        assert set(snap["file_id"]) == {"aaa", "ccc"}
 
 
 # ---------------------------------------------------------------------------

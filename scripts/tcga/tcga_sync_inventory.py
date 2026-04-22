@@ -57,6 +57,14 @@ Slide-level pathology estimates  (frequently absent/null; estimated by pathologi
     percent_stromal_cells  Estimated % stromal cells
     percent_necrosis    Estimated % necrotic tissue
     percent_normal_cells   Estimated % normal cells
+
+Provenance / temporal tracking
+    first_seen_date     ISO date (YYYY-MM-DD) when this file_id first appeared in the GDC
+    removed_date        ISO date when the file_id disappeared from GDC, or empty if still present
+
+    To query new samples since a given sync: filter first_seen_date == <date>
+    To query samples available at time T:    filter first_seen_date <= T
+                                                AND (removed_date == "" OR removed_date > T)
 """
 
 import argparse
@@ -141,7 +149,14 @@ INVENTORY_COLUMNS = [
     "percent_stromal_cells",
     "percent_necrosis",
     "percent_normal_cells",
+    # Provenance / temporal tracking
+    "first_seen_date",
+    "removed_date",
 ]
+
+# Columns fetched from GDC — excludes the two temporal tracking columns
+# that are managed locally by merge_inventory().
+GDC_COLUMNS = [c for c in INVENTORY_COLUMNS if c not in ("first_seen_date", "removed_date")]
 
 _SLIDE_TYPE_RE = re.compile(r"-([A-Z]{2}\d+)\.")
 
@@ -267,27 +282,74 @@ def fetch_inventory(project_filter: str | None = None, page_size: int = 500) -> 
         if not hits or from_ >= total:
             break
 
-    df = pd.DataFrame(records, columns=INVENTORY_COLUMNS)
+    df = pd.DataFrame(records, columns=GDC_COLUMNS)
     df = df.drop_duplicates("file_id").sort_values("file_id").reset_index(drop=True)
     return df
 
 
-def diff_inventory(
-    old: pd.DataFrame, new: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Return (added, removed, updated) DataFrames."""
+def merge_inventory(
+    old: pd.DataFrame,
+    new: pd.DataFrame,
+    sync_date: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Merge a freshly-fetched *new* snapshot into the existing *old* inventory.
+
+    Returns (merged, added, removed, updated) where each is a DataFrame.
+
+    Temporal tracking logic
+    -----------------------
+    - Rows new to GDC:          first_seen_date = sync_date, removed_date = ""
+    - Rows gone from GDC:       removed_date    = sync_date  (first_seen_date unchanged)
+    - Rows re-appearing:        removed_date    = ""         (first_seen_date unchanged)
+    - Unchanged/updated rows:   first_seen_date preserved,   removed_date preserved
+    """
     old_ids = set(old["file_id"])
     new_ids = set(new["file_id"])
-    added = new[new["file_id"].isin(new_ids - old_ids)]
-    removed = old[old["file_id"].isin(old_ids - new_ids)]
-    common_ids = old_ids & new_ids
+
+    added_ids   = new_ids - old_ids
+    removed_ids = old_ids - new_ids
+    common_ids  = old_ids & new_ids
+
+    # Detect updates among rows present in both snapshots
     old_common = old[old["file_id"].isin(common_ids)].set_index("file_id")
     new_common = new[new["file_id"].isin(common_ids)].set_index("file_id")
-    updated_ids = new_common.index[
+    updated_ids = set(new_common.index[
         new_common["updated_datetime"] != old_common["updated_datetime"]
-    ]
-    updated = new[new["file_id"].isin(updated_ids)]
-    return added, removed, updated
+    ])
+
+    # Build the merged rows for common file_ids: take new GDC data, preserve temporal cols
+    temporal = old.set_index("file_id")[["first_seen_date", "removed_date"]]
+    new_indexed = new.set_index("file_id")
+    merged_common = new_indexed.loc[list(common_ids)].copy()
+    merged_common["first_seen_date"] = temporal.loc[list(common_ids), "first_seen_date"]
+    # Clear removed_date if a previously-removed slide has re-appeared
+    was_removed = temporal.loc[list(common_ids), "removed_date"].ne("")
+    merged_common["removed_date"] = temporal.loc[list(common_ids), "removed_date"]
+    merged_common.loc[was_removed, "removed_date"] = ""
+    merged_common = merged_common.reset_index()
+
+    # New rows from GDC
+    new_rows = new[new["file_id"].isin(added_ids)].copy()
+    new_rows["first_seen_date"] = sync_date
+    new_rows["removed_date"] = ""
+
+    # Rows that disappeared: keep old data, stamp removed_date if not already set
+    removed_rows = old[old["file_id"].isin(removed_ids)].copy()
+    already_removed = removed_rows["removed_date"].ne("")
+    removed_rows.loc[~already_removed, "removed_date"] = sync_date
+
+    merged = (
+        pd.concat([merged_common, new_rows, removed_rows], ignore_index=True)
+        .sort_values("file_id")
+        .reset_index(drop=True)
+    )[INVENTORY_COLUMNS]
+
+    return (
+        merged,
+        new_rows,
+        removed_rows[~already_removed],  # only newly-removed this run
+        new[new["file_id"].isin(updated_ids)],
+    )
 
 
 def _inventory_age_hours(path: Path) -> float | None:
@@ -343,21 +405,31 @@ def main(argv: list[str] | None = None) -> int:
     new_df = fetch_inventory(project_filter=args.project, page_size=args.page_size)
     log.info("GDC returned %d slides", len(new_df))
 
+    sync_date = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     has_changes = True
+
     if output_path.exists():
         old_df = pd.read_csv(output_path, dtype=str).fillna("")
-        added, removed, updated = diff_inventory(old_df, new_df)
+        # Back-fill temporal columns if loading a pre-temporal inventory
+        if "first_seen_date" not in old_df.columns:
+            old_df["first_seen_date"] = ""
+            old_df["removed_date"] = ""
+        merged_df, added, removed, updated = merge_inventory(old_df, new_df, sync_date)
         n_add, n_rem, n_upd = len(added), len(removed), len(updated)
-        print(f"Diff: +{n_add} new, -{n_rem} removed, ~{n_upd} updated (total {len(new_df)})")
+        print(f"Diff: +{n_add} new, -{n_rem} removed, ~{n_upd} updated (total active: "
+              f"{len(merged_df[merged_df['removed_date'] == ''])})")
         if args.show_diff and n_add:
             print("\nAdded:")
             print(added[["file_id", "file_name", "project_id"]].to_string(index=False))
         has_changes = n_add > 0 or n_rem > 0 or n_upd > 0
     else:
-        print(f"No existing inventory — writing {len(new_df)} slides")
+        new_df["first_seen_date"] = sync_date
+        new_df["removed_date"] = ""
+        merged_df = new_df[INVENTORY_COLUMNS]
+        print(f"No existing inventory — writing {len(merged_df)} slides")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    new_df.to_csv(output_path, index=False)
+    merged_df.to_csv(output_path, index=False)
     log.info("Wrote %s", output_path)
 
     return 0 if has_changes else 2

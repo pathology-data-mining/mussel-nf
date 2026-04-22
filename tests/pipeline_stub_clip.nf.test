@@ -1,0 +1,19 @@
+nextflow_pipeline {
+    name   "MUSSEL one-step + CLIP annotation — stub mode"
+    script "../main.nf"
+    profile "test_stub_clip"
+    options "-stub"
+
+    // Exercises: TESSELLATE_FEATURIZE_BATCH → CREATE_CLASS_EMBEDDINGS → ANNOTATE
+    // (CACHE_TILES is skipped via clip.skip_tile_caching = true)
+    test("CLIP stub workflow succeeds and publishes annotation CSV") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            assert path("${outputDir}/features/clip/948176.features.pt").exists()
+            assert path("${outputDir}/annotate/clip/9481/948176.annotation.csv").exists()
+        }
+    }
+}

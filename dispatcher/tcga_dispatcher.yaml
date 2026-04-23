@@ -26,7 +26,7 @@ cleanup_work_dir: false       # set true to delete NF work/ dir after each succe
 cleanup_downloads: true       # delete downloaded .svs files after featurization succeeds
 cleanup_batch_csv: false      # set true to delete per-batch samples CSV after success
 cleanup_logs_after_days: 30   # delete NF log files for batches older than 30 days (0 = keep forever)
-cleanup_results: false        # set true to delete local .pt / .patch.h5 after WDS push to S3
+cleanup_results: true        # set true to delete local .pt / .patch.h5 after WDS push to S3
 
 watchers:
   - type: tcga
@@ -34,8 +34,10 @@ watchers:
     inventory_csv: tcga_inventory.csv
     status_csv: tcga_status.csv
 
-    # Feature model to extract; also controls which slides are already-done
-        # models: []   # defaults to auto-discover from results dir (matches nextflow.config)
+    # Feature models to extract — must match params.featurize.model_types in nextflow.config.
+    # Used by tcga_update_status.py (to detect done slides) and tcga_prepare_samples.py
+    # (to skip slides already processed). Leave empty to auto-discover from results dir.
+    models: [hoptimus1, titan_slide]
 
     # Slide source — at least one of local_slides_dir or s3_base must be set.
     # Slides are resolved: local disk → S3 → needs_download (in that order).
@@ -67,7 +69,8 @@ watchers:
     # When set, a tcga_append_wds.py post-batch hook is generated automatically
     # after each successful Nextflow run.  Supports s3:// and local paths.
     wds_destinations:
-      optimus: s3://reef-tcga-v2-0/wds/optimus
+      hoptimus1: s3://reef-tcga-v2-0/wds/hoptimus1
+      titan_slide: s3://reef-tcga-v2-0/wds/titan_slide
       # uni2h: s3://your-bucket/wds/uni2h
     # wds_staging_dir: /path/to/local/staging   # base dir; each model uses {staging}/{model}/
 

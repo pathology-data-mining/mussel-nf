@@ -841,6 +841,9 @@ class TcgaWatcher(threading.Thread):
             self.pending.append({"slide_id": slide_id, "slide_path": str(dest_path)})
             return
 
+        # gdc-client requires the destination directory to exist.
+        Path(download_root).mkdir(parents=True, exist_ok=True)
+
         cmd = [
             "gdc-client", "download",
             "--no-related-files",
@@ -854,9 +857,11 @@ class TcgaWatcher(threading.Thread):
         log.info("TcgaWatcher: downloading %s (%s)…", slide_id, file_id)
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
+            # Combine stdout + stderr — gdc-client prints errors to both
+            output = (result.stdout + result.stderr).strip()
             log.error(
                 "TcgaWatcher: gdc-client failed for %s (exit %d):\n%s",
-                slide_id, result.returncode, result.stderr[-300:],
+                slide_id, result.returncode, output[-2000:],
             )
             return
 

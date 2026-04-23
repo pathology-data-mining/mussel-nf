@@ -24,15 +24,16 @@ max_wait_seconds: 300    # dispatch after this many seconds regardless of batch_
 retry_failed: true       # re-queue slides whose batch failed on restart
 cleanup_work_dir: false  # delete per-batch work/ dirs after success
 
-# Optional: run commands after each successful Nextflow batch.
+# Optional: run extra commands after each successful Nextflow batch.
+# Auto-generated hooks (e.g. WDS append when wds_dest is set on a tcga watcher)
+# run first; these run after.
 # Template vars: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
 # post_batch_hooks:
-#   - command: "python {repo_dir}/scripts/tcga/tcga_append_wds.py"
+#   - command: "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py"
 #     args:
-#       - "--pt-dir={outdir}/features/ctranspath/pt"
-#       - "--h5-dir={outdir}/features/ctranspath/tile_h5"
-#       - "--wds-dest=s3://your-bucket/wds/ctranspath"
-#       - "--slide-ids-csv={batch_csv}"
+#       - "--inventory=/path/to/tcga_inventory.csv"
+#       - "--status=/path/to/tcga_status.csv"
+#       - "--volume-path=/dbfs/mnt/your-volume/tcga"
 
 watchers:
   - type: local
@@ -61,13 +62,16 @@ watchers:
   #   status_csv: /path/to/tcga_status.csv         # managed by tcga_update_status.py
   #   results_dir: /path/to/results                # nextflow outdir (same as above)
   #   model: ctranspath                            # model to check for completed slides
-  #   local_slides_dir: /path/to/slides            # where .svs files live (or will be downloaded)
-  #   # s3_base: s3://bucket/slides                # alternative / fallback to local
-  #   slide_type: DX1                              # DX1, DX2, or all
-  #   # project: TCGA-BRCA                         # restrict to one project; omit for all
+  #   local_slides_dir: /path/to/slides
+  #   # s3_base: s3://bucket/slides
+  #   slide_type: DX1
+  #   # project: TCGA-BRCA
   #   poll_interval_seconds: 3600
   #   gdc_max_age_hours: 24.0
-  #   download_enabled: false                      # set true to auto-download via gdc-client
+  #   download_enabled: false
   #   download_dir: /path/to/downloads
   #   download_concurrency: 4
   #   # gdc_token_file: /path/to/gdc-user-token.txt
+  #   # Set wds_dest to auto-generate a tcga_append_wds.py post-batch hook:
+  #   # wds_dest: s3://your-bucket/wds/ctranspath
+  #   # wds_staging_dir: /path/to/staging   # required for s3:// destinations

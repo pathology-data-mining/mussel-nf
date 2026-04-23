@@ -65,6 +65,7 @@ CONFIG KEYS (top level)
   Hooks:
     post_batch_hooks    List of {command, args} run after each successful NF run.
                         Template vars: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
+                        Auto-generated hooks (from wds_dest on tcga watchers) run first.
 
   watchers              List of watcher configs (see WATCHERS above)
 
@@ -146,6 +147,10 @@ class WatcherConfig:
     gdc_token_file: str = ""
     gdc_max_age_hours: float = 24.0
     scripts_dir: str = ""  # path to scripts/tcga/; defaults to {repo_dir}/scripts/tcga
+    # When set, a tcga_append_wds.py post-batch hook is generated automatically.
+    # Supports s3:// URIs and local paths.
+    wds_dest: str = ""
+    wds_staging_dir: str = ""  # required when wds_dest is s3://
 
 
 @dataclass
@@ -211,7 +216,39 @@ class Config:
             watcher_cfgs.append(WatcherConfig(**w))
 
         raw["watchers"] = watcher_cfgs
-        return cls(**raw)
+        cfg = cls(**raw)
+        cfg.post_batch_hooks = cfg._build_auto_hooks() + cfg.post_batch_hooks
+        return cfg
+
+    def _build_auto_hooks(self) -> list:
+        """Generate post-batch hooks automatically from watcher configuration.
+
+        For each tcga watcher with wds_dest set, a tcga_append_wds.py hook is
+        prepended so features are appended to WDS shards after every successful
+        Nextflow run without requiring manual hook configuration.
+
+        Explicit post_batch_hooks (e.g. databricks sync) run after auto hooks.
+        """
+        hooks = []
+        for w in self.watchers:
+            if w.type != "tcga" or not w.wds_dest:
+                continue
+            args = [
+                "--pt-dir={outdir}/features/" + w.model + "/pt",
+                "--h5-dir={outdir}/features/" + w.model + "/tile_h5",
+                "--inventory=" + w.inventory_csv,
+                "--wds-dest=" + w.wds_dest,
+                "--model-type=" + w.model,
+                "--slide-ids-csv={batch_csv}",
+            ]
+            if w.wds_staging_dir:
+                args.append("--staging-dir=" + w.wds_staging_dir)
+            hooks.append({
+                "command": "python {repo_dir}/scripts/tcga/tcga_append_wds.py",
+                "args": args,
+            })
+            log.debug("Auto post-batch hook: tcga_append_wds for model=%s dest=%s", w.model, w.wds_dest)
+        return hooks
 
 
 # ---------------------------------------------------------------------------

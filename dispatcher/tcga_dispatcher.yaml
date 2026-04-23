@@ -31,10 +31,10 @@ watchers:
     status_csv: /path/to/tcga_status.csv
     results_dir: /path/to/tcga-results
 
-    # Feature model to check completion status against
+    # Feature model to extract; also controls which slides are already-done
     model: ctranspath
 
-    # Slide source b€” at least one of local_slides_dir or s3_base must be set.
+    # Slide source â€” at least one of local_slides_dir or s3_base must be set.
     # Slides are resolved: local disk â†’ S3 â†’ needs_download (in that order).
     local_slides_dir: /path/to/slides
     # s3_base: s3://bucket/path/to/slides
@@ -60,21 +60,15 @@ watchers:
     download_concurrency: 4
     # gdc_token_file: /path/to/gdc-user-token.txt
 
-# Post-batch hooks run after each successful Nextflow job.
-# Template variables: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
-post_batch_hooks:
-  - command: "python {repo_dir}/scripts/tcga/tcga_append_wds.py"
-    args:
-      - "--pt-dir={outdir}/features/ctranspath/pt"
-      - "--h5-dir={outdir}/features/ctranspath/tile_h5"
-      - "--inventory=/path/to/tcga_inventory.csv"
-      - "--wds-dest=s3://your-bucket/wds/ctranspath"
-      - "--model-type=ctranspath"
-      - "--slide-ids-csv={batch_csv}"
+    # When set, a tcga_append_wds.py post-batch hook is generated automatically
+    # after each successful Nextflow run.  Supports s3:// and local paths.
+    wds_dest: s3://your-bucket/wds/ctranspath
+    # wds_staging_dir: /path/to/local/staging   # required for s3:// destinations
 
-  # Uncomment to sync inventory + status to Databricks after each batch:
-  # - command: "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py"
-  #   args:
-  #     - "--inventory=/path/to/tcga_inventory.csv"
-  #     - "--status=/path/to/tcga_status.csv"
-  #     - "--volume-path=/dbfs/mnt/your-volume/tcga"
+# Optional extra hooks run after the auto-generated WDS append.
+# post_batch_hooks:
+#   - command: "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py"
+#     args:
+#       - "--inventory=/path/to/tcga_inventory.csv"
+#       - "--status=/path/to/tcga_status.csv"
+#       - "--volume-path=/dbfs/mnt/your-volume/tcga"

@@ -194,6 +194,7 @@ def prepare_samples(
     *,
     model: str | None = None,
     slide_type_filter: str | None = None,
+    sample_type_filter: str | None = None,
     project_filter: str | None = None,
     skip_done: bool = True,
     local_slides_dir: Path | None = None,
@@ -217,6 +218,17 @@ def prepare_samples(
         )
         df = df[mask]
         log.info("slide_type filter '%s' matched %d slides", slide_type_filter, mask.sum())
+
+    if sample_type_filter and sample_type_filter.lower() != "all":
+        # Comma-separated substrings matched case-insensitively against the
+        # GDC sample_type field (e.g. "Primary Tumor", "Metastatic").
+        # Use "tumor" to match "Primary Tumor" + "Metastatic" + "Recurrent Tumor".
+        parts = [p.strip().lower() for p in sample_type_filter.split(",") if p.strip()]
+        mask = df["sample_type"].apply(
+            lambda st: any(p in st.lower() for p in parts)
+        )
+        df = df[mask]
+        log.info("sample_type filter '%s' matched %d slides", sample_type_filter, mask.sum())
 
     if project_filter:
         projects = {p.strip() for p in project_filter.split(",")}
@@ -327,6 +339,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--slide-type", default="all",
                         help="Slide type filter. Prefix matching and comma-separated supported. "
                              "e.g. 'DX1', 'DX' (all diagnostic), 'DX1,TS1', or 'all' (default: all)")
+    parser.add_argument("--sample-type", default="Primary Tumor",
+                        help="GDC sample_type filter (case-insensitive substring, comma-separated). "
+                             "e.g. 'Primary Tumor', 'tumor' (matches Primary Tumor + Metastatic + "
+                             "Recurrent Tumor), 'all' to disable. Default: 'Primary Tumor'")
     parser.add_argument("--project", default=None,
                         help="Comma-separated project filter, e.g. TCGA-BRCA,TCGA-GBM")
     parser.add_argument("--skip-done", action="store_true", default=True,
@@ -353,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         status_df,
         model=args.model,
         slide_type_filter=args.slide_type,
+        sample_type_filter=args.sample_type,
         project_filter=args.project,
         skip_done=args.skip_done,
         local_slides_dir=Path(args.local_slides_dir) if args.local_slides_dir else None,

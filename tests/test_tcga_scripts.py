@@ -563,6 +563,75 @@ class TestPrepareSamples:
             for _, row in result.iterrows()
         ), "TS1 slide should be filtered out by DX prefix filter"
 
+    def test_sample_type_filter_excludes_normal(self, local_slides_dir):
+        from scripts.tcga.tcga_prepare_samples import prepare_samples
+
+        extra = pd.DataFrame([{
+            "file_id": "ffff0000-0000-0000-0000-000000000006",
+            "file_name": "TCGA-HV-AA8V-11Z-00-DX1.AAAAAAAA.svs",
+            "project_id": "TCGA-PAAD",
+            "slide_type": "DX1",
+            "sample_type": "Solid Tissue Normal",
+            "file_size": "500000",
+            "md5sum": "zzz",
+        }])
+        inventory = pd.concat([make_inventory(), extra], ignore_index=True).fillna("").astype(str)
+
+        with patch(
+            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            return_value=set(),
+        ):
+            result = prepare_samples(
+                inventory,
+                status_df=None,
+                sample_type_filter="Primary Tumor",
+            )
+
+        assert all(
+            row["slide_id"] != "TCGA-HV-AA8V-11Z-00-DX1"
+            for _, row in result.iterrows()
+        ), "Normal tissue slide should be excluded by sample_type filter"
+
+    def test_sample_type_filter_tumor_substring(self):
+        from scripts.tcga.tcga_prepare_samples import prepare_samples
+
+        rows = [
+            {"file_id": "a1", "file_name": "TCGA-XX-0001-01Z-00-DX1.A.svs",
+             "slide_type": "DX1", "sample_type": "Primary Tumor",
+             "project_id": "TCGA-BRCA", "file_size": "100", "md5sum": "a"},
+            {"file_id": "a2", "file_name": "TCGA-XX-0002-06Z-00-DX1.B.svs",
+             "slide_type": "DX1", "sample_type": "Metastatic",
+             "project_id": "TCGA-BRCA", "file_size": "100", "md5sum": "b"},
+            {"file_id": "a3", "file_name": "TCGA-XX-0003-11Z-00-DX1.C.svs",
+             "slide_type": "DX1", "sample_type": "Solid Tissue Normal",
+             "project_id": "TCGA-BRCA", "file_size": "100", "md5sum": "c"},
+        ]
+        inventory = pd.DataFrame(rows).fillna("").astype(str)
+
+        result = prepare_samples(inventory, status_df=None,
+                                 sample_type_filter="tumor,metastatic")
+
+        ids = set(result["slide_id"])
+        assert "TCGA-XX-0001-01Z-00-DX1" in ids
+        assert "TCGA-XX-0002-06Z-00-DX1" in ids
+        assert "TCGA-XX-0003-11Z-00-DX1" not in ids, "Normal should be excluded"
+
+    def test_sample_type_filter_all_disables_filter(self):
+        from scripts.tcga.tcga_prepare_samples import prepare_samples
+
+        rows = [
+            {"file_id": "b1", "file_name": "TCGA-YY-0001-01Z-00-DX1.A.svs",
+             "slide_type": "DX1", "sample_type": "Primary Tumor",
+             "project_id": "TCGA-BRCA", "file_size": "100", "md5sum": "a"},
+            {"file_id": "b2", "file_name": "TCGA-YY-0002-11Z-00-DX1.B.svs",
+             "slide_type": "DX1", "sample_type": "Solid Tissue Normal",
+             "project_id": "TCGA-BRCA", "file_size": "100", "md5sum": "b"},
+        ]
+        inventory = pd.DataFrame(rows).fillna("").astype(str)
+
+        result = prepare_samples(inventory, status_df=None, sample_type_filter="all")
+        assert len(result) == 2, "sample_type='all' should not filter anything"
+
 
 # ---------------------------------------------------------------------------
 # 3. tcga_append_wds — append_wds()

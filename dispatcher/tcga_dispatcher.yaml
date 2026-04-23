@@ -29,7 +29,6 @@ watchers:
     # CSV files managed by the TCGA scripts
     inventory_csv: /path/to/tcga_inventory.csv
     status_csv: /path/to/tcga_status.csv
-    results_dir: /path/to/tcga-results
 
     # Feature model to extract; also controls which slides are already-done
         # models: []   # defaults to auto-discover from results dir (matches nextflow.config)

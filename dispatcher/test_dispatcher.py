@@ -600,14 +600,13 @@ class TestTcgaWatcher:
             type="tcga",
             inventory_csv=str(tmp_path / "inventory.csv"),
             status_csv=str(tmp_path / "status.csv"),
-            results_dir=str(tmp_path / "results"),
             scripts_dir=str(tmp_path / "scripts"),
             **kwargs,
         )
         state = StateStore(str(tmp_path / "test.db"))
         stop_event = threading.Event()
         pending: deque = deque()
-        watcher = TcgaWatcher(cfg, pending, state, stop_event, repo_dir=str(tmp_path))
+        watcher = TcgaWatcher(cfg, pending, state, stop_event, repo_dir=str(tmp_path), outdir=str(tmp_path / "results"))
         return watcher, pending, state, stop_event
 
     def _write_meta_csv(self, path: Path, rows: list[dict]):
@@ -836,7 +835,6 @@ class TestAutoHooks:
                 "type": "tcga",
                 "inventory_csv": str(tmp_path / "inventory.csv"),
                 "status_csv": str(tmp_path / "status.csv"),
-                "results_dir": str(tmp_path / "results"),
                 **(watcher_extra or {}),
             }],
             **(extra_raw or {}),
@@ -899,9 +897,9 @@ class TestAutoHooks:
             "outdir": str(tmp_path / "results"),
             "watchers": [
                 {"type": "tcga", "inventory_csv": "i.csv", "status_csv": "s.csv",
-                 "results_dir": "r", "wds_destinations": {"ctranspath": "s3://b/c"}},
+                 "wds_destinations": {"ctranspath": "s3://b/c"}},
                 {"type": "tcga", "inventory_csv": "i.csv", "status_csv": "s.csv",
-                 "results_dir": "r", "wds_destinations": {"uni2h": "s3://b/u"}},
+                 "wds_destinations": {"uni2h": "s3://b/u"}},
             ],
         }))
         cfg = Config.load(str(cfg_path))

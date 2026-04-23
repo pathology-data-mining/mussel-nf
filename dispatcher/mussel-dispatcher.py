@@ -133,7 +133,6 @@ class WatcherConfig:
     # tcga watcher
     inventory_csv: str = ""
     status_csv: str = ""
-    results_dir: str = ""
     # Models to check for skip-done filtering in tcga_prepare_samples.
     # Empty list = auto-discover from results dir (recommended; matches whatever
     # params.featurize.model_types is set to in nextflow.config).
@@ -612,12 +611,14 @@ class TcgaWatcher(threading.Thread):
         state: StateStore,
         stop_event: threading.Event,
         repo_dir: str,
+        outdir: str,
     ):
         super().__init__(name="tcga-watcher", daemon=True)
         self.cfg = cfg
         self.pending = pending
         self.state = state
         self.stop_event = stop_event
+        self._outdir = outdir
         self._scripts_dir = cfg.scripts_dir or str(Path(repo_dir) / "scripts" / "tcga")
         self._download_executor = ThreadPoolExecutor(
             max_workers=max(1, cfg.download_concurrency),
@@ -677,7 +678,7 @@ class TcgaWatcher(threading.Thread):
         # 2. Update per-slide status from results directory
         status_args = [
             "--inventory", self.cfg.inventory_csv,
-            "--results-dir", self.cfg.results_dir,
+            "--results-dir", self._outdir,
             "--output", self.cfg.status_csv,
         ]
         if self.cfg.models:
@@ -1191,7 +1192,7 @@ def main():
         elif w_cfg.type == "s3":
             watcher = S3Watcher(w_cfg, pending_deque, state, stop_event)
         elif w_cfg.type == "tcga":
-            watcher = TcgaWatcher(w_cfg, pending_deque, state, stop_event, cfg.repo_dir)
+            watcher = TcgaWatcher(w_cfg, pending_deque, state, stop_event, cfg.repo_dir, cfg.outdir)
         else:
             log.warning("Unknown watcher type '%s', skipping.", w_cfg.type)
             continue

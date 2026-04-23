@@ -60,7 +60,6 @@ watchers:
   # - type: tcga
   #   inventory_csv: /path/to/tcga_inventory.csv   # managed by tcga_sync_inventory.py
   #   status_csv: /path/to/tcga_status.csv         # managed by tcga_update_status.py
-  #   results_dir: /path/to/results                # nextflow outdir (same as above)
   #   # models: []   # auto-discover from results dir (matches nextflow.config model_types)
   #   local_slides_dir: /path/to/slides
   #   # s3_base: s3://bucket/slides

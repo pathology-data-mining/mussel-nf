@@ -219,8 +219,29 @@ class Config:
         if outdir and not os.path.isabs(outdir):
             raw["outdir"] = os.path.join(config_dir, outdir)
 
+        # Resolve path fields in watcher configs relative to the config file.
+        # Applies to all string fields that represent filesystem paths.
+        _WATCHER_PATH_FIELDS = (
+            "path",            # local watcher dir
+            "inventory_csv",
+            "status_csv",
+            "local_slides_dir",
+            "download_dir",
+            "wds_staging_dir",
+            "scripts_dir",
+            "gdc_token_file",
+        )
+
+        def _resolve_watcher_path(val: str) -> str:
+            if not val or os.path.isabs(val):
+                return val
+            return os.path.join(config_dir, val)
+
         watcher_cfgs = []
         for w in raw.pop("watchers", []):
+            for field in _WATCHER_PATH_FIELDS:
+                if field in w:
+                    w[field] = _resolve_watcher_path(w[field])
             watcher_cfgs.append(WatcherConfig(**w))
 
         raw["watchers"] = watcher_cfgs

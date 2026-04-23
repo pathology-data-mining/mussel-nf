@@ -1178,7 +1178,9 @@ def main():
 
     # Signal handling
     def _handle_signal(signum, frame):
-        log.info("Received signal %d, shutting down…", signum)
+        # Avoid calling log.info() from a signal handler — it can cause a
+        # reentrant write into the logging stream.  Write directly to stderr.
+        sys.stderr.write(f"\nReceived signal {signum}, shutting down…\n")
         stop_event.set()
 
     signal.signal(signal.SIGTERM, _handle_signal)

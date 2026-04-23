@@ -91,7 +91,7 @@ import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -313,8 +313,12 @@ class StateStore:
 
     def _conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn"):
-            self._local.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._local.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=60)
             self._local.conn.row_factory = sqlite3.Row
+            # WAL mode allows concurrent reads while a write is in progress,
+            # and reduces lock contention across threads.
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute("PRAGMA busy_timeout=60000")
         return self._local.conn
 
     def _init_schema(self):
@@ -352,7 +356,7 @@ class StateStore:
         conn.execute(
             """INSERT OR IGNORE INTO slides (slide_path, slide_id, status, first_seen_at)
                VALUES (?, ?, 'PENDING', ?)""",
-            (slide_path, slide_id, datetime.utcnow().isoformat()),
+            (slide_path, slide_id, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
 
@@ -370,7 +374,7 @@ class StateStore:
 
     def mark_dispatched(self, slide_paths: list, batch_id: str):
         conn = self._conn()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         conn.executemany(
             "UPDATE slides SET status='DISPATCHED', batch_id=?, dispatched_at=? WHERE slide_path=?",
             [(batch_id, now, sp) for sp in slide_paths],
@@ -382,7 +386,7 @@ class StateStore:
         status = "SUCCEEDED" if succeeded else "FAILED"
         conn.execute(
             "UPDATE slides SET status=?, completed_at=? WHERE batch_id=?",
-            (status, datetime.utcnow().isoformat(), batch_id),
+            (status, datetime.now(timezone.utc).isoformat(), batch_id),
         )
         conn.commit()
 
@@ -401,7 +405,7 @@ class StateStore:
         conn.execute(
             """INSERT INTO batches (batch_id, csv_path, status, slide_count, dispatched_at, log_path)
                VALUES (?, ?, 'RUNNING', ?, ?, ?)""",
-            (batch_id, csv_path, slide_count, datetime.utcnow().isoformat(), log_path),
+            (batch_id, csv_path, slide_count, datetime.now(timezone.utc).isoformat(), log_path),
         )
         conn.commit()
 
@@ -410,7 +414,7 @@ class StateStore:
         status = "SUCCEEDED" if exit_code == 0 else "FAILED"
         conn.execute(
             "UPDATE batches SET status=?, completed_at=?, nextflow_exit=? WHERE batch_id=?",
-            (status, datetime.utcnow().isoformat(), exit_code, batch_id),
+            (status, datetime.now(timezone.utc).isoformat(), exit_code, batch_id),
         )
         conn.commit()
 
@@ -1070,7 +1074,7 @@ class BatchScheduler:
         if batch:
             log.info("Dispatching batch of %d slides (force=%s, size_trigger=%s, time_trigger=%s)",
                      len(batch), force, size_trigger, time_trigger)
-            batch_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
+            batch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
             self.run_manager.submit(batch_id, batch)
 
 

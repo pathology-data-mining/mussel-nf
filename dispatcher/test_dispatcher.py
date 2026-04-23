@@ -141,9 +141,20 @@ class TestStateStore:
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
         store.mark_slides_complete("batch-001", succeeded=False)
         row = store._conn().execute(
-            "SELECT status FROM slides WHERE slide_path=?", ("/slides/a.svs",)
+            "SELECT status, fail_count FROM slides WHERE slide_path=?", ("/slides/a.svs",)
         ).fetchone()
         assert row["status"] == "FAILED"
+        assert row["fail_count"] == 1
+
+    def test_mark_slides_complete_increments_fail_count(self, store):
+        store.add_slide("/slides/a.svs", "a")
+        for i in range(3):
+            store.mark_dispatched(["/slides/a.svs"], f"batch-{i:03d}")
+            store.mark_slides_complete(f"batch-{i:03d}", succeeded=False)
+        row = store._conn().execute(
+            "SELECT fail_count FROM slides WHERE slide_path=?", ("/slides/a.svs",)
+        ).fetchone()
+        assert row["fail_count"] == 3
 
     def test_reset_dispatched_to_pending(self, store):
         store.add_slide("/slides/a.svs", "a")
@@ -611,6 +622,26 @@ class TestRecoverInFlight:
         # Batch is not RUNNING, so no recovery occurs
         assert len(pending) == 0
         assert specs == []
+
+    def test_max_slide_retries_skips_high_fail_count(self, tmp_path):
+        """Slides with fail_count >= max_slide_retries are permanently skipped."""
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("/slides/bad.svs", "bad")
+        store.add_slide("/slides/ok.svs", "ok")
+        # Fail bad slide 3 times
+        for i in range(3):
+            store.mark_dispatched(["/slides/bad.svs"], f"batch-{i:03d}")
+            store.mark_slides_complete(f"batch-{i:03d}", succeeded=False)
+        # Fail ok slide once
+        store.mark_dispatched(["/slides/ok.svs"], "batch-003")
+        store.mark_slides_complete("batch-003", succeeded=False)
+
+        pending = deque()
+        # max_slide_retries=3: bad slide (fail_count=3) should be skipped; ok slide (fail_count=1) should be re-queued
+        recover_in_flight(store, pending, retry_failed=True, max_slide_retries=3)
+        paths = {s["slide_path"] for s in pending}
+        assert "/slides/ok.svs" in paths
+        assert "/slides/bad.svs" not in paths
 
 
 # ---------------------------------------------------------------------------

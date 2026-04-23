@@ -187,6 +187,7 @@ class Config:
     min_batch_size: int = 1
     max_wait_seconds: int = 300
     retry_failed: bool = True
+    max_slide_retries: int = 5   # permanently skip slides that fail this many times
     cleanup_work_dir: bool = False
     cleanup_downloads: bool = False       # delete downloaded slides after a successful batch
     cleanup_batch_csv: bool = False       # delete per-batch samples CSV after success
@@ -380,6 +381,7 @@ class StateStore:
                 status        TEXT NOT NULL DEFAULT 'PENDING',
                 batch_id      TEXT,
                 download_path TEXT,
+                fail_count    INTEGER NOT NULL DEFAULT 0,
                 first_seen_at  TEXT,
                 dispatched_at  TEXT,
                 completed_at   TEXT,
@@ -402,6 +404,12 @@ class StateStore:
         # Migrate existing databases that pre-date the download_path column.
         try:
             conn.execute("ALTER TABLE slides ADD COLUMN download_path TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Migrate existing databases that pre-date the fail_count column.
+        try:
+            conn.execute("ALTER TABLE slides ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0")
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
@@ -454,10 +462,17 @@ class StateStore:
     def mark_slides_complete(self, batch_id: str, succeeded: bool):
         conn = self._conn()
         status = "SUCCEEDED" if succeeded else "FAILED"
-        conn.execute(
-            "UPDATE slides SET status=?, completed_at=? WHERE batch_id=?",
-            (status, datetime.now(timezone.utc).isoformat(), batch_id),
-        )
+        if succeeded:
+            conn.execute(
+                "UPDATE slides SET status=?, completed_at=? WHERE batch_id=?",
+                (status, datetime.now(timezone.utc).isoformat(), batch_id),
+            )
+        else:
+            # Increment fail_count for each slide in this failed batch
+            conn.execute(
+                "UPDATE slides SET status=?, completed_at=?, fail_count=fail_count+1 WHERE batch_id=?",
+                (status, datetime.now(timezone.utc).isoformat(), batch_id),
+            )
         conn.commit()
 
     def reset_dispatched_to_pending(self, batch_id: str):
@@ -468,12 +483,27 @@ class StateStore:
         )
         conn.commit()
 
-    def reset_failed_to_pending(self) -> int:
-        """Reset all FAILED slides to PENDING so they can be retried. Returns count."""
+    def reset_failed_to_pending(self, max_retries: int = 0) -> int:
+        """Reset FAILED slides to PENDING so they can be retried.
+        Slides with fail_count >= max_retries (when > 0) are left as FAILED.
+        Returns count of slides reset."""
         conn = self._conn()
-        conn.execute(
-            "UPDATE slides SET status='PENDING', batch_id=NULL, dispatched_at=NULL, error_msg=NULL WHERE status='FAILED'"
-        )
+        if max_retries > 0:
+            conn.execute(
+                "UPDATE slides SET status='PENDING', batch_id=NULL, dispatched_at=NULL, error_msg=NULL "
+                "WHERE status='FAILED' AND fail_count < ?",
+                (max_retries,),
+            )
+            skipped = conn.execute(
+                "SELECT COUNT(*) FROM slides WHERE status='FAILED' AND fail_count >= ?",
+                (max_retries,),
+            ).fetchone()[0]
+            if skipped:
+                log.warning("Permanently skipping %d slide(s) with fail_count >= %d.", skipped, max_retries)
+        else:
+            conn.execute(
+                "UPDATE slides SET status='PENDING', batch_id=NULL, dispatched_at=NULL, error_msg=NULL WHERE status='FAILED'"
+            )
         n = conn.execute("SELECT changes()").fetchone()[0]
         conn.commit()
         return n
@@ -1302,12 +1332,14 @@ class RunManager:
 # Recovery
 # ---------------------------------------------------------------------------
 
-def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: bool = True):
+def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: bool = True,
+                      max_slide_retries: int = 0):
     """
     On restart, recover interrupted batches:
     - If the batch's work dir still exists, schedule a -resume run to skip already-done tasks.
     - If the work dir is gone, reset slides to PENDING for fresh re-dispatch.
-    When retry_failed=True (default), also resets slides from FAILED batches.
+    When retry_failed=True (default), also resets FAILED slides back to PENDING, unless
+    their fail_count >= max_slide_retries (when max_slide_retries > 0).
     Returns a list of (batch_id, csv_path, work_dir) tuples to be submitted as resume runs.
     """
     resume_specs = []
@@ -1329,7 +1361,7 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
                 state.complete_batch(batch_id, exit_code=-1)
 
     if retry_failed:
-        n = state.reset_failed_to_pending()
+        n = state.reset_failed_to_pending(max_retries=max_slide_retries)
         if n:
             log.info("retry_failed: reset %d FAILED slide(s) to PENDING.", n)
 
@@ -1392,7 +1424,7 @@ def main():
     pending_deque: deque = deque()
 
     # Recovery
-    resume_specs = recover_in_flight(state, pending_deque, cfg.retry_failed)
+    resume_specs = recover_in_flight(state, pending_deque, cfg.retry_failed, cfg.max_slide_retries)
 
     # RunManager
     run_manager = RunManager(cfg, state)

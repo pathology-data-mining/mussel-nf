@@ -14,14 +14,15 @@ nextflow_profiles: cluster,slurm,conda
 outdir: tcga-results
 
 # Run up to 2 Nextflow jobs simultaneously
-max_concurrent_runs: 2
+max_concurrent_runs: 3
 
 # Dispatch when 50 slides have accumulated, or after 10 minutes
-batch_size: 50
-min_batch_size: 1
+batch_size: 500
+min_batch_size: 50
 max_wait_seconds: 600
 
 retry_failed: true
+max_slide_retries: 3
 cleanup_work_dir: false       # set true to delete NF work/ dir after each successful batch
 cleanup_downloads: true       # delete downloaded .svs files after featurization succeeds
 cleanup_batch_csv: false      # set true to delete per-batch samples CSV after success

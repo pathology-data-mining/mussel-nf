@@ -411,6 +411,16 @@ class StateStore:
         )
         conn.commit()
 
+    def reset_failed_to_pending(self) -> int:
+        """Reset all FAILED slides to PENDING so they can be retried. Returns count."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE slides SET status='PENDING', batch_id=NULL, dispatched_at=NULL, error_msg=NULL WHERE status='FAILED'"
+        )
+        n = conn.execute("SELECT changes()").fetchone()[0]
+        conn.commit()
+        return n
+
     def set_download_path(self, slide_path: str, download_path: str):
         """Record the local path of a downloaded slide (the file_id directory)."""
         conn = self._conn()
@@ -1195,27 +1205,29 @@ class RunManager:
 def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: bool = True):
     """
     On restart, find batches that were RUNNING and reset their slides to PENDING.
-    When retry_failed=True (default), the recovered slides are re-enqueued so
-    they will be dispatched again.  Set retry_failed=False to skip re-enqueueing
-    (slides remain in the state DB as PENDING but won't be dispatched this run).
+    When retry_failed=True (default), also resets slides from FAILED batches so
+    they will be dispatched again. Set retry_failed=False to leave FAILED slides
+    as-is (they won't be re-dispatched this run).
     """
     running = state.get_running_batches()
-    if not running:
-        return
-    log.info("Recovering %d in-flight batch(es) from previous run…", len(running))
-    for batch in running:
-        batch_id = batch["batch_id"]
-        log.info("  Resetting DISPATCHED slides for batch %s to PENDING", batch_id)
-        state.reset_dispatched_to_pending(batch_id)
-        # Mark the batch itself as failed so it won't linger as RUNNING
-        state.complete_batch(batch_id, exit_code=-1)
+    if running:
+        log.info("Recovering %d in-flight batch(es) from previous run…", len(running))
+        for batch in running:
+            batch_id = batch["batch_id"]
+            log.info("  Resetting DISPATCHED slides for batch %s to PENDING", batch_id)
+            state.reset_dispatched_to_pending(batch_id)
+            # Mark the batch itself as failed so it won't linger as RUNNING
+            state.complete_batch(batch_id, exit_code=-1)
 
     if retry_failed:
-        # Re-enqueue recovered pending slides
+        n = state.reset_failed_to_pending()
+        if n:
+            log.info("retry_failed: reset %d FAILED slide(s) to PENDING.", n)
+        # Re-enqueue all pending slides (recovered + previously pending)
         for slide in state.get_pending_slides():
             pending_deque.append(slide)
-        log.info("Re-enqueued %d recovered slides.", len(pending_deque))
-    else:
+        log.info("Re-enqueued %d slide(s) for dispatch.", len(pending_deque))
+    elif running:
         log.info("retry_failed=False — recovered slides left as PENDING; not re-enqueuing.")
 
 

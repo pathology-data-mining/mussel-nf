@@ -823,6 +823,53 @@ class TestPostBatchHooks:
 # Auto post-batch hook generation
 # ---------------------------------------------------------------------------
 
+class TestNfModelTypes:
+    """_read_nf_model_types parses model_types from nextflow.config."""
+
+    def test_reads_model_types(self, tmp_path):
+        nf_config = tmp_path / "nextflow.config"
+        nf_config.write_text("featurize {\n    model_types = ['hoptimus1', 'titan_slide']\n}\n")
+        assert _mod._read_nf_model_types(str(tmp_path)) == ["hoptimus1", "titan_slide"]
+
+    def test_returns_empty_when_file_missing(self, tmp_path):
+        assert _mod._read_nf_model_types(str(tmp_path)) == []
+
+    def test_returns_empty_when_no_match(self, tmp_path):
+        (tmp_path / "nextflow.config").write_text("params { batch_size = 50 }\n")
+        assert _mod._read_nf_model_types(str(tmp_path)) == []
+
+    def test_watcher_models_auto_filled(self, tmp_path):
+        import yaml as _yaml
+        (tmp_path / "nextflow.config").write_text(
+            "featurize {\n    model_types = ['hoptimus1', 'titan_slide']\n}\n"
+        )
+        cfg_path = tmp_path / "test.yaml"
+        cfg_path.write_text(_yaml.dump({
+            "nextflow_profiles": "standard",
+            "outdir": str(tmp_path / "results"),
+            "repo_dir": str(tmp_path),
+            "watchers": [{"type": "tcga", "inventory_csv": "i.csv", "status_csv": "s.csv"}],
+        }))
+        cfg = Config.load(str(cfg_path))
+        assert cfg.watchers[0].models == ["hoptimus1", "titan_slide"]
+
+    def test_explicit_models_not_overridden(self, tmp_path):
+        import yaml as _yaml
+        (tmp_path / "nextflow.config").write_text(
+            "featurize {\n    model_types = ['hoptimus1']\n}\n"
+        )
+        cfg_path = tmp_path / "test.yaml"
+        cfg_path.write_text(_yaml.dump({
+            "nextflow_profiles": "standard",
+            "outdir": str(tmp_path / "results"),
+            "repo_dir": str(tmp_path),
+            "watchers": [{"type": "tcga", "inventory_csv": "i.csv", "status_csv": "s.csv",
+                          "models": ["ctranspath"]}],
+        }))
+        cfg = Config.load(str(cfg_path))
+        assert cfg.watchers[0].models == ["ctranspath"]
+
+
 class TestAutoHooks:
     """Config._build_auto_hooks generates hooks from wds_destinations/databricks_volume_path."""
 

@@ -34,10 +34,9 @@ watchers:
     inventory_csv: tcga_inventory.csv
     status_csv: tcga_status.csv
 
-    # Feature models to extract — must match params.featurize.model_types in nextflow.config.
-    # Used by tcga_update_status.py (to detect done slides) and tcga_prepare_samples.py
-    # (to skip slides already processed). Leave empty to auto-discover from results dir.
-    models: [hoptimus1, titan_slide]
+    # Feature models to extract — auto-detected from nextflow.config (model_types).
+    # Override here only if you need a different set from what nextflow.config specifies.
+    # models: [hoptimus1, titan_slide]
 
     # Slide source — at least one of local_slides_dir or s3_base must be set.
     # Slides are resolved: local disk → S3 → needs_download (in that order).

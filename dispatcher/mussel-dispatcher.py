@@ -138,8 +138,8 @@ class WatcherConfig:
     inventory_csv: str = ""
     status_csv: str = ""
     # Models to check for skip-done filtering in tcga_prepare_samples.
-    # Empty list = auto-discover from results dir (recommended; matches whatever
-    # params.featurize.model_types is set to in nextflow.config).
+    # Empty list = auto-read from nextflow.config model_types (default).
+    # Set explicitly only to override.
     models: list = field(default_factory=list)
     local_slides_dir: str = ""
     s3_base: str = ""
@@ -255,6 +255,19 @@ class Config:
 
         raw["watchers"] = watcher_cfgs
         cfg = cls(**raw)
+
+        # Auto-detect model_types from nextflow.config for watchers that didn't
+        # specify them explicitly.
+        nf_models: list[str] | None = None
+        for w in cfg.watchers:
+            if not w.models:
+                if nf_models is None:
+                    nf_models = _read_nf_model_types(cfg.repo_dir)
+                    if nf_models:
+                        log.info("Auto-detected model_types from nextflow.config: %s",
+                                 ", ".join(nf_models))
+                w.models = nf_models
+
         cfg.post_batch_hooks = cfg._build_auto_hooks() + cfg.post_batch_hooks
         return cfg
 
@@ -310,6 +323,28 @@ class Config:
                 log.debug("Auto hook: tcga_sync_databricks volume=%s", w.databricks_volume_path)
 
         return hooks + db_hooks
+
+
+def _read_nf_model_types(repo_dir: str) -> list[str]:
+    """Parse model_types from the first matching line in nextflow.config.
+
+    Looks for a line like:
+        model_types = ['hoptimus1', 'titan_slide']
+    Returns a list of model name strings, or [] if not found / parse error.
+    """
+    import re
+    config_path = os.path.join(repo_dir, "nextflow.config")
+    try:
+        text = Path(config_path).read_text()
+    except OSError:
+        log.warning("Could not read %s — model_types not auto-detected", config_path)
+        return []
+    m = re.search(r"model_types\s*=\s*\[([^\]]*)\]", text)
+    if not m:
+        return []
+    raw = m.group(1)
+    models = re.findall(r"['\"]([^'\"]+)['\"]", raw)
+    return models
 
 
 # ---------------------------------------------------------------------------

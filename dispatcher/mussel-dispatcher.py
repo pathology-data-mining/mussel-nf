@@ -59,8 +59,11 @@ CONFIG KEYS (top level)
     max_concurrent_runs Parallel Nextflow jobs (default 2)
 
   Behaviour:
-    retry_failed        Re-enqueue slides from crashed batches on restart (default true)
-    cleanup_work_dir    Delete NF work dir after each successful batch (default false)
+    retry_failed             Re-enqueue slides from crashed batches on restart (default true)
+    cleanup_work_dir         Delete NF work dir after each successful batch (default false)
+    cleanup_downloads        Delete downloaded slides (.svs) after a successful batch (default false)
+    cleanup_batch_csv        Delete the per-batch samples CSV after success (default false)
+    cleanup_logs_after_days  Delete NF log files for batches older than N days (0 = keep forever)
 
   Hooks:
     post_batch_hooks    List of {command, args} run after each successful NF run.
@@ -91,7 +94,7 @@ import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -182,6 +185,9 @@ class Config:
     max_wait_seconds: int = 300
     retry_failed: bool = True
     cleanup_work_dir: bool = False
+    cleanup_downloads: bool = False       # delete downloaded slides after a successful batch
+    cleanup_batch_csv: bool = False       # delete per-batch samples CSV after success
+    cleanup_logs_after_days: int = 0      # delete NF log files older than N days (0 = keep forever)
     combined_manifest_path: Optional[str] = None  # defaults to {outdir}/manifest-combined.csv
     post_batch_hooks: list = field(default_factory=list)
     # list of {"command": "...", "args": ["..."]}
@@ -325,14 +331,15 @@ class StateStore:
         conn = self._conn()
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS slides (
-                slide_path   TEXT PRIMARY KEY,
-                slide_id     TEXT NOT NULL,
-                status       TEXT NOT NULL DEFAULT 'PENDING',
-                batch_id     TEXT,
-                first_seen_at TEXT,
-                dispatched_at TEXT,
-                completed_at  TEXT,
-                error_msg    TEXT
+                slide_path    TEXT PRIMARY KEY,
+                slide_id      TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'PENDING',
+                batch_id      TEXT,
+                download_path TEXT,
+                first_seen_at  TEXT,
+                dispatched_at  TEXT,
+                completed_at   TEXT,
+                error_msg      TEXT
             );
 
             CREATE TABLE IF NOT EXISTS batches (
@@ -347,7 +354,12 @@ class StateStore:
                 manifest_path TEXT
             );
         """)
-        conn.commit()
+        # Migrate existing databases that pre-date the download_path column.
+        try:
+            conn.execute("ALTER TABLE slides ADD COLUMN download_path TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     # -- Slides ---------------------------------------------------------------
 
@@ -397,6 +409,33 @@ class StateStore:
             (batch_id,),
         )
         conn.commit()
+
+    def set_download_path(self, slide_path: str, download_path: str):
+        """Record the local path of a downloaded slide (the file_id directory)."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE slides SET download_path=? WHERE slide_path=?",
+            (download_path, slide_path),
+        )
+        conn.commit()
+
+    def get_batch_download_paths(self, batch_id: str) -> list:
+        """Return distinct non-null download_path values for slides in a batch."""
+        rows = self._conn().execute(
+            "SELECT DISTINCT download_path FROM slides WHERE batch_id=? AND download_path IS NOT NULL",
+            (batch_id,),
+        ).fetchall()
+        return [r["download_path"] for r in rows]
+
+    def get_old_batch_logs(self, older_than_days: int) -> list:
+        """Return (batch_id, log_path) for SUCCEEDED batches with logs older than N days."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+        rows = self._conn().execute(
+            """SELECT batch_id, log_path FROM batches
+               WHERE status='SUCCEEDED' AND log_path IS NOT NULL AND completed_at < ?""",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # -- Batches --------------------------------------------------------------
 
@@ -820,7 +859,10 @@ class TcgaWatcher(threading.Thread):
 
         if dest_path.exists():
             log.info("TcgaWatcher: downloaded %s → %s", slide_id, dest_path)
-            self.pending.append({"slide_id": slide_id, "slide_path": str(dest_path)})
+            slide_path = str(dest_path)
+            self.pending.append({"slide_id": slide_id, "slide_path": slide_path})
+            # Record the download directory so cleanup can remove it after featurization.
+            self.state.set_download_path(slide_path, str(dest_path.parent))
         else:
             log.error("TcgaWatcher: gdc-client exited 0 but %s not found", dest_path)
 
@@ -940,9 +982,7 @@ class NextflowRunner:
             log.info("Batch %s completed successfully.", self.batch_id)
             self._collect_manifest(run_started_at)
             self._run_post_batch_hooks(csv_path)
-            if self.cfg.cleanup_work_dir:
-                import shutil
-                shutil.rmtree(work_dir, ignore_errors=True)
+            self._cleanup(csv_path, log_path, work_dir)
         else:
             log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
 
@@ -980,6 +1020,31 @@ class NextflowRunner:
                     log.info("Post-batch hook succeeded")
             except Exception as exc:
                 log.error("Post-batch hook raised: %s", exc)
+
+    def _cleanup(self, csv_path: str, log_path: str, work_dir: str):
+        """Post-success cleanup: work dir, downloaded slides, batch CSV, old logs."""
+        import shutil
+
+        if self.cfg.cleanup_work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            log.info("Batch %s: removed work dir %s", self.batch_id, work_dir)
+
+        if self.cfg.cleanup_downloads:
+            for dl_dir in self.state.get_batch_download_paths(self.batch_id):
+                if os.path.isdir(dl_dir):
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    log.info("Batch %s: removed download dir %s", self.batch_id, dl_dir)
+
+        if self.cfg.cleanup_batch_csv and os.path.exists(csv_path):
+            os.unlink(csv_path)
+            log.info("Batch %s: removed batch CSV %s", self.batch_id, csv_path)
+
+        if self.cfg.cleanup_logs_after_days > 0:
+            for row in self.state.get_old_batch_logs(self.cfg.cleanup_logs_after_days):
+                old_log = row["log_path"]
+                if old_log and os.path.exists(old_log):
+                    os.unlink(old_log)
+                    log.info("Removed old log (batch %s): %s", row["batch_id"], old_log)
 
     def _collect_manifest(self, run_started_at: float):
         """Find the manifest-*.csv written by this batch and update the combined manifest."""

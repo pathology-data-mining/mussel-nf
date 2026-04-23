@@ -934,3 +934,130 @@ class TestAutoHooks:
         assert len(cfg.post_batch_hooks) == 2
         assert "tcga_append_wds.py" in cfg.post_batch_hooks[0]["command"]
         assert "tcga_sync_databricks.py" in cfg.post_batch_hooks[1]["command"]
+
+
+# ---------------------------------------------------------------------------
+# Cleanup tests
+# ---------------------------------------------------------------------------
+
+class TestCleanup:
+    """Tests for post-batch cleanup: downloads, batch CSV, old logs."""
+
+    def _make_state(self, tmp_path):
+        return StateStore(str(tmp_path / "state" / "dispatcher.db"))
+
+    def test_cleanup_downloads_removes_dir(self, tmp_path):
+        """cleanup_downloads=True deletes the download directory recorded for a slide."""
+        state = self._make_state(tmp_path)
+        slide_path = str(tmp_path / "slides" / "file_abc123" / "slide.svs")
+        dl_dir = str(tmp_path / "slides" / "file_abc123")
+        os.makedirs(dl_dir)
+        Path(slide_path).touch()
+
+        state.add_slide(slide_path, "TCGA-XX-001")
+        state.mark_dispatched([slide_path], "batch_001")
+        state.set_download_path(slide_path, dl_dir)
+        state.mark_slides_complete("batch_001", succeeded=True)
+
+        cfg = make_config(cleanup_downloads=True)
+        runner = NextflowRunner(cfg, "batch_001", [], state)
+        runner._cleanup(
+            csv_path=str(tmp_path / "batch_001.csv"),
+            log_path=str(tmp_path / "batch_001.log"),
+            work_dir=str(tmp_path / "work"),
+        )
+
+        assert not os.path.exists(dl_dir)
+
+    def test_cleanup_downloads_skipped_when_false(self, tmp_path):
+        """cleanup_downloads=False (default) leaves download dirs intact."""
+        state = self._make_state(tmp_path)
+        dl_dir = str(tmp_path / "slides" / "file_xyz")
+        os.makedirs(dl_dir)
+        slide_path = str(Path(dl_dir) / "slide.svs")
+        Path(slide_path).touch()
+
+        state.add_slide(slide_path, "TCGA-XX-002")
+        state.mark_dispatched([slide_path], "batch_002")
+        state.set_download_path(slide_path, dl_dir)
+
+        cfg = make_config(cleanup_downloads=False)
+        runner = NextflowRunner(cfg, "batch_002", [], state)
+        runner._cleanup(
+            csv_path=str(tmp_path / "batch_002.csv"),
+            log_path=str(tmp_path / "batch_002.log"),
+            work_dir=str(tmp_path / "work"),
+        )
+
+        assert os.path.exists(dl_dir)
+
+    def test_cleanup_batch_csv_removes_file(self, tmp_path):
+        """cleanup_batch_csv=True deletes the batch samples CSV."""
+        state = self._make_state(tmp_path)
+        csv_file = tmp_path / "batch_003.csv"
+        csv_file.write_text("slide_id,slide_path\n")
+
+        cfg = make_config(cleanup_batch_csv=True)
+        runner = NextflowRunner(cfg, "batch_003", [], state)
+        runner._cleanup(
+            csv_path=str(csv_file),
+            log_path=str(tmp_path / "batch_003.log"),
+            work_dir=str(tmp_path / "work"),
+        )
+
+        assert not csv_file.exists()
+
+    def test_cleanup_old_logs_removes_stale_log(self, tmp_path):
+        """cleanup_logs_after_days removes logs for old succeeded batches."""
+        from datetime import datetime, timedelta, timezone
+
+        state = self._make_state(tmp_path)
+        log_file = tmp_path / "old_batch.log"
+        log_file.write_text("nextflow output\n")
+
+        state.add_batch("old_batch", str(tmp_path / "old.csv"), 5, str(log_file))
+        # Manually backdate completed_at to 40 days ago
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+        conn = state._conn()
+        conn.execute(
+            "UPDATE batches SET status='SUCCEEDED', completed_at=? WHERE batch_id='old_batch'",
+            (old_ts,),
+        )
+        conn.commit()
+
+        cfg = make_config(cleanup_logs_after_days=30)
+        runner = NextflowRunner(cfg, "current_batch", [], state)
+        runner._cleanup(
+            csv_path=str(tmp_path / "current.csv"),
+            log_path=str(tmp_path / "current.log"),
+            work_dir=str(tmp_path / "work"),
+        )
+
+        assert not log_file.exists()
+
+    def test_cleanup_old_logs_keeps_recent_log(self, tmp_path):
+        """cleanup_logs_after_days keeps logs for recently succeeded batches."""
+        from datetime import datetime, timedelta, timezone
+
+        state = self._make_state(tmp_path)
+        log_file = tmp_path / "recent_batch.log"
+        log_file.write_text("nextflow output\n")
+
+        state.add_batch("recent_batch", str(tmp_path / "recent.csv"), 5, str(log_file))
+        recent_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+        conn = state._conn()
+        conn.execute(
+            "UPDATE batches SET status='SUCCEEDED', completed_at=? WHERE batch_id='recent_batch'",
+            (recent_ts,),
+        )
+        conn.commit()
+
+        cfg = make_config(cleanup_logs_after_days=30)
+        runner = NextflowRunner(cfg, "current_batch", [], state)
+        runner._cleanup(
+            csv_path=str(tmp_path / "current.csv"),
+            log_path=str(tmp_path / "current.log"),
+            work_dir=str(tmp_path / "work"),
+        )
+
+        assert log_file.exists()

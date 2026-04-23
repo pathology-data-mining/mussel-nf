@@ -10,8 +10,8 @@
 #   state_dir     → state/
 #   log_dir       → logs/
 
-nextflow_profiles: cluster,apptainer
-outdir: /path/to/tcga-results
+nextflow_profiles: cluster,slurm,conda
+outdir: tcga-results
 
 # Run up to 2 Nextflow jobs simultaneously
 max_concurrent_runs: 2
@@ -22,28 +22,31 @@ min_batch_size: 1
 max_wait_seconds: 600
 
 retry_failed: true
-cleanup_work_dir: false
+cleanup_work_dir: false       # set true to delete NF work/ dir after each successful batch
+cleanup_downloads: true       # delete downloaded .svs files after featurization succeeds
+cleanup_batch_csv: false      # set true to delete per-batch samples CSV after success
+cleanup_logs_after_days: 30   # delete NF log files for batches older than 30 days (0 = keep forever)
 
 watchers:
   - type: tcga
     # CSV files managed by the TCGA scripts
-    inventory_csv: /path/to/tcga_inventory.csv
-    status_csv: /path/to/tcga_status.csv
+    inventory_csv: tcga_inventory.csv
+    status_csv: tcga_status.csv
 
     # Feature model to extract; also controls which slides are already-done
         # models: []   # defaults to auto-discover from results dir (matches nextflow.config)
 
     # Slide source — at least one of local_slides_dir or s3_base must be set.
     # Slides are resolved: local disk → S3 → needs_download (in that order).
-    local_slides_dir: /path/to/slides
-    # s3_base: s3://bucket/path/to/slides
-    # s3_endpoint: http://your-ecs-endpoint:9020
+    #local_slides_dir: /path/to/slides
+    s3_base: s3://pathology/TCGA
+    s3_endpoint: http://pmindecs.mskcc.org:9020
     # s3_access_key: ...   # or set ECS_ACCESS_KEY env var
     # s3_secret_key: ...   # or set ECS_SECRET_KEY env var
 
     # Optional: restrict to a single project or slide type
     # project: TCGA-BRCA
-    slide_type: DX1
+    slide_type: DX
 
     # How often to poll the GDC inventory (seconds)
     poll_interval_seconds: 3600
@@ -55,14 +58,14 @@ watchers:
     # Each download runs in a background thread; slides are enqueued individually
     # as they complete so featurization of ready slides is not blocked.
     download_enabled: true
-    download_dir: /path/to/downloads
+    download_dir: tcga-downloads
     download_concurrency: 4
     # gdc_token_file: /path/to/gdc-user-token.txt
 
     # When set, a tcga_append_wds.py post-batch hook is generated automatically
     # after each successful Nextflow run.  Supports s3:// and local paths.
     wds_destinations:
-      ctranspath: s3://your-bucket/wds/ctranspath
+      optimus: s3://reef-tcga-v2-0/wds/optimus
       # uni2h: s3://your-bucket/wds/uni2h
     # wds_staging_dir: /path/to/local/staging   # base dir; each model uses {staging}/{model}/
 

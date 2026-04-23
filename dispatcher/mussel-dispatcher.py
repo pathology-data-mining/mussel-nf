@@ -160,6 +160,7 @@ class WatcherConfig:
     # Example: {ctranspath: s3://bucket/wds/ctranspath, uni2h: s3://bucket/wds/uni2h}
     wds_destinations: dict = field(default_factory=dict)
     wds_staging_dir: str = ""  # local staging base for s3:// destinations; each model uses {staging}/{model}/
+    wds_s3_max_concurrency: int = 4  # boto3 multipart threads per S3 upload/download (reduce to limit ECS load)
     # When set, a tcga_sync_databricks.py hook is generated automatically.
     # Credentials come from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.
     databricks_volume_path: str = ""   # e.g. /Volumes/catalog/schema/vol/tcga.parquet
@@ -299,7 +300,9 @@ class Config:
                         "--manifest-csv={outdir}/wds_manifest.csv",
                     ]
                     if w.wds_staging_dir:
-                        args.append("--staging-dir=" + w.wds_staging_dir + "/" + model)
+                        args.append("--staging-dir=" + w.wds_staging_dir)
+                    if w.wds_s3_max_concurrency != 4:
+                        args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
                     if self.cleanup_results:
                         args.append("--delete-local")
                     hooks.append({
@@ -386,6 +389,7 @@ class StateStore:
             CREATE TABLE IF NOT EXISTS batches (
                 batch_id      TEXT PRIMARY KEY,
                 csv_path      TEXT,
+                work_dir      TEXT,
                 status        TEXT NOT NULL DEFAULT 'RUNNING',
                 slide_count   INTEGER,
                 dispatched_at TEXT,
@@ -398,6 +402,12 @@ class StateStore:
         # Migrate existing databases that pre-date the download_path column.
         try:
             conn.execute("ALTER TABLE slides ADD COLUMN download_path TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Migrate existing databases that pre-date the work_dir column.
+        try:
+            conn.execute("ALTER TABLE batches ADD COLUMN work_dir TEXT")
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
@@ -497,12 +507,21 @@ class StateStore:
 
     # -- Batches --------------------------------------------------------------
 
-    def add_batch(self, batch_id: str, csv_path: str, slide_count: int, log_path: str):
+    def add_batch(self, batch_id: str, csv_path: str, work_dir: str, slide_count: int, log_path: str):
         conn = self._conn()
         conn.execute(
-            """INSERT INTO batches (batch_id, csv_path, status, slide_count, dispatched_at, log_path)
-               VALUES (?, ?, 'RUNNING', ?, ?, ?)""",
-            (batch_id, csv_path, slide_count, datetime.now(timezone.utc).isoformat(), log_path),
+            """INSERT INTO batches (batch_id, csv_path, work_dir, status, slide_count, dispatched_at, log_path)
+               VALUES (?, ?, ?, 'RUNNING', ?, ?, ?)""",
+            (batch_id, csv_path, work_dir, slide_count, datetime.now(timezone.utc).isoformat(), log_path),
+        )
+        conn.commit()
+
+    def restart_batch(self, batch_id: str):
+        """Re-mark a previously-failed/interrupted batch as RUNNING (for -resume)."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE batches SET status='RUNNING', completed_at=NULL, nextflow_exit=NULL WHERE batch_id=?",
+            (batch_id,),
         )
         conn.commit()
 
@@ -531,7 +550,7 @@ class StateStore:
 
     def get_running_batches(self) -> list:
         rows = self._conn().execute(
-            "SELECT batch_id, csv_path, log_path FROM batches WHERE status='RUNNING'"
+            "SELECT batch_id, csv_path, work_dir, log_path FROM batches WHERE status='RUNNING'"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1008,21 +1027,31 @@ def collect_manifests(outdir: str, combined_path: str) -> int:
 # ---------------------------------------------------------------------------
 
 class NextflowRunner:
-    def __init__(self, cfg: Config, batch_id: str, slides: list, state: StateStore):
+    def __init__(self, cfg: Config, batch_id: str, slides: list, state: StateStore,
+                 *, resume: bool = False, existing_csv_path: str = None, existing_work_dir: str = None):
         self.cfg = cfg
         self.batch_id = batch_id
         self.slides = slides  # list of {"slide_path": ..., "slide_id": ..., "oncotree_code": ...}
         self.state = state
+        self._resume = resume
+        self._existing_csv_path = existing_csv_path
+        self._existing_work_dir = existing_work_dir
 
     def run(self):
-        csv_path = self._write_csv()
-        work_dir = os.path.join(self.cfg.work_base_dir, f"batch_{self.batch_id}", "work")
-        log_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.log")
-        os.makedirs(work_dir, exist_ok=True)
-        os.makedirs(self.cfg.log_dir, exist_ok=True)
+        if self._resume:
+            csv_path = self._existing_csv_path
+            work_dir = self._existing_work_dir
+            log_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.log")
+            self.state.restart_batch(self.batch_id)
+        else:
+            csv_path = self._write_csv()
+            work_dir = os.path.join(self.cfg.work_base_dir, f"batch_{self.batch_id}", "work")
+            log_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.log")
+            os.makedirs(work_dir, exist_ok=True)
+            os.makedirs(self.cfg.log_dir, exist_ok=True)
 
-        self.state.add_batch(self.batch_id, csv_path, len(self.slides), log_path)
-        self.state.mark_dispatched([s["slide_path"] for s in self.slides], self.batch_id)
+            self.state.add_batch(self.batch_id, csv_path, work_dir, len(self.slides), log_path)
+            self.state.mark_dispatched([s["slide_path"] for s in self.slides], self.batch_id)
 
         cmd = [
             "nextflow", "run", self.cfg.repo_dir,
@@ -1031,8 +1060,11 @@ class NextflowRunner:
             "--samples_csv", csv_path,
             "--outdir", self.cfg.outdir,
         ]
+        if self._resume:
+            cmd.append("-resume")
 
-        log.info("Dispatching batch %s (%d slides): %s", self.batch_id, len(self.slides), " ".join(cmd))
+        label = "resume" if self._resume else f"{len(self.slides)} slides"
+        log.info("Dispatching batch %s (%s): %s", self.batch_id, label, " ".join(cmd))
 
         run_started_at = time.time()
         exit_code = -1
@@ -1191,8 +1223,9 @@ class BatchScheduler:
         while not self.stop_event.is_set():
             self._maybe_dispatch()
             self.stop_event.wait(5)
-        # Final drain
-        self._maybe_dispatch(force=True)
+        # Do NOT force-dispatch on shutdown — pending slides stay in the DB
+        # and will be recovered on next startup.
+        log.info("BatchScheduler stopped. Pending slides will be recovered on restart.")
 
     def _maybe_dispatch(self, force: bool = False):
         with self._lock:
@@ -1239,6 +1272,15 @@ class RunManager:
             self._futures[batch_id] = future
         future.add_done_callback(lambda f: self._on_done(batch_id, f))
 
+    def submit_resume(self, batch_id: str, csv_path: str, work_dir: str):
+        """Re-submit an interrupted batch using the existing work dir and -resume."""
+        runner = NextflowRunner(self.cfg, batch_id, [], self.state,
+                                resume=True, existing_csv_path=csv_path, existing_work_dir=work_dir)
+        future: Future = self._executor.submit(runner.run)
+        with self._lock:
+            self._futures[batch_id] = future
+        future.add_done_callback(lambda f: self._on_done(batch_id, f))
+
     def _on_done(self, batch_id: str, future: Future):
         with self._lock:
             self._futures.pop(batch_id, None)
@@ -1262,31 +1304,43 @@ class RunManager:
 
 def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: bool = True):
     """
-    On restart, find batches that were RUNNING and reset their slides to PENDING.
-    When retry_failed=True (default), also resets slides from FAILED batches so
-    they will be dispatched again. Set retry_failed=False to leave FAILED slides
-    as-is (they won't be re-dispatched this run).
+    On restart, recover interrupted batches:
+    - If the batch's work dir still exists, schedule a -resume run to skip already-done tasks.
+    - If the work dir is gone, reset slides to PENDING for fresh re-dispatch.
+    When retry_failed=True (default), also resets slides from FAILED batches.
+    Returns a list of (batch_id, csv_path, work_dir) tuples to be submitted as resume runs.
     """
+    resume_specs = []
     running = state.get_running_batches()
     if running:
         log.info("Recovering %d in-flight batch(es) from previous run…", len(running))
         for batch in running:
             batch_id = batch["batch_id"]
-            log.info("  Resetting DISPATCHED slides for batch %s to PENDING", batch_id)
-            state.reset_dispatched_to_pending(batch_id)
-            # Mark the batch itself as failed so it won't linger as RUNNING
-            state.complete_batch(batch_id, exit_code=-1)
+            work_dir = batch.get("work_dir")
+            csv_path = batch.get("csv_path")
+
+            if work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path):
+                log.info("  Batch %s: work dir intact — will resume with -resume", batch_id)
+                resume_specs.append((batch_id, csv_path, work_dir))
+                # Leave slides in DISPATCHED state; they'll transition to DONE/FAILED on resume completion
+            else:
+                log.info("  Batch %s: work dir missing — resetting slides to PENDING", batch_id)
+                state.reset_dispatched_to_pending(batch_id)
+                state.complete_batch(batch_id, exit_code=-1)
 
     if retry_failed:
         n = state.reset_failed_to_pending()
         if n:
             log.info("retry_failed: reset %d FAILED slide(s) to PENDING.", n)
-        # Re-enqueue all pending slides (recovered + previously pending)
-        for slide in state.get_pending_slides():
-            pending_deque.append(slide)
-        log.info("Re-enqueued %d slide(s) for dispatch.", len(pending_deque))
-    elif running:
-        log.info("retry_failed=False — recovered slides left as PENDING; not re-enqueuing.")
+
+    # Re-enqueue all pending slides (recovered fallbacks + previously pending)
+    pending = state.get_pending_slides()
+    for slide in pending:
+        pending_deque.append(slide)
+    if pending:
+        log.info("Re-enqueued %d slide(s) for dispatch.", len(pending))
+
+    return resume_specs
 
 
 # ---------------------------------------------------------------------------
@@ -1323,12 +1377,14 @@ def main():
 
     stop_event = threading.Event()
 
-    # Signal handling
+    # Signal handling — first Ctrl+C: graceful stop; second Ctrl+C: immediate exit
     def _handle_signal(signum, frame):
-        # Avoid calling log.info() from a signal handler — it can cause a
-        # reentrant write into the logging stream.  Write directly to stderr.
-        sys.stderr.write(f"\nReceived signal {signum}, shutting down…\n")
+        sys.stderr.write(f"\nReceived signal {signum}, shutting down gracefully…\n")
+        sys.stderr.write("Press Ctrl+C again to force exit immediately.\n")
         stop_event.set()
+        # Restore default handlers so a second signal exits immediately
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -1336,10 +1392,16 @@ def main():
     pending_deque: deque = deque()
 
     # Recovery
-    recover_in_flight(state, pending_deque, cfg.retry_failed)
+    resume_specs = recover_in_flight(state, pending_deque, cfg.retry_failed)
 
     # RunManager
     run_manager = RunManager(cfg, state)
+
+    # Submit resume runs for batches whose work dirs are still intact
+    for batch_id, csv_path, work_dir in resume_specs:
+        run_manager.submit_resume(batch_id, csv_path, work_dir)
+    if resume_specs:
+        log.info("Submitted %d batch resume(s) with -resume.", len(resume_specs))
 
     # BatchScheduler
     scheduler = BatchScheduler(cfg, state, run_manager, stop_event)
@@ -1378,7 +1440,15 @@ def main():
     # Run scheduler in main thread (blocks until stop_event)
     scheduler.run()
 
-    run_manager.shutdown(wait=True)
+    n = run_manager.running_count()
+    if n:
+        log.info("Waiting for %d in-flight batch(es) to finish… (Ctrl+C to abandon)", n)
+    try:
+        run_manager.shutdown(wait=True)
+    except KeyboardInterrupt:
+        log.warning("Forced exit — %d batch(es) may still be running in SLURM. "
+                    "They will be recovered on next startup.", run_manager.running_count())
+        run_manager.shutdown(wait=False)
     log.info("mussel-dispatcher stopped.")
 
 

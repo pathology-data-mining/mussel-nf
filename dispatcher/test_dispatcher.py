@@ -164,7 +164,7 @@ class TestStateStore:
         assert pending[0]["slide_path"] == "/slides/a.svs"
 
     def test_batch_lifecycle_running_to_succeeded(self, store):
-        store.add_batch("batch-001", "/dispatch/1.csv", 5, "/logs/1.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 5, "/logs/1.log")
         assert len(store.get_running_batches()) == 1
         store.complete_batch("batch-001", exit_code=0)
         assert store.get_running_batches() == []
@@ -174,7 +174,7 @@ class TestStateStore:
         assert row["status"] == "SUCCEEDED"
 
     def test_complete_batch_failed_sets_status_and_exit(self, store):
-        store.add_batch("batch-001", "/dispatch/1.csv", 2, "/logs/1.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 2, "/logs/1.log")
         store.complete_batch("batch-001", exit_code=1)
         row = store._conn().execute(
             "SELECT status, nextflow_exit FROM batches WHERE batch_id=?", ("batch-001",)
@@ -183,18 +183,18 @@ class TestStateStore:
         assert row["nextflow_exit"] == 1
 
     def test_record_batch_manifest(self, store):
-        store.add_batch("batch-001", "/dispatch/1.csv", 1, "/logs/1.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 1, "/logs/1.log")
         store.record_batch_manifest("batch-001", "/results/manifest-001.csv")
         paths = store.get_all_manifest_paths()
         assert "/results/manifest-001.csv" in paths
 
     def test_get_all_manifest_paths_skips_null(self, store):
-        store.add_batch("batch-001", "/dispatch/1.csv", 1, "/logs/1.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 1, "/logs/1.log")
         assert store.get_all_manifest_paths() == []
 
     def test_get_running_batches_only_returns_running(self, store):
-        store.add_batch("batch-001", "/dispatch/1.csv", 1, "/logs/1.log")
-        store.add_batch("batch-002", "/dispatch/2.csv", 1, "/logs/2.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 1, "/logs/1.log")
+        store.add_batch("batch-002", "/dispatch/2.csv", None, 1, "/logs/2.log")
         store.complete_batch("batch-001", 0)
         running = store.get_running_batches()
         assert len(running) == 1
@@ -541,21 +541,24 @@ class TestRecoverInFlight:
     def test_no_running_batches_does_nothing(self, tmp_path):
         store = StateStore(str(tmp_path / "test.db"))
         pending = deque()
-        recover_in_flight(store, pending)
+        specs = recover_in_flight(store, pending)
         assert len(pending) == 0
+        assert specs == []
 
-    def test_resets_dispatched_slides_to_pending(self, tmp_path):
+    def test_resets_dispatched_slides_when_work_dir_missing(self, tmp_path):
+        """When work dir is missing/None, slides are reset to PENDING."""
         store = StateStore(str(tmp_path / "test.db"))
         store.add_slide("/slides/a.svs", "a")
-        store.add_batch("batch-001", "/dispatch/1.csv", 1, "/logs/1.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 1, "/logs/1.log")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
-        recover_in_flight(store, deque())
+        specs = recover_in_flight(store, deque())
+        assert specs == []
         assert len(store.get_pending_slides()) == 1
 
-    def test_marks_interrupted_batch_as_failed(self, tmp_path):
+    def test_marks_interrupted_batch_as_failed_when_no_work_dir(self, tmp_path):
         store = StateStore(str(tmp_path / "test.db"))
         store.add_slide("/slides/a.svs", "a")
-        store.add_batch("batch-001", "/dispatch/1.csv", 1, "/logs/1.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 1, "/logs/1.log")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
         recover_in_flight(store, deque())
         row = store._conn().execute(
@@ -563,28 +566,51 @@ class TestRecoverInFlight:
         ).fetchone()
         assert row["status"] == "FAILED"
 
-    def test_re_enqueues_recovered_slides(self, tmp_path):
+    def test_re_enqueues_recovered_slides_when_no_work_dir(self, tmp_path):
         store = StateStore(str(tmp_path / "test.db"))
         store.add_slide("/slides/a.svs", "a")
         store.add_slide("/slides/b.svs", "b")
-        store.add_batch("batch-001", "/dispatch/1.csv", 2, "/logs/1.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 2, "/logs/1.log")
         store.mark_dispatched(["/slides/a.svs", "/slides/b.svs"], "batch-001")
         pending = deque()
         recover_in_flight(store, pending)
         assert len(pending) == 2
         assert {s["slide_path"] for s in pending} == {"/slides/a.svs", "/slides/b.svs"}
 
+    def test_returns_resume_spec_when_work_dir_exists(self, tmp_path):
+        """When work dir and csv both exist, returns resume spec instead of resetting to PENDING."""
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("/slides/a.svs", "a")
+        work_dir = tmp_path / "batch-001" / "work"
+        work_dir.mkdir(parents=True)
+        csv_path = tmp_path / "batch-001.csv"
+        csv_path.write_text("slide_id,slide_path\na,/slides/a.svs\n")
+        store.add_batch("batch-001", str(csv_path), str(work_dir), 1, "/logs/1.log")
+        store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        pending = deque()
+        specs = recover_in_flight(store, pending)
+        # Slides stay DISPATCHED (not reset to PENDING) — will be handled by resume run
+        assert len(pending) == 0
+        assert len(specs) == 1
+        assert specs[0] == ("batch-001", str(csv_path), str(work_dir))
+        # Batch should still be RUNNING (not marked FAILED)
+        row = store._conn().execute(
+            "SELECT status FROM batches WHERE batch_id=?", ("batch-001",)
+        ).fetchone()
+        assert row["status"] == "RUNNING"
+
     def test_does_not_re_enqueue_already_succeeded_slides(self, tmp_path):
         store = StateStore(str(tmp_path / "test.db"))
         store.add_slide("/slides/a.svs", "a")
-        store.add_batch("batch-001", "/dispatch/1.csv", 1, "/logs/1.log")
+        store.add_batch("batch-001", "/dispatch/1.csv", None, 1, "/logs/1.log")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
         store.complete_batch("batch-001", exit_code=0)
         store.mark_slides_complete("batch-001", succeeded=True)
         pending = deque()
-        recover_in_flight(store, pending)
+        specs = recover_in_flight(store, pending)
         # Batch is not RUNNING, so no recovery occurs
         assert len(pending) == 0
+        assert specs == []
 
 
 # ---------------------------------------------------------------------------
@@ -1073,7 +1099,7 @@ class TestCleanup:
         log_file = tmp_path / "old_batch.log"
         log_file.write_text("nextflow output\n")
 
-        state.add_batch("old_batch", str(tmp_path / "old.csv"), 5, str(log_file))
+        state.add_batch("old_batch", str(tmp_path / "old.csv"), None, 5, str(log_file))
         # Manually backdate completed_at to 40 days ago
         old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
         conn = state._conn()
@@ -1101,7 +1127,7 @@ class TestCleanup:
         log_file = tmp_path / "recent_batch.log"
         log_file.write_text("nextflow output\n")
 
-        state.add_batch("recent_batch", str(tmp_path / "recent.csv"), 5, str(log_file))
+        state.add_batch("recent_batch", str(tmp_path / "recent.csv"), None, 5, str(log_file))
         recent_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
         conn = state._conn()
         conn.execute(

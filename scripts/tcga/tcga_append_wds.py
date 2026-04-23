@@ -107,19 +107,28 @@ def _s3_parts(s3_uri: str) -> tuple[str, str]:
     return bucket, key
 
 
-def _s3_upload(local_path: Path, s3_uri: str) -> None:
+def _s3_transfer_config(max_concurrency: int = 4):
+    from boto3.s3.transfer import TransferConfig
+    return TransferConfig(max_concurrency=max_concurrency)
+
+
+def _s3_upload(local_path: Path, s3_uri: str, max_concurrency: int = 4) -> None:
     import boto3
     bucket, key = _s3_parts(s3_uri)
-    boto3.client("s3").upload_file(str(local_path), bucket, key)
+    boto3.client("s3").upload_file(
+        str(local_path), bucket, key, Config=_s3_transfer_config(max_concurrency)
+    )
     log.debug("Uploaded %s → %s", local_path.name, s3_uri)
 
 
-def _s3_download(s3_uri: str, local_path: Path) -> bool:
+def _s3_download(s3_uri: str, local_path: Path, max_concurrency: int = 4) -> bool:
     import boto3
     from botocore.exceptions import ClientError
     bucket, key = _s3_parts(s3_uri)
     try:
-        boto3.client("s3").download_file(bucket, key, str(local_path))
+        boto3.client("s3").download_file(
+            bucket, key, str(local_path), Config=_s3_transfer_config(max_concurrency)
+        )
         return True
     except ClientError as exc:
         if exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
@@ -131,24 +140,24 @@ def _s3_download(s3_uri: str, local_path: Path) -> bool:
 # Index management
 # ---------------------------------------------------------------------------
 
-def _load_index(wds_dest: str, model: str, staging_dir: Path | None) -> dict:
+def _load_index(wds_dest: str, model: str, staging_dir: Path | None, s3_max_concurrency: int = 4) -> dict:
     if _is_s3(wds_dest):
         assert staging_dir, "--staging-dir required for S3 destinations"
         tmp = staging_dir / model / "wds_index.json"
         tmp.parent.mkdir(parents=True, exist_ok=True)
         index_uri = f"{wds_dest.rstrip('/')}/{model}/wds_index.json"
-        return json.loads(tmp.read_text()) if (_s3_download(index_uri, tmp) and tmp.exists()) else {}
+        return json.loads(tmp.read_text()) if (_s3_download(index_uri, tmp, s3_max_concurrency) and tmp.exists()) else {}
     else:
         p = Path(wds_dest) / model / "wds_index.json"
         return json.loads(p.read_text()) if p.exists() else {}
 
 
-def _save_index(index: dict, wds_dest: str, model: str, staging_dir: Path | None) -> None:
+def _save_index(index: dict, wds_dest: str, model: str, staging_dir: Path | None, s3_max_concurrency: int = 4) -> None:
     data = json.dumps(index, indent=2, sort_keys=True)
     if _is_s3(wds_dest):
         tmp = staging_dir / model / "wds_index.json"
         tmp.write_text(data)
-        _s3_upload(tmp, f"{wds_dest.rstrip('/')}/{model}/wds_index.json")
+        _s3_upload(tmp, f"{wds_dest.rstrip('/')}/{model}/wds_index.json", s3_max_concurrency)
     else:
         p = Path(wds_dest) / model / "wds_index.json"
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +181,7 @@ class _ShardWriter:
         staging_dir: Path | None,
         max_shard_bytes: int,
         dry_run: bool = False,
+        s3_max_concurrency: int = 4,
     ):
         self._wds_dest = wds_dest
         self._model = model
@@ -180,6 +190,7 @@ class _ShardWriter:
         self._max_shard_bytes = max_shard_bytes
         self._dry_run = dry_run
         self._use_s3 = _is_s3(wds_dest)
+        self._s3_max_concurrency = s3_max_concurrency
 
         if self._use_s3:
             assert staging_dir, "--staging-dir required for S3 destinations"
@@ -246,7 +257,7 @@ class _ShardWriter:
         if self._current_path and self._use_s3 and not self._dry_run:
             s3_uri = (f"{self._wds_dest.rstrip('/')}/{self._model}/"
                       f"{self._project_id}/{self._current_path.name}")
-            _s3_upload(self._current_path, s3_uri)
+            _s3_upload(self._current_path, s3_uri, self._s3_max_concurrency)
             self._current_path.unlink()
         self._current_index += 1
         self._current_path = None
@@ -257,7 +268,7 @@ class _ShardWriter:
         if self._current_path and self._use_s3 and not self._dry_run:
             s3_uri = (f"{self._wds_dest.rstrip('/')}/{self._model}/"
                       f"{self._project_id}/{self._current_path.name}")
-            _s3_upload(self._current_path, s3_uri)
+            _s3_upload(self._current_path, s3_uri, self._s3_max_concurrency)
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +291,7 @@ def append_wds(
     slide_id_filter: set[str] | None = None,
     delete_local: bool = False,
     manifest_csv: Path | None = None,
+    s3_max_concurrency: int = 4,
 ) -> dict:
     """Append all .features.pt files in pt_dir to WDS shards.
 
@@ -288,6 +300,7 @@ def append_wds(
     after all writers have been flushed (i.e. after S3 upload completes).
     If manifest_csv is set, appends rows (slide_id, model, wds_path) to that
     CSV so callers can look up the full S3 shard path for each slide.
+    s3_max_concurrency limits boto3 multipart threads per upload/download.
     Returns the updated index dict.
     """
     # Build slide_id → project_id lookup from inventory
@@ -295,7 +308,7 @@ def append_wds(
     inv["slide_id"] = inv["file_name"].apply(lambda fn: fn.split(".")[0])
     slide_to_project: dict[str, str] = dict(zip(inv["slide_id"], inv["project_id"]))
 
-    index = _load_index(wds_dest, model_type, staging_dir)
+    index = _load_index(wds_dest, model_type, staging_dir, s3_max_concurrency)
     already_indexed = set(index.keys())
     log.info("Loaded index: %d slides already in WDS", len(already_indexed))
 
@@ -344,6 +357,7 @@ def append_wds(
                 staging_dir=staging_dir,
                 max_shard_bytes=max_shard_bytes,
                 dry_run=dry_run,
+                s3_max_concurrency=s3_max_concurrency,
             )
 
         shard_name = writers[project_id].append(slide_id, features, coords)
@@ -393,7 +407,7 @@ def append_wds(
     log.info("Done: %d appended, %d already indexed", n_appended, n_skipped)
 
     if n_appended > 0 and not dry_run:
-        _save_index(index, wds_dest, model_type, staging_dir)
+        _save_index(index, wds_dest, model_type, staging_dir, s3_max_concurrency)
         log.info("Updated wds_index.json (%d total entries)", len(index))
 
     return index
@@ -447,6 +461,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Delete local .pt and .patch.h5 source files after they are "
                              "successfully flushed to WDS (including S3 upload). "
                              "Has no effect with --dry-run.")
+    parser.add_argument("--s3-max-concurrency", type=int, default=4,
+                        help="Maximum number of parallel boto3 transfer threads per S3 "
+                             "upload/download (default: 4). Reduce to limit ECS endpoint load "
+                             "when multiple batches are running concurrently.")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
@@ -512,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
                 slide_id_filter=slide_id_filter,
                 delete_local=args.delete_local,
                 manifest_csv=Path(args.manifest_csv) if args.manifest_csv else None,
+                s3_max_concurrency=args.s3_max_concurrency,
             )
         except Exception as exc:
             log.error("Failed to append WDS for model %s: %s", model, exc)

@@ -746,7 +746,7 @@ class TestTcgaWatcher:
         slide = {"slide_id": "slide-E", "slide_path": str(tmp_path / "dl/u/E.svs"),
                  "file_id": "u", "file_name": "E.svs"}
 
-        fake_result = mock.Mock(returncode=1, stderr="network error")
+        fake_result = mock.Mock(returncode=1, stdout="", stderr="network error")
         with mock.patch("subprocess.run", return_value=fake_result):
             watcher._download_and_enqueue(slide)
 

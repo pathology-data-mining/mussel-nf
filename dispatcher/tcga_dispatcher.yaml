@@ -44,9 +44,10 @@ watchers:
     # s3_access_key: ...   # or set ECS_ACCESS_KEY env var
     # s3_secret_key: ...   # or set ECS_SECRET_KEY env var
 
-    # Optional: restrict to a single project or slide type
+    # Optional: restrict to a single project or slide/sample type
     # project: TCGA-BRCA
-    slide_type: DX
+    slide_type: DX         # DX = all diagnostic slides (DX1, DX2, …); or DX1 for primary only
+    sample_type: Primary Tumor  # GDC sample_type filter; "tumor" also matches Metastatic + Recurrent
 
     # How often to poll the GDC inventory (seconds)
     poll_interval_seconds: 3600

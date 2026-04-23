@@ -146,7 +146,8 @@ class WatcherConfig:
     s3_access_key: str = ""
     s3_secret_key: str = ""
     project: str = ""
-    slide_type: str = "DX1"
+    slide_type: str = "DX"
+    sample_type: str = "Primary Tumor"   # GDC sample_type substring filter; "all" to disable
     download_enabled: bool = False
     download_dir: str = ""
     download_concurrency: int = 4
@@ -777,6 +778,8 @@ class TcgaWatcher(threading.Thread):
             prepare_args += ["--project", self.cfg.project]
         if self.cfg.slide_type and self.cfg.slide_type.lower() != "all":
             prepare_args += ["--slide-type", self.cfg.slide_type]
+        if self.cfg.sample_type and self.cfg.sample_type.lower() != "all":
+            prepare_args += ["--sample-type", self.cfg.sample_type]
 
         rc = self._run_script("tcga_prepare_samples.py", prepare_args)
         if rc == 2:

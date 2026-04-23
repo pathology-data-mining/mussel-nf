@@ -1,14 +1,70 @@
 #!/usr/bin/env python3
 """
-mussel-dispatcher.py — Streaming sample processor for mussel-nf.
+mussel-dispatcher.py — Streaming slide dispatcher for mussel-nf.
 
-Watches local directories and/or S3 buckets for new slide files, accumulates
-them into batches, and dispatches each batch as a separate `nextflow run`
-subprocess with its own isolated work directory.
+Watches slide sources for new WSI files, accumulates them into batches,
+and dispatches each batch as a parallel `nextflow run` subprocess.
+Optionally runs post-batch hooks (e.g. WDS shard append) after each
+successful run.
 
-Usage:
-    python mussel-dispatcher.py dispatcher.yaml
-    python mussel-dispatcher.py collect-manifests dispatcher.yaml
+SUBCOMMANDS
+-----------
+  run (default)
+    python mussel-dispatcher.py <config.yaml>
+
+    Start the dispatcher.  Runs until interrupted (SIGINT / SIGTERM).
+    Crashed or interrupted runs are automatically recovered on restart —
+    in-flight slides are re-enqueued and duplicate work is avoided via the
+    SQLite StateStore.
+
+  collect-manifests
+    python mussel-dispatcher.py collect-manifests <config.yaml>
+
+    Scan outdir for per-run manifest-*.csv files written by the nextflow
+    pipeline and merge them into a single combined manifest CSV at
+    <outdir>/manifest-combined.csv (or config.combined_manifest_path).
+
+  help
+    python mussel-dispatcher.py --help
+    python mussel-dispatcher.py -h
+
+    Show this message and exit.
+
+WATCHERS
+--------
+  local   — polls a directory for new slide files
+  s3      — polls an S3-compatible bucket prefix
+  tcga    — syncs TCGA GDC inventory, resolves paths, optionally downloads
+
+  Multiple watchers can run in parallel.  See tcga_dispatcher.yaml and
+  dispatcher.yaml for annotated examples.
+
+CONFIG KEYS (top level)
+-----------------------
+  repo_dir              Path to the mussel-nf checkout (required)
+  nextflow_profiles     Comma-separated NF profiles, e.g. "cluster,apptainer"
+  outdir                Nextflow --outdir
+  work_base_dir         Root for per-batch NF work directories
+  dispatch_dir          Where batch samples CSVs are written
+  state_dir             SQLite state DB directory
+  log_dir               Per-batch NF log files
+
+  batch_size            Slides per NF run (default 20)
+  min_batch_size        Minimum to dispatch; always flushed at shutdown (default 1)
+  max_wait_seconds      Time trigger: dispatch a partial batch after N s (default 300)
+  max_concurrent_runs   Parallel Nextflow jobs (default 2)
+  retry_failed          Re-enqueue slides from crashed batches on restart (default true)
+  cleanup_work_dir      Delete NF work dir after each successful batch (default false)
+
+  post_batch_hooks      List of {command, args} run after each successful NF run.
+                        Template vars: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
+
+  watchers              List of watcher configs (see WATCHERS above)
+
+EXIT CODES
+----------
+  0   Normal exit after all watchers stop and queues are drained
+  1   Fatal configuration or startup error
 """
 
 import csv
@@ -964,9 +1020,9 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: mussel-dispatcher.py [collect-manifests] <config.yaml>", file=sys.stderr)
-        sys.exit(1)
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0 if len(sys.argv) > 1 else 1)
 
     # Subcommand: collect-manifests <config.yaml>
     if sys.argv[1] == "collect-manifests":

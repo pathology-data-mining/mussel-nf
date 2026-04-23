@@ -1,30 +1,17 @@
 # tcga_dispatcher.yaml — streaming TCGA feature extraction via mussel-dispatcher
 #
-# Replaces the sequential tcga_run.py loop with a streaming architecture:
-#   - TcgaWatcher polls the GDC inventory and resolves slide paths
-#   - Slides available on disk/S3 are enqueued immediately
-#   - Slides needing download are fetched in a background thread pool,
-#     then enqueued as each download completes
-#   - BatchScheduler accumulates slides and fires nextflow runs when
-#     batch_size is reached or max_wait_seconds elapses
-#   - RunManager runs up to max_concurrent_runs NF jobs in parallel
-#   - post_batch_hooks append features to WDS shards after each NF run
-#
-# Net effect: downloads for the next batch overlap with featurization of
-# the current batch, and multiple NF runs execute concurrently.
-#
 # Usage:
 #   python dispatcher/mussel-dispatcher.py dispatcher/tcga_dispatcher.yaml
 #
-# All /path/to/... entries are placeholders — replace before running.
+# Directory defaults (relative to this file's location):
+#   repo_dir      → ../          (mussel-nf root)
+#   work_base_dir → work/
+#   dispatch_dir  → batches/
+#   state_dir     → state/
+#   log_dir       → logs/
 
-repo_dir: /path/to/mussel-nf
 nextflow_profiles: cluster,apptainer
 outdir: /path/to/tcga-results
-work_base_dir: /path/to/dispatcher/work
-dispatch_dir: /path/to/dispatcher/batches
-state_dir: /path/to/dispatcher/state
-log_dir: /path/to/dispatcher/logs
 
 # Run up to 2 Nextflow jobs simultaneously
 max_concurrent_runs: 2
@@ -47,7 +34,7 @@ watchers:
     # Feature model to check completion status against
     model: ctranspath
 
-    # Slide source — at least one of local_slides_dir or s3_base must be set.
+    # Slide source b�� at least one of local_slides_dir or s3_base must be set.
     # Slides are resolved: local disk → S3 → needs_download (in that order).
     local_slides_dir: /path/to/slides
     # s3_base: s3://bucket/path/to/slides
@@ -67,7 +54,7 @@ watchers:
 
     # Download slides not yet on disk or S3.
     # Each download runs in a background thread; slides are enqueued individually
-    # as they complete, so featurization of ready slides is not blocked.
+    # as they complete so featurization of ready slides is not blocked.
     download_enabled: true
     download_dir: /path/to/downloads
     download_concurrency: 4
@@ -75,10 +62,6 @@ watchers:
 
 # Post-batch hooks run after each successful Nextflow job.
 # Template variables: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
-#
-# {batch_csv} is the dispatcher's samples CSV for the batch — it has a
-# slide_id column, which tcga_append_wds --slide-ids-csv uses to restrict
-# the WDS append to only the slides in this batch.
 post_batch_hooks:
   - command: "python {repo_dir}/scripts/tcga/tcga_append_wds.py"
     args:

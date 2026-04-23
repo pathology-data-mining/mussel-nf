@@ -41,22 +41,29 @@ WATCHERS
 
 CONFIG KEYS (top level)
 -----------------------
-  repo_dir              Path to the mussel-nf checkout (required)
-  nextflow_profiles     Comma-separated NF profiles, e.g. "cluster,apptainer"
-  outdir                Nextflow --outdir
-  work_base_dir         Root for per-batch NF work directories
-  dispatch_dir          Where batch samples CSVs are written
-  state_dir             SQLite state DB directory
-  log_dir               Per-batch NF log files
+  Required:
+    nextflow_profiles   Comma-separated NF profiles, e.g. "cluster,apptainer"
+    outdir              Nextflow --outdir (absolute, or relative to config file)
 
-  batch_size            Slides per NF run (default 20)
-  min_batch_size        Minimum to dispatch; always flushed at shutdown (default 1)
-  max_wait_seconds      Time trigger: dispatch a partial batch after N s (default 300)
-  max_concurrent_runs   Parallel Nextflow jobs (default 2)
-  retry_failed          Re-enqueue slides from crashed batches on restart (default true)
-  cleanup_work_dir      Delete NF work dir after each successful batch (default false)
+  Optional directory overrides (all default to paths relative to the config file):
+    repo_dir            mussel-nf root          (default: ..)
+    work_base_dir       Per-batch NF work dirs  (default: work/)
+    dispatch_dir        Batch samples CSVs      (default: batches/)
+    state_dir           SQLite state DB         (default: state/)
+    log_dir             Per-batch NF logs       (default: logs/)
 
-  post_batch_hooks      List of {command, args} run after each successful NF run.
+  Batching / parallelism:
+    batch_size          Slides per NF run (default 20)
+    min_batch_size      Minimum to dispatch; always flushed at shutdown (default 1)
+    max_wait_seconds    Time trigger: dispatch a partial batch after N s (default 300)
+    max_concurrent_runs Parallel Nextflow jobs (default 2)
+
+  Behaviour:
+    retry_failed        Re-enqueue slides from crashed batches on restart (default true)
+    cleanup_work_dir    Delete NF work dir after each successful batch (default false)
+
+  Hooks:
+    post_batch_hooks    List of {command, args} run after each successful NF run.
                         Template vars: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
 
   watchers              List of watcher configs (see WATCHERS above)
@@ -143,13 +150,18 @@ class WatcherConfig:
 
 @dataclass
 class Config:
-    repo_dir: str
+    # Required
     nextflow_profiles: str
     outdir: str
-    work_base_dir: str
-    dispatch_dir: str
-    state_dir: str
-    log_dir: str
+
+    # Optional — default to paths relative to the config file's directory.
+    # repo_dir defaults to the parent of the config file's directory (i.e. mussel-nf/
+    # when the config lives in mussel-nf/dispatcher/).
+    repo_dir: str = ""
+    work_base_dir: str = ""   # default: <config_dir>/work
+    dispatch_dir: str = ""    # default: <config_dir>/batches
+    state_dir: str = ""       # default: <config_dir>/state
+    log_dir: str = ""         # default: <config_dir>/logs
 
     max_concurrent_runs: int = 2
     batch_size: int = 20
@@ -173,8 +185,26 @@ class Config:
 
     @classmethod
     def load(cls, path: str) -> "Config":
+        config_dir = os.path.dirname(os.path.abspath(path))
+
         with open(path) as f:
             raw = yaml.safe_load(f)
+
+        # Resolve directory paths relative to the config file's location.
+        # Absolute paths in the config are passed through unchanged.
+        def _resolve(key: str, default: str) -> str:
+            val = raw.get(key, "") or default
+            return val if os.path.isabs(val) else os.path.join(config_dir, val)
+
+        raw["repo_dir"]      = _resolve("repo_dir",      "..")
+        raw["work_base_dir"] = _resolve("work_base_dir", "work")
+        raw["dispatch_dir"]  = _resolve("dispatch_dir",  "batches")
+        raw["state_dir"]     = _resolve("state_dir",     "state")
+        raw["log_dir"]       = _resolve("log_dir",       "logs")
+        # outdir: also resolve relative to config dir if not absolute
+        outdir = raw.get("outdir", "")
+        if outdir and not os.path.isabs(outdir):
+            raw["outdir"] = os.path.join(config_dir, outdir)
 
         watcher_cfgs = []
         for w in raw.pop("watchers", []):

@@ -1,14 +1,16 @@
 # mussel-dispatcher configuration
-# Copy this file and edit paths before running.
-# All /path/to/... entries are placeholders — replace with absolute paths for your site.
+# Copy this file into mussel-nf/dispatcher/ and edit before running.
+#
+# Directory defaults (relative to this file's location):
+#   repo_dir      → ../          (mussel-nf root)
+#   work_base_dir → work/
+#   dispatch_dir  → batches/
+#   state_dir     → state/
+#   log_dir       → logs/
+# Override any of them by setting an absolute path below.
 
-repo_dir: /path/to/mussel-nf          # root of this repository checkout
 nextflow_profiles: cluster,conda
-outdir: /path/to/results              # nextflow --outdir; manifest CSVs are written here
-work_base_dir: /path/to/work/dispatcher
-dispatch_dir: /path/to/dispatcher/batches
-state_dir: /path/to/dispatcher/state
-log_dir: /path/to/dispatcher/logs
+outdir: /path/to/results          # nextflow --outdir; manifest CSVs are written here
 
 # Parallelism
 max_concurrent_runs: 2
@@ -21,8 +23,6 @@ max_wait_seconds: 300    # dispatch after this many seconds regardless of batch_
 # Behaviour
 retry_failed: true       # re-queue slides whose batch failed on restart
 cleanup_work_dir: false  # delete per-batch work/ dirs after success
-# combined_manifest_path: /path/to/results/manifest-combined.csv
-#   ^ defaults to {outdir}/manifest-combined.csv if not set
 
 # Optional: run commands after each successful Nextflow batch.
 # Template vars: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
@@ -54,7 +54,7 @@ watchers:
   #   # endpoint_url: http://pmindecs.mskcc.org:9020
 
   # Uncomment to watch TCGA GDC for new slides.
-  # See dispatcher/tcga_dispatcher.yaml for a fully annotated TCGA example.
+  # See tcga_dispatcher.yaml for a fully annotated TCGA example.
   #
   # - type: tcga
   #   inventory_csv: /path/to/tcga_inventory.csv   # managed by tcga_sync_inventory.py
@@ -66,7 +66,7 @@ watchers:
   #   slide_type: DX1                              # DX1, DX2, or all
   #   # project: TCGA-BRCA                         # restrict to one project; omit for all
   #   poll_interval_seconds: 3600
-  #   gdc_max_age_hours: 24.0                      # re-use cached inventory if younger than this
+  #   gdc_max_age_hours: 24.0
   #   download_enabled: false                      # set true to auto-download via gdc-client
   #   download_dir: /path/to/downloads
   #   download_concurrency: 4

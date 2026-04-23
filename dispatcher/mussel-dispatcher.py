@@ -770,7 +770,7 @@ class TcgaWatcher(threading.Thread):
         if self.cfg.local_slides_dir:
             prepare_args += ["--local-slides-dir", self.cfg.local_slides_dir]
         if self.cfg.s3_base:
-            prepare_args += ["--s3-base", self.cfg.s3_base]
+            prepare_args += ["--s3-base", self.cfg.s3_base, "--check-s3-exists"]
         if self.cfg.s3_endpoint:
             prepare_args += ["--s3-endpoint", self.cfg.s3_endpoint]
         if self.cfg.project:

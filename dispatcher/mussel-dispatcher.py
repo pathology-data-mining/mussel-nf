@@ -384,9 +384,16 @@ class StateStore:
         ).fetchone()
         return row is not None
 
+    def is_known_by_id(self, slide_id: str) -> bool:
+        """Return True if the slide_id already has any record in the DB (any status)."""
+        row = self._conn().execute(
+            "SELECT status FROM slides WHERE slide_id = ?", (slide_id,)
+        ).fetchone()
+        return row is not None
+
     def get_pending_slides(self) -> list:
         rows = self._conn().execute(
-            "SELECT slide_path, slide_id FROM slides WHERE status = 'PENDING'"
+            "SELECT slide_path, slide_id FROM slides WHERE status = 'PENDING' AND slide_path != ''"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -700,6 +707,7 @@ class TcgaWatcher(threading.Thread):
         self.stop_event = stop_event
         self._outdir = outdir
         self._scripts_dir = cfg.scripts_dir or str(Path(repo_dir) / "scripts" / "tcga")
+        self._downloads_in_progress: set[str] = set()  # slide_ids currently being downloaded
         self._download_executor = ThreadPoolExecutor(
             max_workers=max(1, cfg.download_concurrency),
             thread_name_prefix="gdc-download",
@@ -826,8 +834,11 @@ class TcgaWatcher(threading.Thread):
         # Kick off downloads for slides not yet available
         if self.cfg.download_enabled and needs_dl:
             for s in needs_dl:
-                if not self.state.is_known(s["slide_path"]):
-                    self.state.add_slide(s["slide_path"], s["slide_id"])
+                slide_id = s["slide_id"]
+                # Guard against re-submitting an already-in-progress download.
+                # Use slide_id (not empty slide_path) as the key.
+                if slide_id not in self._downloads_in_progress and not self.state.is_known_by_id(slide_id):
+                    self._downloads_in_progress.add(slide_id)
                     self._download_executor.submit(self._download_and_enqueue, s)
         elif needs_dl:
             log.info(
@@ -878,16 +889,20 @@ class TcgaWatcher(threading.Thread):
                 "TcgaWatcher: gdc-client failed for %s (exit %d):\n%s",
                 slide_id, result.returncode, output[-2000:],
             )
+            self._downloads_in_progress.discard(slide_id)
             return
 
         if dest_path.exists():
             log.info("TcgaWatcher: downloaded %s → %s", slide_id, dest_path)
             slide_path = str(dest_path)
+            self.state.add_slide(slide_path, slide_id)
             self.pending.append({"slide_id": slide_id, "slide_path": slide_path})
             # Record the download directory so cleanup can remove it after featurization.
             self.state.set_download_path(slide_path, str(dest_path.parent))
+            self._downloads_in_progress.discard(slide_id)
         else:
             log.error("TcgaWatcher: gdc-client exited 0 but %s not found", dest_path)
+            self._downloads_in_progress.discard(slide_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1095,6 +1110,9 @@ class NextflowRunner:
             writer = csv.DictWriter(f, fieldnames=["slide_id", "slide_path", "oncotree_code"])
             writer.writeheader()
             for s in self.slides:
+                if not s.get("slide_path"):
+                    log.warning("Skipping slide %s with empty slide_path", s.get("slide_id"))
+                    continue
                 writer.writerow({
                     "slide_id": s["slide_id"],
                     "slide_path": s["slide_path"],
@@ -1155,9 +1173,9 @@ class BatchScheduler:
                 return
 
             batch = []
-            while self._pending:
+            while self._pending and len(batch) < self.cfg.batch_size:
                 batch.append(self._pending.popleft())
-            self._first_seen_at = None
+            self._first_seen_at = None if not self._pending else self._first_seen_at
 
         if batch:
             log.info("Dispatching batch of %d slides (force=%s, size_trigger=%s, time_trigger=%s)",

@@ -742,7 +742,7 @@ class TcgaWatcher(threading.Thread):
     Because downloads happen in a background thread pool and enqueue slides
     individually as they finish, featurization of already-downloaded slides
     can overlap with downloads of the next batch — the key scheduling win
-    over the sequential tcga_run.py loop.
+    over a sequential single-threaded orchestration loop.
     """
 
     def __init__(

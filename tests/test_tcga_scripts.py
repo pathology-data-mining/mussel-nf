@@ -1,6 +1,6 @@
 """End-to-end tests for the scripts/tcga/ pipeline.
 
-Covers the three core data-processing steps executed by tcga_run.py:
+Covers the core data-processing steps used by the mussel-dispatcher:
 
     1. tcga_update_status  — scan a results directory → status CSV
     2. tcga_prepare_samples — resolve paths (local → S3 → needs_download)

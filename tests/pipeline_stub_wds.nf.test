@@ -1,0 +1,19 @@
+nextflow_pipeline {
+    name   "MUSSEL one-step + WDS sharding — stub mode"
+    script "../main.nf"
+    profile "test_stub_wds"
+    options "-stub"
+
+    // Exercises: TESSELLATE_FEATURIZE_BATCH → WDS_SHARD
+    test("WDS stub workflow succeeds and publishes a shard tar") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            assert path("${outputDir}/features/resnet50/948176.features.pt").exists()
+            // WDS shard published under wds/{model_type}/{group}/
+            assert path("${outputDir}/wds/resnet50/all/000000.tar").exists()
+        }
+    }
+}

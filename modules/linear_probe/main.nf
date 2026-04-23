@@ -1,23 +1,25 @@
 
 process MERGE_ANNOTATION_FEATURES {
-    label "hugeTask"
+    label "bigTask"
 
     publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
 
     input:
-    tuple val(meta), val(model_type), path(features_h5), path(annotation_bmp) 
+    tuple val(meta), val(model_type), path(features_h5), path(annotation_bmp)
     path(class_mapping_yaml)
 
     output:
-    tuple val(model_type), path("${meta.slide_id}.annotation_features.parquet"), optional: true
+    tuple val(model_type), path("${meta.slide_id}.annotation_features.parquet"), optional: true, emit: parquet
+    tuple val(meta), val("${model_type}_annotation_features_path"), val("annotation_features/${model_type}/${meta.slide_id}.annotation_features.parquet"), path("${meta.slide_id}.annotation_features.parquet"), optional: true, topic: slide_meta
 
     script:
+    class_mapping_str = class_mapping_yaml.name != 'NO_FILE' ? "class_mapping_yaml_path='${class_mapping_yaml}'" : ""
     """
     merge_annotation_features \
         features_h5_path=${features_h5} \
         annotation_bmp_path=${annotation_bmp} \
         output_parquet_path=${meta.slide_id}.annotation_features.parquet \
-        class_mapping_yaml_path='${class_mapping_yaml}' \
+        ${class_mapping_str} \
         slide_id=${meta.slide_id}
     """
 }
@@ -35,7 +37,7 @@ process STACK_ANNOTATION_FEATURES {
 
     script:
     """
-    #!/usr/bin/env python
+    #!/usr/bin/env python3
     import pandas as pd
     files = "${annotation_features}".split()
     dfs = [pd.read_parquet(file) for file in files]
@@ -92,21 +94,40 @@ process LINEAR_PROBE_BENCHMARK {
 
 workflow LINEAR_PROBE {
     take:
-        ch_annotations // meta, annotation_bmp_path
-        ch_h5_features // meta, model_type, h5_features
+        ch_annotations // tuple val(meta), file(annotation_bmp_path)
+        ch_h5_features // tuple val(meta), val(model_type), path(h5_features)
 
     main:
-        if (params.linear_probe.annotation_class_mapping_yaml) {
-            ch_features_ann = ch_h5_features.map{tuple(it[0].slide_id, *it)}.combine(ch_annotations.map{tuple(it[0].slide_id, *it.tail())}, by: 0).map{it.tail()}
-            ch_benchmark = MERGE_ANNOTATION_FEATURES(ch_features_ann, file(params.linear_probe.annotation_class_mapping_yaml)) | \
-                groupTuple | \
-                STACK_ANNOTATION_FEATURES | \
-                LINEAR_PROBE_BENCHMARK
+        if (params.linear_probe.annotations_csv) {
+            if (!params.linear_probe.annotation_class_mapping_yaml) {
+                log.warn "params.linear_probe.annotation_class_mapping_yaml is not set — linear probe benchmarking will be skipped"
+            } else {
+                // Broadcast each annotation BMP to all model types for that slide using combine(by: slide_id).
+                // combine (not join) is used because ch_h5_features has one row per (slide, model_type).
+                ch_features_ann = ch_h5_features
+                    .map { meta, model_type, h5 -> tuple(meta.slide_id, meta, model_type, h5) }
+                    .combine(
+                        ch_annotations.map { meta, bmp -> tuple(meta.slide_id, bmp) },
+                        by: 0
+                    )
+                    .map { _id, meta, model_type, h5, bmp -> tuple(meta, model_type, h5, bmp) }
 
-            ch_benchmark.results_json
-                | map { model_type, json -> [model_type, json] }
-                | collect(flat: false)
-                | SUMMARIZE_LINEAR_PROBE
+                MERGE_ANNOTATION_FEATURES(
+                    ch_features_ann,
+                    params.linear_probe.annotation_class_mapping_yaml
+                        ? file(params.linear_probe.annotation_class_mapping_yaml)
+                        : file("NO_FILE", checkIfExists: false)
+                )
+
+                MERGE_ANNOTATION_FEATURES.out.parquet \
+                    | groupTuple \
+                    | STACK_ANNOTATION_FEATURES \
+                    | LINEAR_PROBE_BENCHMARK
+
+                LINEAR_PROBE_BENCHMARK.out.results_json \
+                    | collect(flat: false) \
+                    | SUMMARIZE_LINEAR_PROBE
+            }
         }
 
 }
@@ -124,10 +145,9 @@ process SUMMARIZE_LINEAR_PROBE {
     path "summary.png"
 
     script:
-    // Build a space-separated list of  "model_type:path"  pairs to pass to the script
     def pairs_str = model_json_pairs.collect { model, json -> "${model}:${json}" }.join(" ")
     """
-    #!/usr/bin/env python
+    #!/usr/bin/env python3
     import json, pathlib, math
     import pandas as pd
     import matplotlib
@@ -135,7 +155,7 @@ process SUMMARIZE_LINEAR_PROBE {
     import matplotlib.pyplot as plt
     import numpy as np
 
-    pairs_str = """" + pairs_str + """"
+    pairs_str = "${pairs_str}"
 
     rows = []
     for token in pairs_str.split():
@@ -168,7 +188,6 @@ process SUMMARIZE_LINEAR_PROBE {
     df = df.sort_values(primary, ascending=False)
     df.to_csv("summary.csv", index=False)
 
-    # --- Bar chart with 95% CI error bars ---
     models = df["model"].tolist()
     means  = df[primary].tolist()
     ci_lo  = primary.replace("_mean", "_ci95_lo")
@@ -202,4 +221,3 @@ process SUMMARIZE_LINEAR_PROBE {
     print("Summary written: summary.csv, summary.png")
     """
 }
-

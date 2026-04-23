@@ -15,6 +15,7 @@ timestamp = new Date().getTime()
 // nextflow.preview.topic = true
 
 include { MUSSEL } from './modules/mussel'
+include { DOWNLOAD_SLIDE } from './modules/download'
 
 
 // ── Pre-flight validation (replaces workflow.onStart removed in NF 25.x) ─────
@@ -90,10 +91,27 @@ workflow {
             tuple(enriched_meta, slide)
         }
         ch_samples = Channel.fromList(enriched)
+
+        // Route slides that need GDC download through DOWNLOAD_SLIDE.
+        // Slides with needs_download=true have a future local path in slide_path
+        // that doesn't exist yet; we never stage that file — instead we pass only
+        // val(meta) to DOWNLOAD_SLIDE which fetches and caches the file via storeDir.
+        ch_samples.branch { meta, slide ->
+            needs_download: meta.needs_download == true
+            ready: true
+        }.set { ch_branched }
+
+        ch_downloaded = DOWNLOAD_SLIDE(
+            ch_branched.needs_download.map { meta, _slide -> meta }
+        )
+        ch_samples = ch_branched.ready.mix(ch_downloaded)
     }
 
     if (params.linear_probe.annotations_csv) {
         ch_annotations = Channel.fromList(samplesheetToList(params.linear_probe.annotations_csv, "assets/schema_annotations.json"))
+        if (!params.linear_probe.annotation_class_mapping_yaml) {
+            log.warn "params.linear_probe.annotation_class_mapping_yaml is not set — linear probe benchmarking will be skipped"
+        }
     }
 
     if (params.samples_csv_watch_path) {

@@ -1,0 +1,22 @@
+nextflow_pipeline {
+    name   "MUSSEL multi-slide sample aggregation — stub mode"
+    script "../main.nf"
+    profile "test_stub_multi_slide"
+    options "-stub"
+
+    // Exercises: TESSELLATE_FEATURIZE_BATCH (x2) → MERGE_SAMPLE_FEATURES
+    // Two slides share sample_id=PATIENT_STUB; their features are merged.
+    test("multi-slide stub workflow succeeds and publishes merged sample features") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            // Per-slide features
+            assert path("${outputDir}/features/resnet50/948176_A.features.pt").exists()
+            assert path("${outputDir}/features/resnet50/948176_B.features.pt").exists()
+            // Merged sample-level features
+            assert path("${outputDir}/features/resnet50/PATIENT_STUB.features.pt").exists()
+        }
+    }
+}

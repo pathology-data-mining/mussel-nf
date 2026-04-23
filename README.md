@@ -134,14 +134,104 @@ Default annotation classes are set via `params.clip.default_classes`, or per onc
 
 ### Linear probe benchmarking
 
-If `params.linear_probe.annotations_csv` is specified, the linear probe benchmarking workflow runs.
-The CSV must have columns `slide_id` and `annotation_bmp_path`.
+Linear probe benchmarking trains logistic regression classifiers on top of frozen patch-level
+features and measures how well each encoder separates annotated tissue classes. It runs
+automatically when `params.linear_probe.annotations_csv` is set.
 
-1. Tessellation
-2. Feature extraction
-3. Map tile coordinates to annotation classes using the BMP mask and `params.linear_probe.annotation_class_mapping_yaml`
-4. Combine per-slide annotation mappings
-5. Benchmark logistic regression classifiers
+#### Required inputs
+
+| Parameter | Description |
+|---|---|
+| `params.linear_probe.annotations_csv` | CSV with `slide_id` and `annotation_bmp_path` columns. Each row maps a slide to a BMP mask where pixel values are annotation class IDs. |
+| `params.linear_probe.annotation_class_mapping_yaml` | YAML mapping BMP pixel values (integers) to class names. Without this, the benchmark is skipped. |
+
+#### Annotation CSV format
+
+```csv
+slide_id,annotation_bmp_path
+TCGA-XX-1234-01Z-00-DX1,/path/to/TCGA-XX-1234.bmp
+```
+
+#### Class mapping YAML format
+
+Pixel values in the BMP map to integer class IDs. The YAML remaps those IDs to named classes.
+Background pixels (value 0) are always excluded.
+
+```yaml
+# Binary example: tumour vs. stroma
+1: 0   # annotation ID 1 → class 0 (negative / background)
+2: 1   # annotation ID 2 → class 1 (positive / tumour)
+```
+
+For multiclass, set `params.linear_probe.multiclass = true` and emit ≥ 3 distinct non-zero class IDs:
+
+```yaml
+# Multiclass example
+1: 1   # tumour
+2: 2   # stroma
+3: 3   # necrosis
+```
+
+#### Workflow steps
+
+1. **Tessellation + feature extraction** — normal pipeline produces per-slide `.h5` patch features.
+2. **`MERGE_ANNOTATION_FEATURES`** — for each slide, maps tile centre coordinates into the BMP mask
+   to assign each tile a class label, producing a per-slide `annotation_features.parquet`.
+   Tiles with fewer than the expected annotated-pixel fraction are dropped.
+3. **`STACK_ANNOTATION_FEATURES`** — concatenates all per-slide parquets into one
+   `annotation_features.parquet` per model type.
+4. **`LINEAR_PROBE_BENCHMARK`** — runs grid-searched logistic regression (scikit-learn) and
+   emits plots and metrics to `results/linear_probe_benchmark/{model_type}/`.
+5. **`SUMMARIZE_LINEAR_PROBE`** — collects `results.json` from all model types and writes
+   `results/linear_probe_benchmark/summary.csv` + `summary.png` for cross-model comparison.
+
+#### Outputs
+
+```
+results/
+  annotation_features/{model_type}/         # Per-slide annotation_features.parquet files
+  linear_probe_benchmark/{model_type}/
+    classification_report.csv               # Per-class precision/recall/F1
+    classification_report_test.csv
+    confusion_matrix.png
+    confusion_matrix_test.png
+    roc_curve.png
+    pr_curve.png
+    grid_search_heatmap.png
+    feature_importance.png
+    calibration_curve.png
+    cv_results.csv                          # Full grid search results
+    results.json                            # Numeric metrics (AUC-ROC, F1, AP, 95% CI)
+  linear_probe_benchmark/
+    summary.csv                             # All models side-by-side
+    summary.png                             # Bar chart with 95% CI error bars
+```
+
+#### Hyperparameters
+
+All configurable via `params.linear_probe.*`:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `cv` | `5` | Cross-validation folds for grid search |
+| `C_values` | `[1e-5, 1e-4, 0.001, 0.01, 0.1, 1.0, 10.0]` | Regularisation strengths to search over |
+| `penalties` | `["l2"]` | Penalty types to search over (`"l1"`, `"l2"`, `"elasticnet"`) |
+| `n_seeds` | `5` | Number of random seeds for bootstrap variance estimation |
+| `n_bootstrap` | `1000` | Bootstrap resamples for 95% CI on test metrics |
+| `random_state` | `42` | Global random seed |
+| `positive_annotation_label` | `1` | Class ID treated as positive for binary AUC/AP |
+| `multiclass` | `false` | Enable OvR macro AUC-ROC / macro F1 for ≥ 3 classes |
+
+#### Example invocation
+
+```bash
+nextflow run main.nf \
+  -profile cluster,apptainer \
+  --samples_csv samples.csv \
+  --linear_probe.annotations_csv annotations.csv \
+  --linear_probe.annotation_class_mapping_yaml class_mapping.yaml \
+  --featurize.model_types "optimus,uni"
+```
 
 ### WebDataset sharding
 

@@ -88,4 +88,20 @@ process FEATURIZE_BATCH {
         ${slide_model_str} \
         ${aggregation_str}
     """
+
+    stub:
+    stub_slide_ids = slide_batch.collect { meta, slide, patch_h5 -> meta.slide_id }.join(',')
+    batch_metadata = slide_batch.collect { meta, slide, patch_h5 -> meta }
+    model_type = (params.featurize.slide_to_patch_mapping && params.featurize.slide_to_patch_mapping[model_type_input]) ? params.featurize.slide_to_patch_mapping[model_type_input] : model_type_input
+    model_type_name = "${post_filter ? '' : 'prefilter_'}${model_type}"
+    patch_encoder_name = model_type_name
+    """
+    #!/usr/bin/env python3
+    import os, torch, h5py, numpy as np
+    n_feat = 8
+    for sid in "${stub_slide_ids}".split(","):
+        torch.save(torch.zeros(1, n_feat), f"{sid}.features.pt")
+        with h5py.File(f"{sid}.features.h5", "w") as f:
+            f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
+    """
 }

@@ -15,6 +15,7 @@
 include { MERGE_ANNOTATION_FEATURES  } from '../modules/linear_probe/main'
 include { STACK_ANNOTATION_FEATURES  } from '../modules/linear_probe/main'
 include { LINEAR_PROBE_BENCHMARK     } from '../modules/linear_probe/main'
+include { SUMMARIZE_LINEAR_PROBE     } from '../modules/linear_probe/main'
 
 workflow {
 
@@ -55,9 +56,13 @@ workflow {
 
     MERGE_ANNOTATION_FEATURES(ch_joined, classMappingYaml)
 
-    MERGE_ANNOTATION_FEATURES.out
+    MERGE_ANNOTATION_FEATURES.out.parquet
         | map { model_type, parquet -> tuple(model_type, parquet) }
         | groupTuple
         | STACK_ANNOTATION_FEATURES
         | LINEAR_PROBE_BENCHMARK
+
+    LINEAR_PROBE_BENCHMARK.out.results_json
+        | collect(flat: false)
+        | SUMMARIZE_LINEAR_PROBE
 }

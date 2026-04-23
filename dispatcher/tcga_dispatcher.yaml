@@ -65,10 +65,10 @@ watchers:
     wds_dest: s3://your-bucket/wds/ctranspath
     # wds_staging_dir: /path/to/local/staging   # required for s3:// destinations
 
-# Optional extra hooks run after the auto-generated WDS append.
-# post_batch_hooks:
-#   - command: "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py"
-#     args:
-#       - "--inventory=/path/to/tcga_inventory.csv"
-#       - "--status=/path/to/tcga_status.csv"
-#       - "--volume-path=/dbfs/mnt/your-volume/tcga"
+    # When set, a tcga_sync_databricks.py post-batch hook is generated automatically.
+    # Credentials are read from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.
+    # databricks_volume_path: /Volumes/catalog/schema/volume/tcga_inventory.parquet
+    # databricks_job_id: "12345"   # optional: Databricks job to trigger after upload
+
+# Any explicit post_batch_hooks run after the auto-generated ones above.
+# post_batch_hooks: []

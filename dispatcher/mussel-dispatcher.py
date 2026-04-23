@@ -65,7 +65,8 @@ CONFIG KEYS (top level)
   Hooks:
     post_batch_hooks    List of {command, args} run after each successful NF run.
                         Template vars: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
-                        Auto-generated hooks (from wds_dest on tcga watchers) run first.
+                        Auto-generated hooks run first (WDS append, then Databricks
+                        sync), followed by any explicit post_batch_hooks.
 
   watchers              List of watcher configs (see WATCHERS above)
 
@@ -151,6 +152,10 @@ class WatcherConfig:
     # Supports s3:// URIs and local paths.
     wds_dest: str = ""
     wds_staging_dir: str = ""  # required when wds_dest is s3://
+    # When set, a tcga_sync_databricks.py hook is generated automatically.
+    # Credentials come from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.
+    databricks_volume_path: str = ""   # e.g. /Volumes/catalog/schema/vol/tcga.parquet
+    databricks_job_id: str = ""        # optional: Databricks job to trigger after upload
 
 
 @dataclass
@@ -223,32 +228,51 @@ class Config:
     def _build_auto_hooks(self) -> list:
         """Generate post-batch hooks automatically from watcher configuration.
 
-        For each tcga watcher with wds_dest set, a tcga_append_wds.py hook is
-        prepended so features are appended to WDS shards after every successful
-        Nextflow run without requiring manual hook configuration.
+        For each tcga watcher:
+          - wds_dest set       → prepend a tcga_append_wds.py hook
+          - databricks_volume_path set → append a tcga_sync_databricks.py hook
 
-        Explicit post_batch_hooks (e.g. databricks sync) run after auto hooks.
+        Order per watcher: WDS append first, then Databricks sync.
+        Explicit post_batch_hooks run after all auto-generated hooks.
         """
         hooks = []
+        db_hooks = []
         for w in self.watchers:
-            if w.type != "tcga" or not w.wds_dest:
+            if w.type != "tcga":
                 continue
-            args = [
-                "--pt-dir={outdir}/features/" + w.model + "/pt",
-                "--h5-dir={outdir}/features/" + w.model + "/tile_h5",
-                "--inventory=" + w.inventory_csv,
-                "--wds-dest=" + w.wds_dest,
-                "--model-type=" + w.model,
-                "--slide-ids-csv={batch_csv}",
-            ]
-            if w.wds_staging_dir:
-                args.append("--staging-dir=" + w.wds_staging_dir)
-            hooks.append({
-                "command": "python {repo_dir}/scripts/tcga/tcga_append_wds.py",
-                "args": args,
-            })
-            log.debug("Auto post-batch hook: tcga_append_wds for model=%s dest=%s", w.model, w.wds_dest)
-        return hooks
+
+            if w.wds_dest:
+                args = [
+                    "--pt-dir={outdir}/features/" + w.model + "/pt",
+                    "--h5-dir={outdir}/features/" + w.model + "/tile_h5",
+                    "--inventory=" + w.inventory_csv,
+                    "--wds-dest=" + w.wds_dest,
+                    "--model-type=" + w.model,
+                    "--slide-ids-csv={batch_csv}",
+                ]
+                if w.wds_staging_dir:
+                    args.append("--staging-dir=" + w.wds_staging_dir)
+                hooks.append({
+                    "command": "python {repo_dir}/scripts/tcga/tcga_append_wds.py",
+                    "args": args,
+                })
+                log.debug("Auto hook: tcga_append_wds model=%s dest=%s", w.model, w.wds_dest)
+
+            if w.databricks_volume_path:
+                args = [
+                    "--inventory=" + w.inventory_csv,
+                    "--status=" + w.status_csv,
+                    "--volume-path=" + w.databricks_volume_path,
+                ]
+                if w.databricks_job_id:
+                    args.append("--job-id=" + w.databricks_job_id)
+                db_hooks.append({
+                    "command": "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py",
+                    "args": args,
+                })
+                log.debug("Auto hook: tcga_sync_databricks volume=%s", w.databricks_volume_path)
+
+        return hooks + db_hooks
 
 
 # ---------------------------------------------------------------------------

@@ -911,3 +911,30 @@ class TestAutoHooks:
         models = [h["args"][0] for h in cfg.post_batch_hooks]  # --pt-dir contains model name
         assert any("ctranspath" in m for m in models)
         assert any("uni2h" in m for m in models)
+
+    def test_databricks_hook_generated_when_volume_path_set(self, tmp_path):
+        cfg = self._load_config(tmp_path, watcher_extra={
+            "databricks_volume_path": "/Volumes/cat/schema/vol/tcga.parquet",
+        })
+        assert len(cfg.post_batch_hooks) == 1
+        hook = cfg.post_batch_hooks[0]
+        assert "tcga_sync_databricks.py" in hook["command"]
+        args = " ".join(hook["args"])
+        assert "/Volumes/cat/schema/vol/tcga.parquet" in args
+
+    def test_databricks_hook_includes_job_id_when_set(self, tmp_path):
+        cfg = self._load_config(tmp_path, watcher_extra={
+            "databricks_volume_path": "/Volumes/cat/schema/vol/tcga.parquet",
+            "databricks_job_id": "99999",
+        })
+        args = " ".join(cfg.post_batch_hooks[0]["args"])
+        assert "--job-id=99999" in args
+
+    def test_wds_before_databricks_in_auto_hooks(self, tmp_path):
+        cfg = self._load_config(tmp_path, watcher_extra={
+            "wds_dest": "s3://bucket/wds",
+            "databricks_volume_path": "/Volumes/cat/schema/vol/tcga.parquet",
+        })
+        assert len(cfg.post_batch_hooks) == 2
+        assert "tcga_append_wds.py" in cfg.post_batch_hooks[0]["command"]
+        assert "tcga_sync_databricks.py" in cfg.post_batch_hooks[1]["command"]

@@ -75,3 +75,6 @@ watchers:
   #   # Set wds_dest to auto-generate a tcga_append_wds.py post-batch hook:
   #   # wds_dest: s3://your-bucket/wds/ctranspath
   #   # wds_staging_dir: /path/to/staging   # required for s3:// destinations
+  #   # Set databricks_volume_path to auto-generate a tcga_sync_databricks.py hook:
+  #   # databricks_volume_path: /Volumes/catalog/schema/volume/tcga_inventory.parquet
+  #   # databricks_job_id: "12345"   # optional

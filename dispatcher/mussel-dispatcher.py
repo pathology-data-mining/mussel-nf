@@ -283,6 +283,7 @@ class Config:
                         "--wds-dest=" + dest,
                         "--model-type=" + model,
                         "--slide-ids-csv={batch_csv}",
+                        "--manifest-csv={outdir}/wds_manifest.csv",
                     ]
                     if w.wds_staging_dir:
                         args.append("--staging-dir=" + w.wds_staging_dir + "/" + model)

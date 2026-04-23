@@ -858,6 +858,7 @@ class TestAutoHooks:
         assert "ctranspath" in args
         assert "s3://bucket/wds/ctranspath" in args
         assert "--slide-ids-csv={batch_csv}" in hook["args"]
+        assert "--manifest-csv={outdir}/wds_manifest.csv" in hook["args"]
 
     def test_auto_hook_includes_staging_dir_when_set(self, tmp_path):
         cfg = self._load_config(tmp_path, watcher_extra={

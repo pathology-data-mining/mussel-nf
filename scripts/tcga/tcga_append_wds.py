@@ -41,6 +41,7 @@ Usage
 """
 
 import argparse
+import csv
 import io
 import json
 import logging
@@ -278,12 +279,15 @@ def append_wds(
     dry_run: bool = False,
     slide_id_filter: set[str] | None = None,
     delete_local: bool = False,
+    manifest_csv: Path | None = None,
 ) -> dict:
     """Append all .features.pt files in pt_dir to WDS shards.
 
     If slide_id_filter is provided, only those slide_ids are appended.
     If delete_local is True, the source .pt and .patch.h5 files are deleted
     after all writers have been flushed (i.e. after S3 upload completes).
+    If manifest_csv is set, appends rows (slide_id, model, wds_path) to that
+    CSV so callers can look up the full S3 shard path for each slide.
     Returns the updated index dict.
     """
     # Build slide_id → project_id lookup from inventory
@@ -367,6 +371,23 @@ def append_wds(
             n_deleted += 1
         log.info("Deleted %d local source file pair(s) (pt + patch.h5)", n_deleted)
 
+    # Write / append WDS manifest CSV: slide_id, model, wds_path (full S3 or local path)
+    if manifest_csv is not None and not dry_run and n_appended > 0:
+        manifest_csv = Path(manifest_csv)
+        manifest_csv.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not manifest_csv.exists()
+        with manifest_csv.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
+            if write_header:
+                writer.writeheader()
+            for slide_id, info in index.items():
+                if slide_id not in already_indexed:
+                    shard_file = info["shard_file"]
+                    wds_path = f"{wds_dest.rstrip('/')}/{model_type}/{shard_file}"
+                    writer.writerow({"slide_id": slide_id, "model": model_type,
+                                     "wds_path": wds_path})
+        log.info("Wrote %d WDS path entries to %s", n_appended, manifest_csv)
+
     if n_missing_project:
         log.warning("%d slides skipped (no project_id in inventory)", n_missing_project)
     log.info("Done: %d appended, %d already indexed", n_appended, n_skipped)
@@ -417,6 +438,11 @@ def main(argv: list[str] | None = None) -> int:
                              "Use to restrict each orchestrator chunk to its own outputs.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print actions without writing anything")
+    parser.add_argument("--manifest-csv", default=None,
+                        help="Path to a CSV that accumulates slide_id, model, wds_path rows "
+                             "for every slide successfully added to WDS. "
+                             "Appended to on each run so it builds up over time. "
+                             "Created with a header row if it does not yet exist.")
     parser.add_argument("--delete-local", action="store_true",
                         help="Delete local .pt and .patch.h5 source files after they are "
                              "successfully flushed to WDS (including S3 upload). "
@@ -485,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 slide_id_filter=slide_id_filter,
                 delete_local=args.delete_local,
+                manifest_csv=Path(args.manifest_csv) if args.manifest_csv else None,
             )
         except Exception as exc:
             log.error("Failed to append WDS for model %s: %s", model, exc)

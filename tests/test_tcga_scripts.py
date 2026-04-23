@@ -878,6 +878,86 @@ class TestDeleteLocal:
         assert pt_file.exists(), "--dry-run must not delete source files"
 
 
+class TestWdsManifest:
+    """append_wds() writes a wds_manifest.csv with full S3 paths."""
+
+    def test_manifest_csv_written_with_full_path(self, tmp_path):
+        import pandas as pd
+        from scripts.tcga.tcga_append_wds import append_wds
+
+        model = "ctranspath"
+        wds_dest = str(tmp_path / "wds")
+        pt_dir = tmp_path / "pt"
+        manifest_path = tmp_path / "wds_manifest.csv"
+
+        make_pt_file(pt_dir / "TCGA-BR-A44T-01Z-00-DX1.features.pt")
+
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+            manifest_csv=manifest_path,
+        )
+
+        assert manifest_path.exists()
+        df = pd.read_csv(manifest_path)
+        assert list(df.columns) == ["slide_id", "model", "wds_path"]
+        row = df[df["slide_id"] == "TCGA-BR-A44T-01Z-00-DX1"].iloc[0]
+        assert row["model"] == model
+        # wds_path = {wds_dest}/{model}/{project_id}/{shard}.tar
+        assert row["wds_path"].startswith(wds_dest + "/ctranspath/TCGA-BRCA/")
+
+    def test_manifest_csv_appends_across_runs(self, tmp_path):
+        import pandas as pd
+        from scripts.tcga.tcga_append_wds import append_wds
+
+        model = "ctranspath"
+        wds_dest = str(tmp_path / "wds")
+        manifest_path = tmp_path / "wds_manifest.csv"
+
+        pt_dir1 = tmp_path / "pt1"
+        make_pt_file(pt_dir1 / "TCGA-BR-A44T-01Z-00-DX1.features.pt")
+        append_wds(pt_dir=pt_dir1, h5_dir=None, inventory_df=make_inventory(),
+                   wds_dest=wds_dest, model_type=model, staging_dir=None,
+                   max_shard_bytes=500 * 1024 * 1024, manifest_csv=manifest_path)
+
+        pt_dir2 = tmp_path / "pt2"
+        make_pt_file(pt_dir2 / "TCGA-BR-A44U-01Z-00-DX1.features.pt")
+        append_wds(pt_dir=pt_dir2, h5_dir=None, inventory_df=make_inventory(),
+                   wds_dest=wds_dest, model_type=model, staging_dir=None,
+                   max_shard_bytes=500 * 1024 * 1024, manifest_csv=manifest_path)
+
+        df = pd.read_csv(manifest_path)
+        assert len(df) == 2
+        assert set(df["slide_id"]) == {"TCGA-BR-A44T-01Z-00-DX1", "TCGA-BR-A44U-01Z-00-DX1"}
+
+    def test_manifest_csv_not_written_on_dry_run(self, tmp_path):
+        from scripts.tcga.tcga_append_wds import append_wds
+
+        model = "ctranspath"
+        pt_dir = tmp_path / "pt"
+        manifest_path = tmp_path / "wds_manifest.csv"
+        make_pt_file(pt_dir / "TCGA-BR-A44T-01Z-00-DX1.features.pt")
+
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=make_inventory(),
+            wds_dest=str(tmp_path / "wds"),
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+            manifest_csv=manifest_path,
+            dry_run=True,
+        )
+
+        assert not manifest_path.exists(), "manifest CSV must not be written in dry-run mode"
+
+
 class TestEndToEnd:
     """Drive all three stages in sequence with shared fixtures."""
 

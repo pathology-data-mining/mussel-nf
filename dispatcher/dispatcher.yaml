@@ -61,7 +61,7 @@ watchers:
   #   inventory_csv: /path/to/tcga_inventory.csv   # managed by tcga_sync_inventory.py
   #   status_csv: /path/to/tcga_status.csv         # managed by tcga_update_status.py
   #   results_dir: /path/to/results                # nextflow outdir (same as above)
-  #   model: ctranspath                            # model to check for completed slides
+  #   # models: []   # auto-discover from results dir (matches nextflow.config model_types)
   #   local_slides_dir: /path/to/slides
   #   # s3_base: s3://bucket/slides
   #   slide_type: DX1
@@ -72,9 +72,11 @@ watchers:
   #   download_dir: /path/to/downloads
   #   download_concurrency: 4
   #   # gdc_token_file: /path/to/gdc-user-token.txt
-  #   # Set wds_dest to auto-generate a tcga_append_wds.py post-batch hook:
-  #   # wds_dest: s3://your-bucket/wds/ctranspath
-  #   # wds_staging_dir: /path/to/staging   # required for s3:// destinations
+  #   # Per-model WDS destinations (one tcga_append_wds.py hook auto-generated each):
+  #   # wds_destinations:
+  #   #   ctranspath: s3://your-bucket/wds/ctranspath
+  #   #   uni2h: s3://your-bucket/wds/uni2h
+  #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
   #   # Set databricks_volume_path to auto-generate a tcga_sync_databricks.py hook:
   #   # databricks_volume_path: /Volumes/catalog/schema/volume/tcga_inventory.parquet
   #   # databricks_job_id: "12345"   # optional

@@ -601,7 +601,6 @@ class TestTcgaWatcher:
             inventory_csv=str(tmp_path / "inventory.csv"),
             status_csv=str(tmp_path / "status.csv"),
             results_dir=str(tmp_path / "results"),
-            model="ctranspath",
             scripts_dir=str(tmp_path / "scripts"),
             **kwargs,
         )
@@ -826,7 +825,7 @@ class TestPostBatchHooks:
 # ---------------------------------------------------------------------------
 
 class TestAutoHooks:
-    """Config._build_auto_hooks generates tcga_append_wds hooks from wds_dest."""
+    """Config._build_auto_hooks generates hooks from wds_destinations/databricks_volume_path."""
 
     def _load_config(self, tmp_path, watcher_extra=None, extra_raw=None):
         import yaml as _yaml
@@ -846,14 +845,13 @@ class TestAutoHooks:
         cfg_path.write_text(_yaml.dump(cfg_data))
         return Config.load(str(cfg_path))
 
-    def test_no_auto_hook_without_wds_dest(self, tmp_path):
+    def test_no_auto_hook_without_destinations(self, tmp_path):
         cfg = self._load_config(tmp_path)
         assert cfg.post_batch_hooks == []
 
     def test_auto_hook_generated_when_wds_dest_set(self, tmp_path):
         cfg = self._load_config(tmp_path, watcher_extra={
-            "model": "ctranspath",
-            "wds_dest": "s3://bucket/wds/ctranspath",
+            "wds_destinations": {"ctranspath": "s3://bucket/wds/ctranspath"},
         })
         assert len(cfg.post_batch_hooks) == 1
         hook = cfg.post_batch_hooks[0]
@@ -865,7 +863,7 @@ class TestAutoHooks:
 
     def test_auto_hook_includes_staging_dir_when_set(self, tmp_path):
         cfg = self._load_config(tmp_path, watcher_extra={
-            "wds_dest": "s3://bucket/wds",
+            "wds_destinations": {"ctranspath": "s3://bucket/wds"},
             "wds_staging_dir": "/staging",
         })
         args = " ".join(cfg.post_batch_hooks[0]["args"])
@@ -886,7 +884,7 @@ class TestAutoHooks:
         explicit = [{"command": "echo done", "args": []}]
         cfg = self._load_config(
             tmp_path,
-            watcher_extra={"wds_dest": "s3://bucket/wds"},
+            watcher_extra={"wds_destinations": {"ctranspath": "s3://bucket/wds"}},
             extra_raw={"post_batch_hooks": explicit},
         )
         assert len(cfg.post_batch_hooks) == 2
@@ -901,9 +899,9 @@ class TestAutoHooks:
             "outdir": str(tmp_path / "results"),
             "watchers": [
                 {"type": "tcga", "inventory_csv": "i.csv", "status_csv": "s.csv",
-                 "results_dir": "r", "model": "ctranspath", "wds_dest": "s3://b/c"},
+                 "results_dir": "r", "wds_destinations": {"ctranspath": "s3://b/c"}},
                 {"type": "tcga", "inventory_csv": "i.csv", "status_csv": "s.csv",
-                 "results_dir": "r", "model": "uni2h", "wds_dest": "s3://b/u"},
+                 "results_dir": "r", "wds_destinations": {"uni2h": "s3://b/u"}},
             ],
         }))
         cfg = Config.load(str(cfg_path))
@@ -932,7 +930,7 @@ class TestAutoHooks:
 
     def test_wds_before_databricks_in_auto_hooks(self, tmp_path):
         cfg = self._load_config(tmp_path, watcher_extra={
-            "wds_dest": "s3://bucket/wds",
+            "wds_destinations": {"ctranspath": "s3://bucket/wds"},
             "databricks_volume_path": "/Volumes/cat/schema/vol/tcga.parquet",
         })
         assert len(cfg.post_batch_hooks) == 2

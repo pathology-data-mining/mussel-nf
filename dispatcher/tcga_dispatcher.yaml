@@ -32,7 +32,7 @@ watchers:
     results_dir: /path/to/tcga-results
 
     # Feature model to extract; also controls which slides are already-done
-    model: ctranspath
+        # models: []   # defaults to auto-discover from results dir (matches nextflow.config)
 
     # Slide source — at least one of local_slides_dir or s3_base must be set.
     # Slides are resolved: local disk → S3 → needs_download (in that order).
@@ -62,8 +62,10 @@ watchers:
 
     # When set, a tcga_append_wds.py post-batch hook is generated automatically
     # after each successful Nextflow run.  Supports s3:// and local paths.
-    wds_dest: s3://your-bucket/wds/ctranspath
-    # wds_staging_dir: /path/to/local/staging   # required for s3:// destinations
+    wds_destinations:
+      ctranspath: s3://your-bucket/wds/ctranspath
+      # uni2h: s3://your-bucket/wds/uni2h
+    # wds_staging_dir: /path/to/local/staging   # base dir; each model uses {staging}/{model}/
 
     # When set, a tcga_sync_databricks.py post-batch hook is generated automatically.
     # Credentials are read from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.

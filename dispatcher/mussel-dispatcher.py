@@ -134,7 +134,10 @@ class WatcherConfig:
     inventory_csv: str = ""
     status_csv: str = ""
     results_dir: str = ""
-    model: str = "ctranspath"
+    # Models to check for skip-done filtering in tcga_prepare_samples.
+    # Empty list = auto-discover from results dir (recommended; matches whatever
+    # params.featurize.model_types is set to in nextflow.config).
+    models: list = field(default_factory=list)
     local_slides_dir: str = ""
     s3_base: str = ""
     s3_endpoint: str = ""
@@ -148,10 +151,11 @@ class WatcherConfig:
     gdc_token_file: str = ""
     gdc_max_age_hours: float = 24.0
     scripts_dir: str = ""  # path to scripts/tcga/; defaults to {repo_dir}/scripts/tcga
-    # When set, a tcga_append_wds.py post-batch hook is generated automatically.
-    # Supports s3:// URIs and local paths.
-    wds_dest: str = ""
-    wds_staging_dir: str = ""  # required when wds_dest is s3://
+    # Per-model WDS destinations: {model_type: s3_or_local_path}.
+    # A tcga_append_wds.py hook is auto-generated for each entry.
+    # Example: {ctranspath: s3://bucket/wds/ctranspath, uni2h: s3://bucket/wds/uni2h}
+    wds_destinations: dict = field(default_factory=dict)
+    wds_staging_dir: str = ""  # local staging base for s3:// destinations; each model uses {staging}/{model}/
     # When set, a tcga_sync_databricks.py hook is generated automatically.
     # Credentials come from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.
     databricks_volume_path: str = ""   # e.g. /Volumes/catalog/schema/vol/tcga.parquet
@@ -241,22 +245,23 @@ class Config:
             if w.type != "tcga":
                 continue
 
-            if w.wds_dest:
-                args = [
-                    "--pt-dir={outdir}/features/" + w.model + "/pt",
-                    "--h5-dir={outdir}/features/" + w.model + "/tile_h5",
-                    "--inventory=" + w.inventory_csv,
-                    "--wds-dest=" + w.wds_dest,
-                    "--model-type=" + w.model,
-                    "--slide-ids-csv={batch_csv}",
-                ]
-                if w.wds_staging_dir:
-                    args.append("--staging-dir=" + w.wds_staging_dir)
-                hooks.append({
-                    "command": "python {repo_dir}/scripts/tcga/tcga_append_wds.py",
-                    "args": args,
-                })
-                log.debug("Auto hook: tcga_append_wds model=%s dest=%s", w.model, w.wds_dest)
+            if w.wds_destinations:
+                for model, dest in w.wds_destinations.items():
+                    args = [
+                        "--pt-dir={outdir}/features/" + model + "/pt",
+                        "--h5-dir={outdir}/features/" + model + "/tile_h5",
+                        "--inventory=" + w.inventory_csv,
+                        "--wds-dest=" + dest,
+                        "--model-type=" + model,
+                        "--slide-ids-csv={batch_csv}",
+                    ]
+                    if w.wds_staging_dir:
+                        args.append("--staging-dir=" + w.wds_staging_dir + "/" + model)
+                    hooks.append({
+                        "command": "python {repo_dir}/scripts/tcga/tcga_append_wds.py",
+                        "args": args,
+                    })
+                    log.debug("Auto hook: tcga_append_wds model=%s dest=%s", model, dest)
 
             if w.databricks_volume_path:
                 args = [
@@ -670,11 +675,14 @@ class TcgaWatcher(threading.Thread):
             return
 
         # 2. Update per-slide status from results directory
-        rc = self._run_script("tcga_update_status.py", [
+        status_args = [
             "--inventory", self.cfg.inventory_csv,
             "--results-dir", self.cfg.results_dir,
             "--output", self.cfg.status_csv,
-        ])
+        ]
+        if self.cfg.models:
+            status_args += ["--model-types", ",".join(self.cfg.models)]
+        rc = self._run_script("tcga_update_status.py", status_args)
         if rc != 0:
             log.error("TcgaWatcher: status update failed — skipping this poll")
             return
@@ -685,9 +693,15 @@ class TcgaWatcher(threading.Thread):
             "--inventory", self.cfg.inventory_csv,
             "--status", self.cfg.status_csv,
             "--output", samples_csv,
-            "--model", self.cfg.model,
-            "--skip-done",
         ]
+        # Skip slides already done.  When multiple models are configured, pass the
+        # first one; a slide is re-queued if any model still needs extracting.
+        if self.cfg.models:
+            prepare_args += ["--model", self.cfg.models[0], "--skip-done"]
+        elif self.cfg.status_csv:
+            # No explicit models — auto-discover; still skip slides marked done
+            # for any model found in the status CSV.
+            prepare_args += ["--skip-done"]
         if self.cfg.local_slides_dir:
             prepare_args += ["--local-slides-dir", self.cfg.local_slides_dir]
         if self.cfg.s3_base:

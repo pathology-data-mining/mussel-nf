@@ -64,6 +64,7 @@ CONFIG KEYS (top level)
     cleanup_downloads        Delete downloaded slides (.svs) after a successful batch (default false)
     cleanup_batch_csv        Delete the per-batch samples CSV after success (default false)
     cleanup_logs_after_days  Delete NF log files for batches older than N days (0 = keep forever)
+    cleanup_results          Delete local .pt / .patch.h5 after WDS push succeeds (default false)
 
   Hooks:
     post_batch_hooks    List of {command, args} run after each successful NF run.
@@ -189,6 +190,7 @@ class Config:
     cleanup_downloads: bool = False       # delete downloaded slides after a successful batch
     cleanup_batch_csv: bool = False       # delete per-batch samples CSV after success
     cleanup_logs_after_days: int = 0      # delete NF log files older than N days (0 = keep forever)
+    cleanup_results: bool = False         # delete local .pt / .patch.h5 after WDS push succeeds
     combined_manifest_path: Optional[str] = None  # defaults to {outdir}/manifest-combined.csv
     post_batch_hooks: list = field(default_factory=list)
     # list of {"command": "...", "args": ["..."]}
@@ -284,6 +286,8 @@ class Config:
                     ]
                     if w.wds_staging_dir:
                         args.append("--staging-dir=" + w.wds_staging_dir + "/" + model)
+                    if self.cleanup_results:
+                        args.append("--delete-local")
                     hooks.append({
                         "command": "python {repo_dir}/scripts/tcga/tcga_append_wds.py",
                         "args": args,

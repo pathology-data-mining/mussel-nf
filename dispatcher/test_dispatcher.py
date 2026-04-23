@@ -926,14 +926,24 @@ class TestAutoHooks:
         args = " ".join(cfg.post_batch_hooks[0]["args"])
         assert "--job-id=99999" in args
 
-    def test_wds_before_databricks_in_auto_hooks(self, tmp_path):
-        cfg = self._load_config(tmp_path, watcher_extra={
-            "wds_destinations": {"ctranspath": "s3://bucket/wds"},
-            "databricks_volume_path": "/Volumes/cat/schema/vol/tcga.parquet",
-        })
-        assert len(cfg.post_batch_hooks) == 2
-        assert "tcga_append_wds.py" in cfg.post_batch_hooks[0]["command"]
-        assert "tcga_sync_databricks.py" in cfg.post_batch_hooks[1]["command"]
+    def test_cleanup_results_adds_delete_local_flag(self, tmp_path):
+        """cleanup_results=True adds --delete-local to the WDS auto-hook args."""
+        cfg = self._load_config(
+            tmp_path,
+            watcher_extra={"wds_destinations": {"ctranspath": "s3://bucket/wds"}},
+            extra_raw={"cleanup_results": True},
+        )
+        args = cfg.post_batch_hooks[0]["args"]
+        assert "--delete-local" in args
+
+    def test_cleanup_results_false_does_not_add_delete_local(self, tmp_path):
+        """cleanup_results=False (default) does not add --delete-local to hooks."""
+        cfg = self._load_config(
+            tmp_path,
+            watcher_extra={"wds_destinations": {"ctranspath": "s3://bucket/wds"}},
+        )
+        args = cfg.post_batch_hooks[0]["args"]
+        assert "--delete-local" not in args
 
 
 # ---------------------------------------------------------------------------

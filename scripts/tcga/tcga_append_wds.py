@@ -277,10 +277,13 @@ def append_wds(
     max_shard_bytes: int,
     dry_run: bool = False,
     slide_id_filter: set[str] | None = None,
+    delete_local: bool = False,
 ) -> dict:
     """Append all .features.pt files in pt_dir to WDS shards.
 
     If slide_id_filter is provided, only those slide_ids are appended.
+    If delete_local is True, the source .pt and .patch.h5 files are deleted
+    after all writers have been flushed (i.e. after S3 upload completes).
     Returns the updated index dict.
     """
     # Build slide_id → project_id lookup from inventory
@@ -297,6 +300,7 @@ def append_wds(
 
     writers: dict[str, _ShardWriter] = {}
     n_appended = n_skipped = n_missing_project = 0
+    appended_locals: list[tuple[Path, Path | None]] = []  # (pt_path, h5_path) for delete_local
 
     for pt_path in pt_files:
         slide_id = _slide_id_from_pt(pt_path)
@@ -320,11 +324,13 @@ def append_wds(
             log.error("Failed to load %s: %s", pt_path, exc)
             continue
 
+        h5_path_for_slide: Path | None = None
         coords: np.ndarray | None = None
         if h5_dir is not None:
             h5_candidates = list(h5_dir.rglob(f"{slide_id}.patch.h5"))
             if h5_candidates:
-                coords = _load_coords(h5_candidates[0])
+                h5_path_for_slide = h5_candidates[0]
+                coords = _load_coords(h5_path_for_slide)
 
         if project_id not in writers:
             writers[project_id] = _ShardWriter(
@@ -342,12 +348,24 @@ def append_wds(
             "shard_file": f"{project_id}/{shard_name}",
         }
         n_appended += 1
+        if delete_local:
+            appended_locals.append((pt_path, h5_path_for_slide))
         if n_appended % 100 == 0:
             log.info("  %d appended, %d skipped", n_appended, n_skipped)
 
-    # Flush unsealed staging shards to S3
+    # Flush unsealed staging shards to S3 — must complete before deleting local files
     for writer in writers.values():
         writer.flush()
+
+    # Delete local source files now that data is durably in WDS / S3
+    if delete_local and not dry_run and appended_locals:
+        n_deleted = 0
+        for pt_path, h5_path in appended_locals:
+            pt_path.unlink(missing_ok=True)
+            if h5_path:
+                h5_path.unlink(missing_ok=True)
+            n_deleted += 1
+        log.info("Deleted %d local source file pair(s) (pt + patch.h5)", n_deleted)
 
     if n_missing_project:
         log.warning("%d slides skipped (no project_id in inventory)", n_missing_project)
@@ -399,6 +417,10 @@ def main(argv: list[str] | None = None) -> int:
                              "Use to restrict each orchestrator chunk to its own outputs.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print actions without writing anything")
+    parser.add_argument("--delete-local", action="store_true",
+                        help="Delete local .pt and .patch.h5 source files after they are "
+                             "successfully flushed to WDS (including S3 upload). "
+                             "Has no effect with --dry-run.")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
@@ -462,6 +484,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_shard_bytes=args.max_shard_bytes,
                 dry_run=args.dry_run,
                 slide_id_filter=slide_id_filter,
+                delete_local=args.delete_local,
             )
         except Exception as exc:
             log.error("Failed to append WDS for model %s: %s", model, exc)

@@ -795,6 +795,89 @@ class TestAppendWds:
 # 4. End-to-end pipeline: status → prepare → append
 # ---------------------------------------------------------------------------
 
+class TestDeleteLocal:
+    """append_wds() with delete_local=True removes source files after WDS flush."""
+
+    def test_delete_local_removes_pt_and_h5(self, tmp_path):
+        from scripts.tcga.tcga_append_wds import append_wds
+
+        model = "ctranspath"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        wds_dest = str(tmp_path / "wds")
+
+        pt_file = pt_dir / "TCGA-BR-A44T-01Z-00-DX1.features.pt"
+        h5_file = h5_dir / "TCGA-BR-A44T-01Z-00-DX1.patch.h5"
+        make_pt_file(pt_file)
+        make_h5_file(h5_file)
+
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+            delete_local=True,
+        )
+
+        assert not pt_file.exists(), ".pt should be deleted after WDS flush"
+        assert not h5_file.exists(), ".patch.h5 should be deleted after WDS flush"
+
+    def test_delete_local_false_keeps_files(self, tmp_path):
+        from scripts.tcga.tcga_append_wds import append_wds
+
+        model = "ctranspath"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        wds_dest = str(tmp_path / "wds")
+
+        pt_file = pt_dir / "TCGA-BR-A44T-01Z-00-DX1.features.pt"
+        h5_file = h5_dir / "TCGA-BR-A44T-01Z-00-DX1.patch.h5"
+        make_pt_file(pt_file)
+        make_h5_file(h5_file)
+
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+            delete_local=False,
+        )
+
+        assert pt_file.exists(), ".pt should be kept when delete_local=False"
+        assert h5_file.exists(), ".patch.h5 should be kept when delete_local=False"
+
+    def test_delete_local_dry_run_keeps_files(self, tmp_path):
+        from scripts.tcga.tcga_append_wds import append_wds
+
+        model = "ctranspath"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        wds_dest = str(tmp_path / "wds")
+
+        pt_file = pt_dir / "TCGA-BR-A44T-01Z-00-DX1.features.pt"
+        make_pt_file(pt_file)
+
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+            delete_local=True,
+            dry_run=True,
+        )
+
+        assert pt_file.exists(), "--dry-run must not delete source files"
+
+
 class TestEndToEnd:
     """Drive all three stages in sequence with shared fixtures."""
 

@@ -26,6 +26,7 @@ cleanup_work_dir: false       # set true to delete NF work/ dir after each succe
 cleanup_downloads: true       # delete downloaded .svs files after featurization succeeds
 cleanup_batch_csv: false      # set true to delete per-batch samples CSV after success
 cleanup_logs_after_days: 30   # delete NF log files for batches older than 30 days (0 = keep forever)
+cleanup_results: false        # set true to delete local .pt / .patch.h5 after WDS push to S3
 
 watchers:
   - type: tcga
@@ -47,7 +48,7 @@ watchers:
     # Optional: restrict to a single project or slide/sample type
     # project: TCGA-BRCA
     slide_type: DX         # DX = all diagnostic slides (DX1, DX2, …); or DX1 for primary only
-    sample_type: Primary Tumor  # GDC sample_type filter; "tumor" also matches Metastatic + Recurrent
+    sample_type: all  # GDC sample_type filter; "tumor" also matches Metastatic + Recurrent
 
     # How often to poll the GDC inventory (seconds)
     poll_interval_seconds: 3600

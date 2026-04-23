@@ -24,6 +24,16 @@ cleanup_work_dir: false  # delete per-batch work/ dirs after success
 # combined_manifest_path: /path/to/results/manifest-combined.csv
 #   ^ defaults to {outdir}/manifest-combined.csv if not set
 
+# Optional: run commands after each successful Nextflow batch.
+# Template vars: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
+# post_batch_hooks:
+#   - command: "python {repo_dir}/scripts/tcga/tcga_append_wds.py"
+#     args:
+#       - "--pt-dir={outdir}/features/ctranspath/pt"
+#       - "--h5-dir={outdir}/features/ctranspath/tile_h5"
+#       - "--wds-dest=s3://your-bucket/wds/ctranspath"
+#       - "--slide-ids-csv={batch_csv}"
+
 watchers:
   - type: local
     path: /path/to/incoming/slides
@@ -42,3 +52,22 @@ watchers:
   #   min_file_size_bytes: 10000000
   #   # aws_profile: my-profile
   #   # endpoint_url: http://pmindecs.mskcc.org:9020
+
+  # Uncomment to watch TCGA GDC for new slides.
+  # See dispatcher/tcga_dispatcher.yaml for a fully annotated TCGA example.
+  #
+  # - type: tcga
+  #   inventory_csv: /path/to/tcga_inventory.csv   # managed by tcga_sync_inventory.py
+  #   status_csv: /path/to/tcga_status.csv         # managed by tcga_update_status.py
+  #   results_dir: /path/to/results                # nextflow outdir (same as above)
+  #   model: ctranspath                            # model to check for completed slides
+  #   local_slides_dir: /path/to/slides            # where .svs files live (or will be downloaded)
+  #   # s3_base: s3://bucket/slides                # alternative / fallback to local
+  #   slide_type: DX1                              # DX1, DX2, or all
+  #   # project: TCGA-BRCA                         # restrict to one project; omit for all
+  #   poll_interval_seconds: 3600
+  #   gdc_max_age_hours: 24.0                      # re-use cached inventory if younger than this
+  #   download_enabled: false                      # set true to auto-download via gdc-client
+  #   download_dir: /path/to/downloads
+  #   download_concurrency: 4
+  #   # gdc_token_file: /path/to/gdc-user-token.txt

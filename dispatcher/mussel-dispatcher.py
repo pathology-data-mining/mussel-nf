@@ -508,6 +508,34 @@ class StateStore:
         conn.commit()
         return n
 
+    def blacklist_slide(self, slide_id: str, reason: str, max_retries: int = 999):
+        """Permanently exclude a slide from future dispatch.
+
+        Sets status=FAILED, error_msg=reason, and fail_count=max_retries so that
+        reset_failed_to_pending() will never re-queue it.  The slide stays in the
+        DB for audit/tracking purposes.  If the slide is not yet known it is
+        inserted first (path stored as empty string so it won't be dispatched).
+        """
+        conn = self._conn()
+        existing = conn.execute(
+            "SELECT slide_path FROM slides WHERE slide_id = ?", (slide_id,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE slides SET status='FAILED', fail_count=?, error_msg=?,
+                   completed_at=?, batch_id=NULL
+                   WHERE slide_id=?""",
+                (max_retries, reason, datetime.now(timezone.utc).isoformat(), slide_id),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO slides (slide_path, slide_id, status, fail_count, error_msg, first_seen_at)
+                   VALUES ('', ?, 'FAILED', ?, ?, ?)""",
+                (slide_id, max_retries, reason, datetime.now(timezone.utc).isoformat()),
+            )
+        conn.commit()
+        log.warning("Blacklisted slide %s: %s", slide_id, reason)
+
     def set_download_path(self, slide_path: str, download_path: str):
         """Record the local path of a downloaded slide (the file_id directory)."""
         conn = self._conn()

@@ -156,7 +156,47 @@ class TestStateStore:
         ).fetchone()
         assert row["fail_count"] == 3
 
-    def test_reset_dispatched_to_pending(self, store):
+    def test_blacklist_slide_existing(self, store):
+        """blacklist_slide marks an existing slide as permanently FAILED."""
+        store.add_slide("/slides/bad.svs", "bad-slide")
+        store.mark_dispatched(["/slides/bad.svs"], "batch-001")
+        store.blacklist_slide("bad-slide", reason="S3 file not found (404)", max_retries=999)
+        row = store._conn().execute(
+            "SELECT status, fail_count, error_msg, batch_id FROM slides WHERE slide_id=?",
+            ("bad-slide",),
+        ).fetchone()
+        assert row["status"] == "FAILED"
+        assert row["fail_count"] == 999
+        assert "404" in row["error_msg"]
+        assert row["batch_id"] is None
+
+    def test_blacklist_slide_new(self, store):
+        """blacklist_slide inserts a new record when slide is not yet in DB."""
+        store.blacklist_slide("unknown-slide", reason="File missing on S3", max_retries=999)
+        row = store._conn().execute(
+            "SELECT status, fail_count, error_msg FROM slides WHERE slide_id=?",
+            ("unknown-slide",),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "FAILED"
+        assert row["fail_count"] == 999
+
+    def test_blacklist_slide_never_reset_to_pending(self, store):
+        """reset_failed_to_pending never re-queues a blacklisted slide."""
+        store.blacklist_slide("stuck-slide", reason="404", max_retries=999)
+        store.reset_failed_to_pending(max_retries=999)
+        row = store._conn().execute(
+            "SELECT status FROM slides WHERE slide_id=?", ("stuck-slide",)
+        ).fetchone()
+        assert row["status"] == "FAILED"
+
+    def test_blacklist_slide_not_in_pending(self, store):
+        """A blacklisted slide is never returned as pending."""
+        store.blacklist_slide("blacklisted", reason="404", max_retries=999)
+        pending = store.get_pending_slides()
+        assert not any(s["slide_id"] == "blacklisted" for s in pending)
+
+
         store.add_slide("/slides/a.svs", "a")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
         store.reset_dispatched_to_pending("batch-001")

@@ -23,7 +23,7 @@ min_batch_size: 50
 max_wait_seconds: 600
 
 retry_failed: true
-max_slide_retries: 3
+max_slide_retries: 10  # permanently skip slides that fail this many times (was 3, raised to tolerate infra kills)
 cleanup_work_dir: true        # delete NF work/ dir after each batch (success or failure)
 cleanup_downloads: false      # NF storeDir caches downloads — keep them for future runs
 cleanup_batch_csv: false      # set true to delete per-batch samples CSV after success

@@ -23,7 +23,7 @@ max_wait_seconds: 600
 
 retry_failed: true
 max_slide_retries: 3
-cleanup_work_dir: false       # set true to delete NF work/ dir after each successful batch
+cleanup_work_dir: true        # delete NF work/ dir after each batch (success or failure)
 cleanup_downloads: true       # delete downloaded .svs files after featurization succeeds
 cleanup_batch_csv: false      # set true to delete per-batch samples CSV after success
 cleanup_logs_after_days: 30   # delete NF log files for batches older than 30 days (0 = keep forever)

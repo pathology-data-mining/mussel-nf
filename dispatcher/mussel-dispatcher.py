@@ -60,7 +60,7 @@ CONFIG KEYS (top level)
 
   Behaviour:
     retry_failed             Re-enqueue slides from crashed batches on restart (default true)
-    cleanup_work_dir         Delete NF work dir after each successful batch (default false)
+    cleanup_work_dir         Delete NF work dir after each batch (success or failure, default false)
     cleanup_downloads        Delete downloaded slides (.svs) after a successful batch (default false)
     cleanup_batch_csv        Delete the per-batch samples CSV after success (default false)
     cleanup_logs_after_days  Delete NF log files for batches older than N days (0 = keep forever)
@@ -1117,9 +1117,10 @@ class NextflowRunner:
             log.info("Batch %s completed successfully.", self.batch_id)
             self._collect_manifest(run_started_at)
             self._run_post_batch_hooks(csv_path)
-            self._cleanup(csv_path, log_path, work_dir)
+            self._cleanup(csv_path, log_path, work_dir, succeeded=True)
         else:
             log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
+            self._cleanup(csv_path, log_path, work_dir, succeeded=False)
 
         return exit_code
 
@@ -1156,13 +1157,17 @@ class NextflowRunner:
             except Exception as exc:
                 log.error("Post-batch hook raised: %s", exc)
 
-    def _cleanup(self, csv_path: str, log_path: str, work_dir: str):
-        """Post-success cleanup: work dir, downloaded slides, batch CSV, old logs."""
+    def _cleanup(self, csv_path: str, log_path: str, work_dir: str, *, succeeded: bool = True):
+        """Post-batch cleanup. Work dir is removed on both success and failure when enabled.
+        Downloads, batch CSV, and log rotation only run on success."""
         import shutil
 
         if self.cfg.cleanup_work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
             log.info("Batch %s: removed work dir %s", self.batch_id, work_dir)
+
+        if not succeeded:
+            return
 
         if self.cfg.cleanup_downloads:
             for dl_dir in self.state.get_batch_download_paths(self.batch_id):

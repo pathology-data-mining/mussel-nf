@@ -1176,3 +1176,41 @@ class TestCleanup:
         )
 
         assert log_file.exists()
+
+    def test_cleanup_work_dir_on_failure(self, tmp_path):
+        """cleanup_work_dir=True removes work dir even when batch failed."""
+        state = self._make_state(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        (work_dir / "staged_file.svs").write_text("data")
+        dl_dir = tmp_path / "downloads"
+        dl_dir.mkdir()
+
+        cfg = make_config(cleanup_work_dir=True, cleanup_downloads=True)
+        runner = NextflowRunner(cfg, "batch_fail", [], state)
+        runner._cleanup(
+            csv_path=str(tmp_path / "batch_fail.csv"),
+            log_path=str(tmp_path / "batch_fail.log"),
+            work_dir=str(work_dir),
+            succeeded=False,
+        )
+
+        assert not work_dir.exists(), "work dir should be deleted on failure"
+        assert dl_dir.exists(), "download dir should NOT be deleted on failure"
+
+    def test_cleanup_work_dir_skipped_on_failure_when_disabled(self, tmp_path):
+        """cleanup_work_dir=False leaves work dir even when batch failed."""
+        state = self._make_state(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+
+        cfg = make_config(cleanup_work_dir=False)
+        runner = NextflowRunner(cfg, "batch_nodel", [], state)
+        runner._cleanup(
+            csv_path=str(tmp_path / "batch_nodel.csv"),
+            log_path=str(tmp_path / "batch_nodel.log"),
+            work_dir=str(work_dir),
+            succeeded=False,
+        )
+
+        assert work_dir.exists(), "work dir should be kept when cleanup_work_dir=False"

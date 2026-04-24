@@ -2,7 +2,8 @@
 """Mussel-nf Dispatcher Monitoring Dashboard.
 
 Reads configuration from the dispatcher YAML file (same file used to run the
-dispatcher) and exposes a browser-based dashboard via FastAPI/uvicorn.
+dispatcher) and exposes a browser-based dashboard via stdlib http.server
+(no external dependencies required).
 
 Usage:
     python dispatcher/dashboard.py dispatcher/tcga_dispatcher.yaml
@@ -18,7 +19,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Import Config / WatcherConfig from the sibling mussel-dispatcher.py
@@ -95,44 +95,42 @@ def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# FastAPI app factory
+# HTTP request handler (stdlib — no FastAPI/uvicorn dependency)
 # ---------------------------------------------------------------------------
 
-def make_app(cfg: Config):
-    try:
-        from fastapi import FastAPI
-        from fastapi.responses import HTMLResponse, JSONResponse
-    except ImportError:
-        sys.exit("fastapi is required: pip install fastapi uvicorn")
+import csv
+import json
+import re as _re
+import threading
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    app = FastAPI(title="Mussel Dispatcher Dashboard")
+
+def _build_handler(cfg: Config):
+    """Return a BaseHTTPRequestHandler subclass closed over cfg."""
+
     db_path = os.path.join(cfg.state_dir, "dispatcher.db")
     wds_manifest = os.path.join(cfg.outdir, "wds_manifest.csv")
+    nf_log_path = os.path.join(cfg.repo_dir, ".nextflow.log")
 
-    # Find the tcga watcher (first one with wds_destinations)
-    tcga_watcher: Optional[WatcherConfig] = None
+    tcga_watcher = None
     for w in cfg.watchers:
         if w.wds_destinations:
             tcga_watcher = w
             break
 
-    # Pre-warm S3 cache in background so first browser load is fast
+    # Pre-warm S3 cache in background
     if tcga_watcher and tcga_watcher.wds_destinations:
-        import threading
         threading.Thread(
             target=_s3_stats, args=(tcga_watcher, "wds"), daemon=True, name="s3-prewarm"
         ).start()
 
-    def _db() -> sqlite3.Connection:
+    def _db():
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         return conn
 
-    # ------------------------------------------------------------------
-    # API: slide status counts
-    # ------------------------------------------------------------------
-    @app.get("/api/status")
-    def api_status():
+    def _api_status():
         with _db() as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) AS n FROM slides GROUP BY status"
@@ -141,7 +139,6 @@ def make_app(cfg: Config):
         total = sum(counts.values())
         succeeded = counts.get("SUCCEEDED", 0)
         pct = round(succeeded / total * 100, 1) if total else 0
-
         with _db() as conn:
             n_running = conn.execute(
                 "SELECT COUNT(*) FROM batches WHERE status='RUNNING'"
@@ -149,7 +146,6 @@ def make_app(cfg: Config):
             n_blacklisted = conn.execute(
                 "SELECT COUNT(*) FROM slides WHERE fail_count >= 100"
             ).fetchone()[0]
-
         return {
             "counts": counts,
             "total": total,
@@ -158,11 +154,7 @@ def make_app(cfg: Config):
             "blacklisted": n_blacklisted,
         }
 
-    # ------------------------------------------------------------------
-    # API: recent batches
-    # ------------------------------------------------------------------
-    @app.get("/api/batches")
-    def api_batches():
+    def _api_batches():
         with _db() as conn:
             rows = conn.execute("""
                 SELECT batch_id, status, slide_count, dispatched_at,
@@ -171,7 +163,6 @@ def make_app(cfg: Config):
                 ORDER BY dispatched_at DESC
                 LIMIT 30
             """).fetchall()
-
         result = []
         for r in rows:
             start = r["dispatched_at"] or ""
@@ -179,8 +170,6 @@ def make_app(cfg: Config):
             duration = None
             if start and end:
                 try:
-                    from datetime import datetime, timezone
-                    fmt = "%Y-%m-%dT%H:%M:%S.%f%z"
                     def _parse(s):
                         try:
                             return datetime.fromisoformat(s)
@@ -203,86 +192,109 @@ def make_app(cfg: Config):
             })
         return result
 
-    # ------------------------------------------------------------------
-    # API: log tail for a batch
-    # Returns the latest NF status block + tail of shared .nextflow.log
-    # ------------------------------------------------------------------
-    nf_log_path = os.path.join(cfg.repo_dir, ".nextflow.log")
-
-    @app.get("/api/logs/{batch_id}")
-    def api_logs(batch_id: str):
+    def _api_logs(batch_id: str):
         with _db() as conn:
             row = conn.execute(
                 "SELECT log_path FROM batches WHERE batch_id=?", (batch_id,)
             ).fetchone()
         if not row or not row["log_path"]:
-            return JSONResponse({"lines": [], "error": "no log path"}, status_code=404)
+            return None, "no log path"
         log_path = row["log_path"]
         if not os.path.exists(log_path):
-            return JSONResponse({"lines": [], "error": "log file not found"}, status_code=404)
+            return None, "log file not found"
         try:
-            import re as _re
+            ansi = _re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfnsuhl]|\r')
             with open(log_path, "r", errors="replace") as fh:
                 content = fh.read()
-            # Strip ANSI escape codes
-            ansi = _re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfnsuhl]|\r')
             content = ansi.sub('', content)
-            # Show only the LAST status block (after final "executor >")
             last = content.rfind("executor >")
             block = content[last:].strip() if last >= 0 else content.strip()
             lines = block.splitlines()
         except Exception as exc:
-            return JSONResponse({"lines": [], "error": str(exc)}, status_code=500)
-
-        # Tail of shared .nextflow.log (last 40 lines)
-        nf_lines: list[str] = []
+            return None, str(exc)
+        nf_lines: list = []
         if os.path.exists(nf_log_path):
             try:
                 with open(nf_log_path, "r", errors="replace") as fh:
-                    nf_lines = [l.rstrip() for l in fh.readlines()[-40:]]
+                    nf_lines = [ln.rstrip() for ln in fh.readlines()[-40:]]
             except Exception:
                 pass
+        return {"lines": lines, "nf_log": nf_lines}, None
 
-        return {"lines": lines, "nf_log": nf_lines}
+    def _api_wds():
+        # WDS manifest counts
+        wds_counts: dict = {}
+        if os.path.exists(wds_manifest):
+            try:
+                with open(wds_manifest, newline="") as f:
+                    for row in csv.DictReader(f):
+                        model = row.get("model", "unknown")
+                        wds_counts[model] = wds_counts.get(model, 0) + 1
+            except Exception as exc:
+                return {"models": {}, "total": 0, "error": str(exc)}
+        # S3 shard stats (from cache; refresh happens in background)
+        s3_stats: dict = {}
+        if tcga_watcher and tcga_watcher.wds_destinations:
+            s3_stats = _s3_stats(tcga_watcher, "wds")
 
-    # ------------------------------------------------------------------
-    # API: WDS manifest stats
-    # ------------------------------------------------------------------
-    @app.get("/api/wds")
-    def api_wds():
-        if not os.path.exists(wds_manifest):
-            return {"models": {}, "total": 0}
-        try:
-            import csv
-            counts: dict[str, int] = {}
-            with open(wds_manifest, newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    model = row.get("model", "unknown")
-                    counts[model] = counts.get(model, 0) + 1
-            return {"models": counts, "total": sum(counts.values())}
-        except Exception as exc:
-            return {"models": {}, "total": 0, "error": str(exc)}
+        models: dict = {}
+        all_keys = set(wds_counts) | set(s3_stats)
+        for m in sorted(all_keys):
+            models[m] = {
+                "slides": wds_counts.get(m, 0),
+                "shards": s3_stats.get(m, {}).get("shards", 0),
+                "error": s3_stats.get(m, {}).get("error"),
+            }
+        return {"models": models, "total": sum(wds_counts.values())}
 
-    # ------------------------------------------------------------------
-    # API: S3 shard stats (cached) — run in thread pool to avoid blocking
-    # ------------------------------------------------------------------
-    @app.get("/api/s3")
-    async def api_s3():
-        import asyncio
-        if not tcga_watcher or not tcga_watcher.wds_destinations:
-            return {"models": {}, "note": "no wds_destinations configured"}
-        stats = await asyncio.to_thread(_s3_stats, tcga_watcher, "wds")
-        return {"models": stats}
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):  # suppress default access log spam
+            pass
 
-    # ------------------------------------------------------------------
-    # HTML dashboard
-    # ------------------------------------------------------------------
-    @app.get("/", response_class=HTMLResponse)
-    def dashboard():
-        return HTMLResponse(_HTML)
+        def _send_json(self, data, status=200):
+            body = json.dumps(data).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-    return app
+        def _send_html(self, html: str):
+            body = html.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            try:
+                if path in ("/", "/index.html"):
+                    self._send_html(_HTML)
+                elif path == "/api/status":
+                    self._send_json(_api_status())
+                elif path == "/api/batches":
+                    self._send_json(_api_batches())
+                elif path.startswith("/api/logs/"):
+                    batch_id = path[len("/api/logs/"):]
+                    data, err = _api_logs(batch_id)
+                    if data is None:
+                        self._send_json({"lines": [], "error": err}, status=404)
+                    else:
+                        self._send_json(data)
+                elif path == "/api/wds":
+                    self._send_json(_api_wds())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            except Exception as exc:
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except Exception:
+                    pass
+
+    return Handler
 
 
 # ---------------------------------------------------------------------------
@@ -333,9 +345,6 @@ _HTML = """<!DOCTYPE html>
   .wds-row { display: flex; justify-content: space-between; padding: 4px 0;
              border-bottom: 1px solid #334155; font-size: 0.8rem; }
   .wds-row:last-child { border-bottom: none; }
-  .s3-row { display: flex; justify-content: space-between; padding: 4px 0;
-            border-bottom: 1px solid #334155; font-size: 0.8rem; }
-  .s3-row:last-child { border-bottom: none; }
   .no-data { color: #475569; font-size: 0.8rem; }
   details summary { cursor: pointer; padding: 4px 0; color: #94a3b8; font-size: 0.8rem; }
   details summary:hover { color: #e2e8f0; }
@@ -406,10 +415,8 @@ _HTML = """<!DOCTYPE html>
 
   <!-- WDS + S3 -->
   <div class="card">
-    <h2>WDS Uploads</h2>
+    <h2>WDS</h2>
     <div id="wds-content"><span class="no-data">Loading…</span></div>
-    <h2 style="margin-top:16px">S3 Shards (ECS)</h2>
-    <div id="s3-content"><span class="no-data">Loading…</span></div>
   </div>
 
   <!-- Batch table -->
@@ -644,37 +651,33 @@ async function showLog(batch_id) { openLogModal(batch_id); }
 async function loadWds() {
   const el = document.getElementById('wds-content');
   try {
-    const d = await apiFetch('/api/wds');
-    if (!d.models || !Object.keys(d.models).length) {
-      el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return;
-    }
-    el.innerHTML = Object.entries(d.models).map(([m, n]) =>
-      `<div class="wds-row"><span>${m}</span><span style="color:#4ade80;font-weight:600">${n} slides</span></div>`
-    ).join('') + `<div class="wds-row" style="margin-top:4px"><span>Total</span><b>${d.total}</b></div>`;
+    const [wds, s3] = await Promise.allSettled([apiFetch('/api/wds'), apiFetch('/api/s3')]);
+    const slides = (wds.status === 'fulfilled' && wds.value.models) ? wds.value.models : {};
+    const shards = (s3.status === 'fulfilled' && s3.value.models) ? s3.value.models : {};
+    const models = new Set([...Object.keys(slides), ...Object.keys(shards)]);
+    if (!models.size) { el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return; }
+    const rows = [...models].map(m => {
+      const n = slides[m] || 0;
+      const sv = shards[m];
+      let shardStr = sv
+        ? (sv.error ? `<span style="color:#f87171">${sv.error}</span>`
+                    : `<span style="color:#38bdf8">${sv.shards} shard${sv.shards === 1 ? '' : 's'}</span>`)
+        : '<span style="color:#6b7280">–</span>';
+      return `<div class="wds-row">
+        <span>${m}</span>
+        <span><span style="color:#4ade80;font-weight:600">${n} slides</span> &nbsp;·&nbsp; ${shardStr}</span>
+      </div>`;
+    });
+    const total = Object.values(slides).reduce((a,b) => a+b, 0);
+    if (total) rows.push(`<div class="wds-row" style="margin-top:4px;border-top:1px solid #334155"><span>Total slides</span><b>${total}</b></div>`);
+    el.innerHTML = rows.join('');
   } catch(e) {
     el.innerHTML = '<span class="no-data">Failed to load WDS data.</span>';
     console.error('loadWds failed:', e);
   }
 }
 
-async function loadS3() {
-  const el = document.getElementById('s3-content');
-  if (el.innerHTML.includes('Loading')) el.innerHTML = '<span class="no-data">Fetching ECS stats…</span>';
-  try {
-    const d = await apiFetch('/api/s3');
-    if (!d.models || !Object.keys(d.models).length) {
-      el.innerHTML = '<span class="no-data">' + (d.note || 'No data.') + '</span>'; return;
-    }
-    el.innerHTML = Object.entries(d.models).map(([m, v]) =>
-      v.error
-        ? `<div class="s3-row"><span>${m}</span><span style="color:#f87171">${v.error}</span></div>`
-        : `<div class="s3-row"><span>${m}</span><span style="color:#38bdf8">${v.shards} shards / ${v.objects} objects</span></div>`
-    ).join('');
-  } catch(e) {
-    el.innerHTML = '<span class="no-data">Failed to fetch S3 stats.</span>';
-    console.error('loadS3 failed:', e);
-  }
-}
+async function loadS3() { /* merged into loadWds */ }
 
 async function refresh() {
   document.getElementById('last-updated').textContent = 'Refreshing…';
@@ -682,12 +685,9 @@ async function refresh() {
   document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 }
 
-async function refreshS3() { await loadS3(); }
-
 refresh();
-refreshS3();
 setInterval(refresh, 10000);
-setInterval(refreshS3, 60000);
+setInterval(loadWds, 60000);  // S3 stats are expensive — refresh less often via loadWds
 </script>
 </body>
 </html>
@@ -717,22 +717,20 @@ def main():
             try:
                 val = subprocess.check_output(
                     ["nextflow", "secrets", "get", nf_secret],
-                    text=True, stderr=subprocess.DEVNULL,
+                    text=True, stderr=subprocess.DEVNULL, timeout=5,
                 ).strip()
                 if val:
                     os.environ[env_key] = val
             except Exception:
                 pass
 
-    app = make_app(cfg)
-
-    try:
-        import uvicorn
-    except ImportError:
-        sys.exit("uvicorn is required: pip install uvicorn")
-
+    handler_cls = _build_handler(cfg)
+    server = ThreadingHTTPServer((args.host, args.port), handler_cls)
     print(f"Dashboard: http://localhost:{args.port}/")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

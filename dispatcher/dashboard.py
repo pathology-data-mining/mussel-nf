@@ -232,10 +232,24 @@ def _build_handler(cfg: Config):
                         wds_counts[model] = wds_counts.get(model, 0) + 1
             except Exception as exc:
                 return {"models": {}, "total": 0, "error": str(exc)}
-        # S3 shard stats (from cache; refresh happens in background)
+        # S3 shard stats — return from cache only; background thread refreshes
         s3_stats: dict = {}
         if tcga_watcher and tcga_watcher.wds_destinations:
-            s3_stats = _s3_stats(tcga_watcher, "wds")
+            now = time.time()
+            cached = {m: _s3_cache[m] for m in _s3_cache}
+            if cached:
+                # Return cached values immediately
+                s3_stats = {m: {"shards": v.get("shards", 0), "objects": v.get("objects", 0),
+                                "error": v.get("error")} for m, v in cached.items()}
+            else:
+                # No cache yet — note that prewarm thread is running
+                s3_stats = {}
+            # Trigger a background refresh if cache is stale
+            oldest = min((v.get("ts", 0) for v in _s3_cache.values()), default=0)
+            if now - oldest > _S3_CACHE_TTL:
+                threading.Thread(
+                    target=_s3_stats, args=(tcga_watcher, "wds"), daemon=True, name="s3-refresh"
+                ).start()
 
         models: dict = {}
         all_keys = set(wds_counts) | set(s3_stats)
@@ -651,24 +665,23 @@ async function showLog(batch_id) { openLogModal(batch_id); }
 async function loadWds() {
   const el = document.getElementById('wds-content');
   try {
-    const [wds, s3] = await Promise.allSettled([apiFetch('/api/wds'), apiFetch('/api/s3')]);
-    const slides = (wds.status === 'fulfilled' && wds.value.models) ? wds.value.models : {};
-    const shards = (s3.status === 'fulfilled' && s3.value.models) ? s3.value.models : {};
-    const models = new Set([...Object.keys(slides), ...Object.keys(shards)]);
-    if (!models.size) { el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return; }
-    const rows = [...models].map(m => {
-      const n = slides[m] || 0;
-      const sv = shards[m];
-      let shardStr = sv
-        ? (sv.error ? `<span style="color:#f87171">${sv.error}</span>`
-                    : `<span style="color:#38bdf8">${sv.shards} shard${sv.shards === 1 ? '' : 's'}</span>`)
-        : '<span style="color:#6b7280">–</span>';
+    const data = await apiFetch('/api/wds');
+    const models = data.models || {};
+    const keys = Object.keys(models);
+    if (!keys.length) { el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return; }
+    const rows = keys.map(m => {
+      const mv = models[m];
+      const n = mv.slides || 0;
+      const ns = mv.shards || 0;
+      const shardStr = mv.error
+        ? `<span style="color:#f87171">${mv.error}</span>`
+        : `<span style="color:#38bdf8">${ns} shard${ns === 1 ? '' : 's'}</span>`;
       return `<div class="wds-row">
         <span>${m}</span>
         <span><span style="color:#4ade80;font-weight:600">${n} slides</span> &nbsp;·&nbsp; ${shardStr}</span>
       </div>`;
     });
-    const total = Object.values(slides).reduce((a,b) => a+b, 0);
+    const total = keys.reduce((a, m) => a + (models[m].slides || 0), 0);
     if (total) rows.push(`<div class="wds-row" style="margin-top:4px;border-top:1px solid #334155"><span>Total slides</span><b>${total}</b></div>`);
     el.innerHTML = rows.join('');
   } catch(e) {

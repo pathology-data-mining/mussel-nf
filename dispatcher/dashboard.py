@@ -101,6 +101,48 @@ def _parse_nf_log(log_path: str) -> dict:
     return result
 
 
+_squeue_cache: dict = {}
+_SQUEUE_TTL = 15  # seconds
+
+
+def _slurm_stats() -> dict:
+    """Return summary of current user's SLURM jobs via squeue."""
+    now = time.time()
+    if _squeue_cache.get("ts", 0) + _SQUEUE_TTL > now:
+        return _squeue_cache.get("data", {})
+
+    result: dict = {"running": 0, "pending": 0, "total": 0, "nodes": {}, "pending_reasons": {}, "error": None}
+    try:
+        out = subprocess.check_output(
+            ["squeue", "--me", "--noheader", "--format=%T|%R|%M|%N"],
+            timeout=10, text=True, stderr=subprocess.DEVNULL,
+        )
+        for line in out.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) < 4:
+                continue
+            state, reason, elapsed, node = parts[0], parts[1], parts[2], parts[3]
+            result["total"] += 1
+            if state == "RUNNING":
+                result["running"] += 1
+                if node and node != "N/A":
+                    result["nodes"][node] = result["nodes"].get(node, 0) + 1
+            elif state == "PENDING":
+                result["pending"] += 1
+                r = reason.strip("()")
+                result["pending_reasons"][r] = result["pending_reasons"].get(r, 0) + 1
+    except FileNotFoundError:
+        result["error"] = "squeue not found"
+    except subprocess.TimeoutExpired:
+        result["error"] = "squeue timed out"
+    except Exception as exc:
+        result["error"] = str(exc)[:80]
+
+    _squeue_cache["data"] = result
+    _squeue_cache["ts"] = now
+    return result
+
+
 def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
     """Return {model: {shards, objects}} from ECS, with TTL cache.
 
@@ -398,6 +440,8 @@ def _build_handler(cfg: Config):
                         self._send_json(data)
                 elif path == "/api/wds":
                     self._send_json(_api_wds())
+                elif path == "/api/slurm":
+                    self._send_json(_slurm_stats())
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -531,6 +575,12 @@ _HTML = """<!DOCTYPE html>
   <div class="card">
     <h2>WDS</h2>
     <div id="wds-content"><span class="no-data">Loading…</span></div>
+  </div>
+
+  <!-- SLURM -->
+  <div class="card">
+    <h2>SLURM</h2>
+    <div id="slurm-content"><span class="no-data">Loading…</span></div>
   </div>
 
   <!-- Batch table -->
@@ -823,12 +873,44 @@ async function loadS3() { /* merged into loadWds */ }
 
 async function refresh() {
   document.getElementById('last-updated').textContent = 'Refreshing…';
-  await Promise.allSettled([loadStatus(), loadBatches(), loadWds()]);
+  await Promise.allSettled([loadStatus(), loadBatches(), loadWds(), loadSlurm()]);
   document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+}
+
+async function loadSlurm() {
+  const el = document.getElementById('slurm-content');
+  try {
+    const d = await apiFetch('/api/slurm');
+    if (d.error) { el.innerHTML = `<span class="no-data">squeue error: ${d.error}</span>`; return; }
+
+    // Summary line
+    const summary = `<div style="font-size:1.1rem;margin-bottom:0.5rem">
+      <span style="color:#6ee7b7;font-weight:600">${d.running}</span> running &nbsp;
+      <span style="color:#fcd34d;font-weight:600">${d.pending}</span> pending &nbsp;
+      <span style="color:#94a3b8">(${d.total} total)</span>
+    </div>`;
+
+    // Node utilization
+    const nodes = Object.entries(d.nodes || {}).sort((a,b) => b[1]-a[1]);
+    const nodeHtml = nodes.length ? `<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">NODES</span><br>` +
+      nodes.map(([n,c]) => `<span style="font-family:monospace;font-size:0.8rem">${n}</span> <span style="color:#6ee7b7">×${c}</span>`).join(' &nbsp; ') +
+      `</div>` : '';
+
+    // Pending reasons
+    const reasons = Object.entries(d.pending_reasons || {}).sort((a,b) => b[1]-a[1]);
+    const reasonHtml = reasons.length ? `<div><span style="color:#94a3b8;font-size:0.75rem">PENDING REASONS</span><br>` +
+      reasons.map(([r,c]) => `<span style="color:#fcd34d">${r}</span>: ${c}`).join(' &nbsp; ') +
+      `</div>` : '';
+
+    el.innerHTML = summary + nodeHtml + reasonHtml;
+  } catch(e) {
+    el.innerHTML = '<span class="no-data">Failed to load SLURM data.</span>';
+  }
 }
 
 refresh();
 setInterval(refresh, 10000);
+setInterval(loadSlurm, 15000);  // matches squeue cache TTL
 setInterval(loadWds, 60000);  // S3 stats are expensive — refresh less often via loadWds
 </script>
 </body>

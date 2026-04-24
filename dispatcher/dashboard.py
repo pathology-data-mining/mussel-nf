@@ -323,9 +323,34 @@ _HTML = """<!DOCTYPE html>
   .btn-refresh { background: #334155; border: none; color: #94a3b8; padding: 4px 12px;
                 border-radius: 4px; cursor: pointer; font-size: 0.75rem; }
   .btn-refresh:hover { background: #475569; color: #e2e8f0; }
+  /* Log modal */
+  #log-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7);
+               z-index:1000; align-items:center; justify-content:center; }
+  #log-modal.open { display:flex; }
+  #log-modal-box { background:#1e293b; border:1px solid #334155; border-radius:10px;
+                   width:90vw; max-width:1100px; max-height:85vh; display:flex; flex-direction:column; }
+  #log-modal-header { display:flex; justify-content:space-between; align-items:center;
+                      padding:12px 16px; border-bottom:1px solid #334155; }
+  #log-modal-title { font-size:0.85rem; font-weight:600; color:#f8fafc; font-family:monospace; }
+  #log-modal-close { background:none; border:none; color:#94a3b8; font-size:1.4rem;
+                     cursor:pointer; line-height:1; padding:0 4px; }
+  #log-modal-close:hover { color:#f8fafc; }
+  #log-modal-body { flex:1; overflow-y:auto; padding:12px 16px;
+                    font-family:monospace; font-size:0.72rem; line-height:1.5;
+                    white-space:pre-wrap; word-break:break-all; color:#94a3b8;
+                    background:#0f172a; border-radius:0 0 10px 10px; }
 </style>
 </head>
 <body>
+<div id="log-modal">
+  <div id="log-modal-box">
+    <div id="log-modal-header">
+      <span id="log-modal-title"></span>
+      <button id="log-modal-close" onclick="closeLogModal()">✕</button>
+    </div>
+    <pre id="log-modal-body">Loading…</pre>
+  </div>
+</div>
 <header>
   <h1>🦪 Mussel Dispatcher Dashboard</h1>
   <div style="display:flex;gap:12px;align-items:center">
@@ -492,46 +517,57 @@ async function loadBatches() {
       </tr>`).join('');
 
     const running = batches.filter(b => b.status === 'RUNNING');
-    if (!running.length) { logsDiv.innerHTML = '<span class="no-data">No running batches.</span>'; return; }
-    logsDiv.innerHTML = '';
-    for (const b of running) {
-      const detail = document.createElement('details');
-      detail.id = 'log-' + b.batch_id;
-      detail.open = true;
-      detail.innerHTML = `<summary>${b.batch_id} (${b.slide_count} slides)</summary>
-        <div class="log-block" id="logtext-${b.batch_id}">Loading…</div>`;
-      logsDiv.appendChild(detail);
-      loadLog(b.batch_id);
+    if (!running.length) {
+      logsDiv.innerHTML = '<span class="no-data">No running batches. Click View in the table above to inspect any batch log.</span>';
+      return;
     }
+    logsDiv.innerHTML = running.map(b =>
+      `<button class="btn-refresh" style="margin:4px" onclick="showLog('${b.batch_id}')">${b.batch_id} (${b.slide_count} slides)</button>`
+    ).join('');
   } catch(e) {
     tbody.innerHTML = '<tr><td colspan="7" class="no-data">Failed to load batches.</td></tr>';
     console.error('loadBatches failed:', e);
   }
 }
 
-async function loadLog(batch_id) {
-  const el = document.getElementById('logtext-' + batch_id);
-  if (!el) return;
+let _modalBatchId = null;
+let _modalInterval = null;
+
+function openLogModal(batch_id) {
+  _modalBatchId = batch_id;
+  document.getElementById('log-modal-title').textContent = batch_id;
+  document.getElementById('log-modal-body').textContent = 'Loading…';
+  document.getElementById('log-modal').classList.add('open');
+  refreshModalLog();
+  clearInterval(_modalInterval);
+  _modalInterval = setInterval(refreshModalLog, 5000);
+}
+
+function closeLogModal() {
+  document.getElementById('log-modal').classList.remove('open');
+  clearInterval(_modalInterval);
+  _modalInterval = null;
+  _modalBatchId = null;
+}
+
+async function refreshModalLog() {
+  if (!_modalBatchId) return;
+  const el = document.getElementById('log-modal-body');
   try {
-    const d = await apiFetch('/api/logs/' + batch_id);
-    el.textContent = (d.lines || []).join('\\n') || d.error || '(empty)';
-    el.scrollTop = el.scrollHeight;
+    const d = await apiFetch('/api/logs/' + _modalBatchId);
+    const text = (d.lines || []).join('\\n') || d.error || '(empty)';
+    const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 20;
+    el.textContent = text;
+    if (atBottom) el.scrollTop = el.scrollHeight;
   } catch { el.textContent = 'Failed to load log.'; }
 }
 
-async function showLog(batch_id) {
-  const logsDiv = document.getElementById('logs-content');
-  let detail = document.getElementById('log-' + batch_id);
-  if (!detail) {
-    detail = document.createElement('details');
-    detail.id = 'log-' + batch_id;
-    detail.open = true;
-    detail.innerHTML = `<summary>${batch_id}</summary>
-      <div class="log-block" id="logtext-${batch_id}">Loading…</div>`;
-    logsDiv.prepend(detail);
-  }
-  loadLog(batch_id);
-}
+// Close modal on backdrop click
+document.getElementById('log-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeLogModal();
+});
+
+async function showLog(batch_id) { openLogModal(batch_id); }
 
 async function loadWds() {
   const el = document.getElementById('wds-content');

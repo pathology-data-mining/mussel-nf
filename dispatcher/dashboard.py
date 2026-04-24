@@ -44,22 +44,61 @@ _NF_PROGRESS_RE = re.compile(
 )
 
 
-def _parse_nf_progress(log_path: str) -> dict | None:
-    """Return {pct, done, total} by scanning the last 4 KB of a NF log."""
+_NF_EXECUTOR_RE = re.compile(r'^executor\s*>\s*\S+\s*\((\d+)\)', re.MULTILINE)
+_NF_WARN_RE     = re.compile(r'^WARN[:\s](.+)', re.MULTILINE)
+_NF_ERROR_RE    = re.compile(r"^ERROR ~ Error executing process > '([^']+)'", re.MULTILINE)
+_NF_KILLED_RE   = re.compile(r'Killing running tasks \((\d+)\)', re.MULTILINE)
+
+
+def _parse_nf_log(log_path: str) -> dict:
+    """Parse a NF batch stdout log and return a dict with all useful metrics."""
+    result = {
+        "progress": None,   # {pct, done, total}
+        "slurm_jobs": None, # current active SLURM jobs
+        "warn_count": 0,
+        "last_warn": None,
+        "error_count": 0,
+        "first_error": None,
+        "killed": None,     # N tasks killed (infra kill signal)
+    }
+    if not log_path:
+        return result
     try:
         with open(log_path, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 4096))
-            tail = f.read().decode("utf-8", errors="replace")
-        matches = _NF_PROGRESS_RE.findall(tail)
-        if not matches:
-            return None
-        # Use the match with the largest total (ignores saveParams 1-of-1 noise)
-        pct_s, done_s, total_s = max(matches, key=lambda m: int(m[2]))
-        return {"pct": int(pct_s), "done": int(done_s), "total": int(total_s)}
+            raw = f.read()
+        text = raw.decode("utf-8", errors="replace")
+
+        # NF progress — take match with largest total (ignores saveParams 1-of-1)
+        prog_matches = _NF_PROGRESS_RE.findall(text)
+        if prog_matches:
+            pct_s, done_s, total_s = max(prog_matches, key=lambda m: int(m[2]))
+            result["progress"] = {"pct": int(pct_s), "done": int(done_s), "total": int(total_s)}
+
+        # Active SLURM jobs — last occurrence
+        slurm_matches = _NF_EXECUTOR_RE.findall(text)
+        if slurm_matches:
+            result["slurm_jobs"] = int(slurm_matches[-1])
+
+        # WARNs
+        warns = _NF_WARN_RE.findall(text)
+        result["warn_count"] = len(warns)
+        if warns:
+            result["last_warn"] = warns[-1].strip()[:120]
+
+        # ERRORs
+        errors = _NF_ERROR_RE.findall(text)
+        result["error_count"] = len(errors)
+        if errors:
+            result["first_error"] = errors[0].strip()[:120]
+
+        # Infrastructure kills
+        killed = _NF_KILLED_RE.findall(text)
+        if killed:
+            result["killed"] = int(killed[-1])
+
     except Exception:
-        return None
+        pass
+    return result
 
 
 def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
@@ -188,7 +227,8 @@ def _build_handler(cfg: Config):
         in_flight_done = 0
         in_flight_total = 0
         for rb in running_rows:
-            np = _parse_nf_progress(rb["log_path"]) if rb["log_path"] else None
+            log_info = _parse_nf_log(rb["log_path"]) if rb["log_path"] else {}
+            np = log_info.get("progress")
             if np and np["total"] > 0:
                 slide_count = rb["slide_count"] or 0
                 in_flight_done += slide_count * np["done"] / np["total"]
@@ -231,6 +271,7 @@ def _build_handler(cfg: Config):
                         duration = int((t1 - t0).total_seconds())
                 except Exception:
                     pass
+            log_info = _parse_nf_log(r["log_path"]) if r["log_path"] else {}
             result.append({
                 "batch_id": r["batch_id"],
                 "status": r["status"],
@@ -240,7 +281,13 @@ def _build_handler(cfg: Config):
                 "duration_s": duration,
                 "nextflow_exit": r["nextflow_exit"],
                 "has_log": bool(r["log_path"] and os.path.exists(r["log_path"])),
-                "nf_progress": _parse_nf_progress(r["log_path"]) if r["status"] == "RUNNING" and r["log_path"] else None,
+                "nf_progress": log_info.get("progress") if r["status"] == "RUNNING" else None,
+                "slurm_jobs": log_info.get("slurm_jobs"),
+                "warn_count": log_info.get("warn_count", 0),
+                "last_warn": log_info.get("last_warn"),
+                "error_count": log_info.get("error_count", 0),
+                "first_error": log_info.get("first_error"),
+                "killed": log_info.get("killed"),
             })
         return result
 
@@ -495,14 +542,15 @@ _HTML = """<!DOCTYPE html>
           <tr>
             <th>Batch ID</th>
             <th>Status</th>
-            <th>Slides</th>
+            <th>Tasks</th>
+            <th>SLURM</th>
             <th>Started</th>
             <th>Duration</th>
-            <th>NF Exit</th>
+            <th>Alerts</th>
             <th>Log</th>
           </tr>
         </thead>
-        <tbody id="batch-tbody"><tr><td colspan="7" class="no-data">Loading…</td></tr></tbody>
+        <tbody id="batch-tbody"><tr><td colspan="8" class="no-data">Loading…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -608,23 +656,38 @@ async function loadBatches() {
   try {
     const batches = await apiFetch('/api/batches');
     if (!batches.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="no-data">No batches yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="no-data">No batches yet.</td></tr>';
       logsDiv.innerHTML = '<span class="no-data">No running batches.</span>';
       return;
     }
     tbody.innerHTML = batches.map(b => {
       const np = b.nf_progress;
-      const slidesCell = np
+      const tasksCell = np
         ? `<span title="${np.done} of ${np.total} tasks">${np.done}/${np.total} <span style="color:#6ee7b7">(${np.pct}%)</span></span>`
         : (b.slide_count ?? '—');
+      const slurmCell = b.slurm_jobs !== null && b.slurm_jobs !== undefined
+        ? `<span title="Active SLURM jobs">${b.slurm_jobs}</span>` : '—';
+      // Alerts: killed > errors > warns
+      let alertCell = '—';
+      const parts = [];
+      if (b.killed !== null && b.killed !== undefined)
+        parts.push(`<span style="color:#f87171" title="Infra kill: ${b.killed} tasks killed">💀${b.killed}</span>`);
+      if (b.error_count)
+        parts.push(`<span style="color:#fca5a5" title="${b.first_error || 'errors'}">⛔${b.error_count}</span>`);
+      if (b.warn_count)
+        parts.push(`<span style="color:#fcd34d" title="${(b.last_warn || '').replace(/"/g,"'")}">⚠️${b.warn_count}</span>`);
+      if (b.nextflow_exit !== null && b.nextflow_exit !== undefined && b.nextflow_exit !== 0)
+        parts.push(`<span style="color:#f87171" title="NF exit code">exit:${b.nextflow_exit}</span>`);
+      if (parts.length) alertCell = parts.join(' ');
       return `
       <tr>
         <td style="font-family:monospace;font-size:0.7rem">${b.batch_id}</td>
         <td>${badge(b.status)}</td>
-        <td>${slidesCell}</td>
+        <td>${tasksCell}</td>
+        <td>${slurmCell}</td>
         <td>${fmtTime(b.dispatched_at)}</td>
         <td>${fmtDuration(b.duration_s, b.dispatched_at, b.status === 'RUNNING')}</td>
-        <td>${b.nextflow_exit !== null && b.nextflow_exit !== undefined ? b.nextflow_exit : '—'}</td>
+        <td>${alertCell}</td>
         <td>${b.has_log ? `<button class="btn-refresh" onclick="showLog('${b.batch_id}')">View</button>` : '—'}</td>
       </tr>`;
     }).join('');

@@ -9,6 +9,7 @@
 #   dispatch_dir  → batches/
 #   state_dir     → state/
 #   log_dir       → logs/
+work_base_dir: /gpfs/cdsi_ess/limr/nf/tcga-dispatch/work
 
 nextflow_profiles: cluster,slurm,conda
 outdir: tcga-results
@@ -24,7 +25,7 @@ max_wait_seconds: 600
 retry_failed: true
 max_slide_retries: 3
 cleanup_work_dir: true        # delete NF work/ dir after each batch (success or failure)
-cleanup_downloads: true       # delete downloaded .svs files after featurization succeeds
+cleanup_downloads: false      # NF storeDir caches downloads — keep them for future runs
 cleanup_batch_csv: false      # set true to delete per-batch samples CSV after success
 cleanup_logs_after_days: 30   # delete NF log files for batches older than 30 days (0 = keep forever)
 cleanup_results: true        # set true to delete local .pt / .patch.h5 after WDS push to S3
@@ -58,12 +59,9 @@ watchers:
     # Skip re-fetching the GDC inventory if it is younger than this many hours
     gdc_max_age_hours: 24.0
 
-    # Download slides not yet on disk or S3.
-    # Each download runs in a background thread; slides are enqueued individually
-    # as they complete so featurization of ready slides is not blocked.
-    download_enabled: true
+    # Slides not found on S3 are routed through NF's DOWNLOAD_SLIDE process.
+    # download_dir must match params.download.local_dir (NF storeDir for GDC files).
     download_dir: tcga-downloads
-    download_concurrency: 4
     # gdc_token_file: /path/to/gdc-user-token.txt
 
     # When set, a tcga_append_wds.py post-batch hook is generated automatically

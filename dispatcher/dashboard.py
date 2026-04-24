@@ -186,26 +186,43 @@ def _slurm_stats() -> dict:
     if _squeue_cache.get("ts", 0) + _SQUEUE_TTL > now:
         return _squeue_cache.get("data", {})
 
-    result: dict = {"running": 0, "pending": 0, "total": 0, "nodes": {}, "pending_reasons": {}, "error": None}
+    _BATCH_RE = re.compile(r'batch_(\d{8}T\d{6}_[0-9a-f]+)')
+    result: dict = {
+        "running": 0, "pending": 0, "total": 0,
+        "nodes": {}, "pending_reasons": {},
+        "jobs_by_batch": {},  # batch_id -> {running, pending, nodes: []}
+        "error": None,
+    }
     try:
         out = subprocess.check_output(
-            ["squeue", "--me", "--noheader", "--format=%T|%R|%M|%N"],
+            ["squeue", "--me", "--noheader", "--format=%T|%R|%N|%Z"],
             timeout=10, text=True, stderr=subprocess.DEVNULL,
         )
         for line in out.splitlines():
             parts = line.strip().split("|")
             if len(parts) < 4:
                 continue
-            state, reason, elapsed, node = parts[0], parts[1], parts[2], parts[3]
+            state, reason, node, workdir = parts[0], parts[1], parts[2], parts[3]
             result["total"] += 1
+            # Extract batch ID from work dir path
+            m = _BATCH_RE.search(workdir)
+            batch_id = m.group(1) if m else None
+            if batch_id:
+                b = result["jobs_by_batch"].setdefault(batch_id, {"running": 0, "pending": 0, "nodes": []})
             if state == "RUNNING":
                 result["running"] += 1
                 if node and node != "N/A":
                     result["nodes"][node] = result["nodes"].get(node, 0) + 1
+                if batch_id:
+                    b["running"] += 1
+                    if node not in b["nodes"]:
+                        b["nodes"].append(node)
             elif state == "PENDING":
                 result["pending"] += 1
                 r = reason.strip("()")
                 result["pending_reasons"][r] = result["pending_reasons"].get(r, 0) + 1
+                if batch_id:
+                    b["pending"] += 1
     except FileNotFoundError:
         result["error"] = "squeue not found"
     except subprocess.TimeoutExpired:
@@ -374,6 +391,9 @@ def _build_handler(cfg: Config):
                 ORDER BY dispatched_at DESC
                 LIMIT 30
             """).fetchall()
+        # Cross-reference with live SLURM jobs (from cache, non-blocking)
+        slurm = _slurm_stats()
+        jobs_by_batch = slurm.get("jobs_by_batch", {})
         result = []
         for r in rows:
             start = r["dispatched_at"] or ""
@@ -392,6 +412,7 @@ def _build_handler(cfg: Config):
                 except Exception:
                     pass
             log_info = _parse_nf_log(r["log_path"]) if r["log_path"] else {}
+            slurm_batch = jobs_by_batch.get(r["batch_id"], {})
             result.append({
                 "batch_id": r["batch_id"],
                 "status": r["status"],
@@ -403,6 +424,9 @@ def _build_handler(cfg: Config):
                 "has_log": bool(r["log_path"] and os.path.exists(r["log_path"])),
                 "nf_progress": log_info.get("progress") if r["status"] == "RUNNING" else None,
                 "slurm_jobs": log_info.get("slurm_jobs"),
+                "slurm_running": slurm_batch.get("running"),
+                "slurm_pending": slurm_batch.get("pending"),
+                "slurm_nodes": slurm_batch.get("nodes", []),
                 "warn_count": log_info.get("warn_count", 0),
                 "last_warn": log_info.get("last_warn"),
                 "error_count": log_info.get("error_count", 0),
@@ -793,8 +817,17 @@ async function loadBatches() {
       const tasksCell = np
         ? `<span title="${np.done} of ${np.total} tasks">${np.done}/${np.total} <span style="color:#6ee7b7">(${np.pct}%)</span></span>`
         : (b.slide_count ?? '—');
-      const slurmCell = b.slurm_jobs !== null && b.slurm_jobs !== undefined
-        ? `<span title="Active SLURM jobs">${b.slurm_jobs}</span>` : '—';
+      const slurmR = b.slurm_running;
+      const slurmP = b.slurm_pending;
+      const nodes = (b.slurm_nodes || []).join(', ');
+      let slurmCell = '—';
+      if (slurmR !== null && slurmR !== undefined) {
+        const tip = nodes ? `title="${nodes}"` : '';
+        slurmCell = `<span ${tip} style="cursor:${nodes?'help':'default'}">` +
+          `<span style="color:#6ee7b7">${slurmR}▶</span>` +
+          (slurmP ? ` <span style="color:#fcd34d">${slurmP}⏳</span>` : '') +
+          `</span>`;
+      }
       // Alerts: killed > errors > warns
       let alertCell = '—';
       const parts = [];

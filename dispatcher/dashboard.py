@@ -33,13 +33,14 @@ WatcherConfig = _disp.WatcherConfig
 # ---------------------------------------------------------------------------
 # S3 stats cache
 # ---------------------------------------------------------------------------
-_s3_cache: dict = {}          # model → (timestamp, shard_count, object_count)
-_S3_CACHE_TTL = 60            # seconds
+_s3_cache: dict = {}          # model → {shards, objects, ts}
+_S3_CACHE_TTL = 300           # seconds — ECS listing is slow, cache for 5 min
 
 
 def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
     """Return {model: {shards, objects}} from ECS, with 60-second cache."""
     import boto3
+    from botocore.config import Config as BotoConfig
     from botocore.exceptions import BotoCoreError, ClientError
 
     results: dict[str, dict] = {}
@@ -55,6 +56,10 @@ def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
         client_kwargs["aws_access_key_id"] = ak
     if sk:
         client_kwargs["aws_secret_access_key"] = sk
+    # Short timeouts so a slow ECS response doesn't block the dashboard
+    client_kwargs["config"] = BotoConfig(
+        connect_timeout=5, read_timeout=10, retries={"max_attempts": 1}
+    )
 
     for model, dest in watcher.wds_destinations.items():
         cached = _s3_cache.get(model)
@@ -110,6 +115,13 @@ def make_app(cfg: Config):
         if w.wds_destinations:
             tcga_watcher = w
             break
+
+    # Pre-warm S3 cache in background so first browser load is fast
+    if tcga_watcher and tcga_watcher.wds_destinations:
+        import threading
+        threading.Thread(
+            target=_s3_stats, args=(tcga_watcher, "wds"), daemon=True, name="s3-prewarm"
+        ).start()
 
     def _db() -> sqlite3.Connection:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -233,13 +245,14 @@ def make_app(cfg: Config):
             return {"models": {}, "total": 0, "error": str(exc)}
 
     # ------------------------------------------------------------------
-    # API: S3 shard stats (cached)
+    # API: S3 shard stats (cached) — run in thread pool to avoid blocking
     # ------------------------------------------------------------------
     @app.get("/api/s3")
-    def api_s3():
+    async def api_s3():
+        import asyncio
         if not tcga_watcher or not tcga_watcher.wds_destinations:
             return {"models": {}, "note": "no wds_destinations configured"}
-        stats = _s3_stats(tcga_watcher, "wds")
+        stats = await asyncio.to_thread(_s3_stats, tcga_watcher, "wds")
         return {"models": stats}
 
     # ------------------------------------------------------------------
@@ -506,6 +519,8 @@ async function loadWds() {
 
 async function loadS3() {
   const el = document.getElementById('s3-content');
+  const isFirstLoad = el.innerHTML.includes('…');
+  if (isFirstLoad) el.innerHTML = '<span class="no-data">Fetching ECS stats…</span>';
   try {
     const d = await fetch('/api/s3').then(r => r.json());
     if (!d.models || !Object.keys(d.models).length) {
@@ -521,12 +536,19 @@ async function loadS3() {
 
 async function refresh() {
   document.getElementById('last-updated').textContent = 'Refreshing…';
-  await Promise.all([loadStatus(), loadBatches(), loadWds(), loadS3()]);
+  await Promise.all([loadStatus(), loadBatches(), loadWds()]);
   document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 }
 
+// S3 stats are slow (ECS round-trip); load independently so they don't block the main refresh
+async function refreshS3() {
+  await loadS3();
+}
+
 refresh();
+refreshS3();
 setInterval(refresh, 10000);
+setInterval(refreshS3, 60000);
 </script>
 </body>
 </html>

@@ -112,21 +112,54 @@ def _s3_transfer_config(max_concurrency: int = 4):
     return TransferConfig(max_concurrency=max_concurrency)
 
 
+def _make_s3_client(endpoint_url: str | None = None,
+                    access_key: str | None = None,
+                    secret_key: str | None = None):
+    """Create a boto3 S3 client, optionally targeting a custom endpoint (e.g. ECS).
+
+    Credentials fall back to environment variables (ECS_ACCESS_KEY / ECS_SECRET_KEY
+    or standard AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) if not explicitly provided.
+    Endpoint falls back to the S3_ENDPOINT_URL environment variable if not provided.
+    """
+    import boto3, os
+    endpoint_url = endpoint_url or os.environ.get("S3_ENDPOINT_URL") or os.environ.get("ECS_ENDPOINT_URL")
+    access_key = access_key or os.environ.get("ECS_ACCESS_KEY")
+    secret_key = secret_key or os.environ.get("ECS_SECRET_KEY")
+    kwargs: dict = {}
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
+    if access_key:
+        kwargs["aws_access_key_id"] = access_key
+    if secret_key:
+        kwargs["aws_secret_access_key"] = secret_key
+    return boto3.client("s3", **kwargs)
+
+
+# Module-level client cache — populated by main() after arg parsing.
+_s3_client_instance = None
+
+
+def _s3_client():
+    """Return the module-level S3 client (configured by main or _make_s3_client defaults)."""
+    global _s3_client_instance
+    if _s3_client_instance is None:
+        _s3_client_instance = _make_s3_client()
+    return _s3_client_instance
+
+
 def _s3_upload(local_path: Path, s3_uri: str, max_concurrency: int = 4) -> None:
-    import boto3
     bucket, key = _s3_parts(s3_uri)
-    boto3.client("s3").upload_file(
+    _s3_client().upload_file(
         str(local_path), bucket, key, Config=_s3_transfer_config(max_concurrency)
     )
     log.debug("Uploaded %s → %s", local_path.name, s3_uri)
 
 
 def _s3_download(s3_uri: str, local_path: Path, max_concurrency: int = 4) -> bool:
-    import boto3
     from botocore.exceptions import ClientError
     bucket, key = _s3_parts(s3_uri)
     try:
-        boto3.client("s3").download_file(
+        _s3_client().download_file(
             bucket, key, str(local_path), Config=_s3_transfer_config(max_concurrency)
         )
         return True
@@ -465,12 +498,27 @@ def main(argv: list[str] | None = None) -> int:
                         help="Maximum number of parallel boto3 transfer threads per S3 "
                              "upload/download (default: 4). Reduce to limit ECS endpoint load "
                              "when multiple batches are running concurrently.")
+    parser.add_argument("--s3-endpoint", default=None,
+                        help="Custom S3 endpoint URL (e.g. http://pmindecs.mskcc.org:9020 for "
+                             "ECS). Falls back to S3_ENDPOINT_URL / ECS_ENDPOINT_URL env vars.")
+    parser.add_argument("--s3-access-key", default=None,
+                        help="S3 access key ID. Falls back to ECS_ACCESS_KEY env var.")
+    parser.add_argument("--s3-secret-key", default=None,
+                        help="S3 secret access key. Falls back to ECS_SECRET_KEY env var.")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(message)s",
+    )
+
+    # Configure the module-level S3 client once (used by _s3_upload / _s3_download).
+    global _s3_client_instance
+    _s3_client_instance = _make_s3_client(
+        endpoint_url=args.s3_endpoint,
+        access_key=args.s3_access_key,
+        secret_key=args.s3_secret_key,
     )
 
     import pandas as pd
@@ -510,8 +558,8 @@ def main(argv: list[str] | None = None) -> int:
             pt_dir = Path(args.pt_dir)
             h5_dir = Path(args.h5_dir) if args.h5_dir else None
         else:
-            pt_dir = results_dir / "features" / model / "pt"
-            h5_dir = results_dir / "features" / model / "tile_h5"
+            pt_dir = results_dir / "features" / model
+            h5_dir = results_dir / "tiles"
 
         if not pt_dir.exists():
             log.warning("pt dir does not exist, skipping: %s", pt_dir)

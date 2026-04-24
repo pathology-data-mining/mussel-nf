@@ -292,8 +292,8 @@ class Config:
             if w.wds_destinations:
                 for model, dest in w.wds_destinations.items():
                     args = [
-                        "--pt-dir={outdir}/features/" + model + "/pt",
-                        "--h5-dir={outdir}/features/" + model + "/tile_h5",
+                        "--pt-dir={outdir}/features/" + model,
+                        "--h5-dir={outdir}/tiles",
                         "--inventory=" + w.inventory_csv,
                         "--wds-dest=" + dest,
                         "--model-type=" + model,
@@ -304,6 +304,8 @@ class Config:
                         args.append("--staging-dir=" + w.wds_staging_dir)
                     if w.wds_s3_max_concurrency != 4:
                         args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
+                    if w.s3_endpoint:
+                        args.append("--s3-endpoint=" + w.s3_endpoint)
                     if self.cleanup_results:
                         args.append("--delete-local")
                     hooks.append({
@@ -1165,6 +1167,16 @@ class NextflowRunner:
                 repo_dir=self.cfg.repo_dir,
             )
 
+        # Build env with ECS credentials injected from any tcga watcher that has them.
+        hook_env = os.environ.copy()
+        for w in self.cfg.watchers:
+            if w.s3_access_key:
+                hook_env.setdefault("ECS_ACCESS_KEY", w.s3_access_key)
+            if w.s3_secret_key:
+                hook_env.setdefault("ECS_SECRET_KEY", w.s3_secret_key)
+            if w.s3_endpoint:
+                hook_env.setdefault("ECS_ENDPOINT_URL", w.s3_endpoint)
+
         for hook in self.cfg.post_batch_hooks:
             cmd_str = hook.get("command", "")
             if not cmd_str:
@@ -1173,7 +1185,8 @@ class NextflowRunner:
             cmd = [_sub(p) for p in cmd_str.split()] + [_sub(a) for a in hook.get("args", [])]
             log.info("Batch %s: running post-batch hook: %s", self.batch_id, " ".join(cmd))
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, cwd=self.cfg.repo_dir)
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                       cwd=self.cfg.repo_dir, env=hook_env)
                 if result.returncode != 0:
                     log.error(
                         "Post-batch hook failed (exit %d):\n%s",

@@ -72,9 +72,14 @@ watchers:
     # wds_staging_dir: /path/to/local/staging   # base dir; each model uses {staging}/{model}/
 
     # When set, a tcga_sync_databricks.py post-batch hook is generated automatically.
-    # Credentials are read from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.
-    # databricks_volume_path: /Volumes/catalog/schema/volume/tcga_inventory.parquet
-    # databricks_job_id: "12345"   # optional: Databricks job to trigger after upload
+    # After each successful batch, status + inventory are joined into a timestamped
+    # Parquet file uploaded to the volume folder, then the Databricks job is triggered
+    # to MERGE it into the Delta table.
+    # Credentials: set DATABRICKS_HOST and DATABRICKS_TOKEN env vars before starting.
+    # See databricks/README.md for setup instructions (create volume, import notebook, create job).
+    databricks_volume_folder: /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
+    databricks_table: cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
+    # databricks_job_id: "12345"   # set to the job ID from: databricks jobs create --json @databricks/jobs/tcga_metadata_sync_job.json
 
 # Any explicit post_batch_hooks run after the auto-generated ones above.
 # post_batch_hooks: []

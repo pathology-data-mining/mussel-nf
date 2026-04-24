@@ -5,6 +5,12 @@ Reads tcga_status.csv and tcga_inventory.csv, builds a Parquet export, and
 uploads it to a Databricks Unity Catalog volume via the Files API. Optionally
 triggers a Databricks job to MERGE the Parquet into a Delta table.
 
+The Parquet is uploaded to a timestamped path inside the volume folder so
+that all historical snapshots are preserved and the Databricks notebook can
+always pick up the latest file:
+
+    <volume_folder>/tcga_inventory_<YYYYMMDDTHHMMSS>.parquet
+
 Credentials are read from the DATABRICKS_HOST and DATABRICKS_TOKEN environment
 variables, or passed as CLI flags.
 
@@ -13,7 +19,8 @@ Usage
     python tcga_sync_databricks.py \\
         --status tcga_status.csv \\
         --inventory tcga_inventory.csv \\
-        --volume-path /Volumes/catalog/schema/volume/tcga_inventory.parquet \\
+        --volume-folder /Volumes/catalog/schema/tcga_dispatcher \\
+        [--table cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2] \\
         [--job-id 12345]
 """
 
@@ -22,6 +29,7 @@ import logging
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -71,11 +79,14 @@ def upload_parquet(local_path: Path, volume_path: str, host: str, token: str) ->
     log.info("Uploaded to Databricks: %s", volume_path)
 
 
-def trigger_job(job_id: str, host: str, token: str) -> str:
+def trigger_job(job_id: str, host: str, token: str, params: dict | None = None) -> str:
     """Trigger a Databricks job by ID and return the run_id."""
     url = f"{host.rstrip('/')}/api/2.1/jobs/run-now"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    resp = requests.post(url, headers=headers, json={"job_id": int(job_id)}, timeout=30)
+    body: dict = {"job_id": int(job_id)}
+    if params:
+        body["notebook_params"] = params
+    resp = requests.post(url, headers=headers, json=body, timeout=30)
     resp.raise_for_status()
     run_id = str(resp.json()["run_id"])
     log.info("Triggered job %s → run_id %s", job_id, run_id)
@@ -92,14 +103,28 @@ def main(argv: list[str] | None = None) -> int:
                         help="Databricks workspace URL (or set DATABRICKS_HOST env var)")
     parser.add_argument("--token", default=None,
                         help="Databricks personal access token (or set DATABRICKS_TOKEN)")
-    parser.add_argument("--volume-path", required=True,
-                        help="Unity Catalog volume path, e.g. /Volumes/cat/schema/vol/tcga.parquet")
+
+    # Folder-based upload (timestamped files) — preferred
+    parser.add_argument("--volume-folder", default=None,
+                        help="UC volume folder to upload into; file will be named "
+                             "tcga_inventory_<timestamp>.parquet")
+    # Legacy: single overwritten file path
+    parser.add_argument("--volume-path", default=None,
+                        help="[Legacy] Full UC volume path for a single overwritten Parquet. "
+                             "Use --volume-folder instead for timestamped uploads.")
+
+    parser.add_argument("--table", default=None,
+                        help="Target Delta table (passed as notebook_param 'target_table'). "
+                             "E.g. cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2")
     parser.add_argument("--job-id", default=None,
                         help="Databricks job ID to trigger after upload (optional)")
     parser.add_argument("--output-parquet", default=None,
                         help="Also save the Parquet file locally at this path")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
+
+    if not args.volume_folder and not args.volume_path:
+        parser.error("One of --volume-folder or --volume-path is required")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -134,13 +159,27 @@ def main(argv: list[str] | None = None) -> int:
             shutil.copy(tmp_path, args.output_parquet)
             log.info("Saved local copy: %s", args.output_parquet)
 
-        upload_parquet(tmp_path, args.volume_path, host, token)
+        # Determine upload path — timestamped folder preferred
+        if args.volume_folder:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            folder = args.volume_folder.rstrip("/")
+            volume_path = f"{folder}/tcga_inventory_{ts}.parquet"
+        else:
+            volume_path = args.volume_path
+
+        upload_parquet(tmp_path, volume_path, host, token)
     finally:
         if tmp_path and tmp_path.exists():
             tmp_path.unlink()
 
+
     if args.job_id:
-        trigger_job(args.job_id, host, token)
+        job_params: dict = {}
+        if args.volume_folder:
+            job_params["volume_folder"] = args.volume_folder
+        if args.table:
+            job_params["target_table"] = args.table
+        trigger_job(args.job_id, host, token, params=job_params or None)
 
     return 0
 

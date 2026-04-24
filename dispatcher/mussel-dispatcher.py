@@ -160,8 +160,10 @@ class WatcherConfig:
     wds_s3_max_concurrency: int = 4  # boto3 multipart threads per S3 upload/download (reduce to limit ECS load)
     # When set, a tcga_sync_databricks.py hook is generated automatically.
     # Credentials come from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.
-    databricks_volume_path: str = ""   # e.g. /Volumes/catalog/schema/vol/tcga.parquet
-    databricks_job_id: str = ""        # optional: Databricks job to trigger after upload
+    databricks_volume_folder: str = ""  # UC volume folder; files uploaded as tcga_inventory_<ts>.parquet
+    databricks_volume_path: str = ""    # [Legacy] single overwritten file path
+    databricks_table: str = ""          # Delta table to MERGE INTO (passed to notebook as target_table)
+    databricks_job_id: str = ""         # Databricks job to trigger after upload
 
 
 @dataclass
@@ -310,19 +312,28 @@ class Config:
                     })
                     log.debug("Auto hook: tcga_append_wds model=%s dest=%s", model, dest)
 
-            if w.databricks_volume_path:
+            if w.databricks_volume_folder or w.databricks_volume_path:
                 args = [
                     "--inventory=" + w.inventory_csv,
                     "--status=" + w.status_csv,
-                    "--volume-path=" + w.databricks_volume_path,
                 ]
+                if w.databricks_volume_folder:
+                    args.append("--volume-folder=" + w.databricks_volume_folder)
+                else:
+                    args.append("--volume-path=" + w.databricks_volume_path)
+                if w.databricks_table:
+                    args.append("--table=" + w.databricks_table)
                 if w.databricks_job_id:
                     args.append("--job-id=" + w.databricks_job_id)
                 db_hooks.append({
                     "command": "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py",
                     "args": args,
                 })
-                log.debug("Auto hook: tcga_sync_databricks volume=%s", w.databricks_volume_path)
+                log.debug(
+                    "Auto hook: tcga_sync_databricks folder=%s table=%s",
+                    w.databricks_volume_folder or w.databricks_volume_path,
+                    w.databricks_table,
+                )
 
         return hooks + db_hooks
 

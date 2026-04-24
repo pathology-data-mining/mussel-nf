@@ -1,0 +1,47 @@
+{
+  "name": "tcga-metadata-sync",
+  "description": "Merge TCGA slide inventory + feature extraction status Parquet into the cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2 Delta table. Triggered by tcga_sync_databricks.py after each dispatcher batch.",
+  "tasks": [
+    {
+      "task_key": "merge_metadata",
+      "description": "Read latest Parquet from UC volume and MERGE INTO Delta table",
+      "notebook_task": {
+        "notebook_path": "/Repos/mussel-nf/databricks/notebooks/tcga_metadata_sync",
+        "base_parameters": {
+          "volume_folder": "/Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher",
+          "target_table": "cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2"
+        },
+        "source": "WORKSPACE"
+      },
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 0,
+        "spark_conf": {
+          "spark.master": "local[*, 4]",
+          "spark.databricks.cluster.profile": "singleNode"
+        },
+        "custom_tags": {
+          "ResourceClass": "SingleNode"
+        },
+        "data_security_mode": "SINGLE_USER"
+      },
+      "timeout_seconds": 1800,
+      "max_retries": 2,
+      "min_retry_interval_millis": 60000
+    }
+  ],
+  "schedule": {
+    "quartz_cron_expression": "0 0 6 * * ?",
+    "timezone_id": "America/New_York",
+    "pause_status": "PAUSED"
+  },
+  "max_concurrent_runs": 1,
+  "email_notifications": {
+    "on_failure": []
+  },
+  "tags": {
+    "project": "tcga-feature-extraction",
+    "team": "pathology-data-mining"
+  }
+}

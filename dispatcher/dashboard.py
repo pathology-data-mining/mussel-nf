@@ -52,11 +52,11 @@ def _parse_nf_progress(log_path: str) -> dict | None:
             size = f.tell()
             f.seek(max(0, size - 4096))
             tail = f.read().decode("utf-8", errors="replace")
-        # Take the last match (most recent progress line)
         matches = _NF_PROGRESS_RE.findall(tail)
         if not matches:
             return None
-        pct_s, done_s, total_s = matches[-1]
+        # Use the match with the largest total (ignores saveParams 1-of-1 noise)
+        pct_s, done_s, total_s = max(matches, key=lambda m: int(m[2]))
         return {"pct": int(pct_s), "done": int(done_s), "total": int(total_s)}
     except Exception:
         return None

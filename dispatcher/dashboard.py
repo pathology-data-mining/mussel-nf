@@ -274,7 +274,8 @@ _HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mussel Dispatcher Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" async
+  onload="onChartJsReady()"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
@@ -396,6 +397,13 @@ _HTML = """<!DOCTYPE html>
 
 <script>
 let statusChart = null;
+let _chartJsReady = false;
+
+function onChartJsReady() {
+  _chartJsReady = true;
+  // Draw chart with latest data if already loaded
+  loadStatus();
+}
 
 function badge(status) {
   const cls = {RUNNING:'running',SUCCEEDED:'succeeded',FAILED:'failed',PENDING:'pending',DISPATCHED:'running'}[status] || 'pending';
@@ -416,69 +424,88 @@ function fmtTime(iso) {
   } catch { return iso; }
 }
 
+async function apiFetch(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
 async function loadStatus() {
-  const d = await fetch('/api/status').then(r => r.json());
-  const c = d.counts || {};
-  document.getElementById('s-total').textContent = d.total ?? '—';
-  document.getElementById('s-done').textContent = c.SUCCEEDED ?? 0;
-  document.getElementById('s-failed').textContent = c.FAILED ?? 0;
-  document.getElementById('s-pending').textContent = c.PENDING ?? 0;
-  document.getElementById('s-dispatched').textContent = c.DISPATCHED ?? 0;
-  document.getElementById('s-pct').textContent = (d.pct_done ?? 0) + '%';
-  document.getElementById('s-running').textContent = d.running_batches ?? 0;
-  document.getElementById('s-blacklisted').textContent = d.blacklisted ?? 0;
-  document.getElementById('progress-bar').style.width = (d.pct_done ?? 0) + '%';
+  try {
+    const d = await apiFetch('/api/status');
+    const c = d.counts || {};
+    document.getElementById('s-total').textContent = d.total ?? '—';
+    document.getElementById('s-done').textContent = c.SUCCEEDED ?? 0;
+    document.getElementById('s-failed').textContent = c.FAILED ?? 0;
+    document.getElementById('s-pending').textContent = c.PENDING ?? 0;
+    document.getElementById('s-dispatched').textContent = c.DISPATCHED ?? 0;
+    document.getElementById('s-pct').textContent = (d.pct_done ?? 0) + '%';
+    document.getElementById('s-running').textContent = d.running_batches ?? 0;
+    document.getElementById('s-blacklisted').textContent = d.blacklisted ?? 0;
+    document.getElementById('progress-bar').style.width = (d.pct_done ?? 0) + '%';
 
-  // Chart
-  const labels = Object.keys(c);
-  const values = Object.values(c);
-  const colors = labels.map(l => ({
-    SUCCEEDED:'#22c55e', FAILED:'#ef4444', PENDING:'#6366f1', DISPATCHED:'#0ea5e9'
-  }[l] || '#64748b'));
+    const labels = Object.keys(c);
+    const values = Object.values(c);
+    const colors = labels.map(l => ({
+      SUCCEEDED:'#22c55e', FAILED:'#ef4444', PENDING:'#6366f1', DISPATCHED:'#0ea5e9'
+    }[l] || '#64748b'));
 
-  if (!statusChart) {
-    statusChart = new Chart(document.getElementById('statusChart'), {
-      type: 'doughnut',
-      data: { labels, datasets: [{ data: values, backgroundColor: colors, borderWidth: 0 }] },
-      options: { plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
-                 cutout: '60%' }
-    });
-  } else {
-    statusChart.data.labels = labels;
-    statusChart.data.datasets[0].data = values;
-    statusChart.data.datasets[0].backgroundColor = colors;
-    statusChart.update();
+    if (typeof Chart === 'undefined' || !_chartJsReady) return; // Chart.js not yet loaded
+    if (!statusChart) {
+      statusChart = new Chart(document.getElementById('statusChart'), {
+        type: 'doughnut',
+        data: { labels, datasets: [{ data: values, backgroundColor: colors, borderWidth: 0 }] },
+        options: { plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
+                   cutout: '60%' }
+      });
+    } else {
+      statusChart.data.labels = labels;
+      statusChart.data.datasets[0].data = values;
+      statusChart.data.datasets[0].backgroundColor = colors;
+      statusChart.update();
+    }
+  } catch(e) {
+    document.getElementById('s-total').textContent = 'ERR';
+    console.error('loadStatus failed:', e);
   }
 }
 
 async function loadBatches() {
-  const batches = await fetch('/api/batches').then(r => r.json());
   const tbody = document.getElementById('batch-tbody');
-  if (!batches.length) { tbody.innerHTML = '<tr><td colspan="7" class="no-data">No batches yet.</td></tr>'; return; }
-  tbody.innerHTML = batches.map(b => `
-    <tr>
-      <td style="font-family:monospace;font-size:0.7rem">${b.batch_id}</td>
-      <td>${badge(b.status)}</td>
-      <td>${b.slide_count ?? '—'}</td>
-      <td>${fmtTime(b.dispatched_at)}</td>
-      <td>${fmtDuration(b.duration_s)}</td>
-      <td>${b.nextflow_exit !== null && b.nextflow_exit !== undefined ? b.nextflow_exit : '—'}</td>
-      <td>${b.has_log ? `<button class="btn-refresh" onclick="showLog('${b.batch_id}')">View</button>` : '—'}</td>
-    </tr>`).join('');
-
-  // Load logs for running batches
-  const running = batches.filter(b => b.status === 'RUNNING');
   const logsDiv = document.getElementById('logs-content');
-  if (!running.length) { logsDiv.innerHTML = '<span class="no-data">No running batches.</span>'; return; }
-  logsDiv.innerHTML = '';
-  for (const b of running) {
-    const detail = document.createElement('details');
-    detail.id = 'log-' + b.batch_id;
-    detail.open = true;
-    detail.innerHTML = `<summary>${b.batch_id} (${b.slide_count} slides)</summary>
-      <div class="log-block" id="logtext-${b.batch_id}">Loading…</div>`;
-    logsDiv.appendChild(detail);
-    loadLog(b.batch_id);
+  try {
+    const batches = await apiFetch('/api/batches');
+    if (!batches.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="no-data">No batches yet.</td></tr>';
+      logsDiv.innerHTML = '<span class="no-data">No running batches.</span>';
+      return;
+    }
+    tbody.innerHTML = batches.map(b => `
+      <tr>
+        <td style="font-family:monospace;font-size:0.7rem">${b.batch_id}</td>
+        <td>${badge(b.status)}</td>
+        <td>${b.slide_count ?? '—'}</td>
+        <td>${fmtTime(b.dispatched_at)}</td>
+        <td>${fmtDuration(b.duration_s)}</td>
+        <td>${b.nextflow_exit !== null && b.nextflow_exit !== undefined ? b.nextflow_exit : '—'}</td>
+        <td>${b.has_log ? `<button class="btn-refresh" onclick="showLog('${b.batch_id}')">View</button>` : '—'}</td>
+      </tr>`).join('');
+
+    const running = batches.filter(b => b.status === 'RUNNING');
+    if (!running.length) { logsDiv.innerHTML = '<span class="no-data">No running batches.</span>'; return; }
+    logsDiv.innerHTML = '';
+    for (const b of running) {
+      const detail = document.createElement('details');
+      detail.id = 'log-' + b.batch_id;
+      detail.open = true;
+      detail.innerHTML = `<summary>${b.batch_id} (${b.slide_count} slides)</summary>
+        <div class="log-block" id="logtext-${b.batch_id}">Loading…</div>`;
+      logsDiv.appendChild(detail);
+      loadLog(b.batch_id);
+    }
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="7" class="no-data">Failed to load batches.</td></tr>';
+    console.error('loadBatches failed:', e);
   }
 }
 
@@ -486,7 +513,7 @@ async function loadLog(batch_id) {
   const el = document.getElementById('logtext-' + batch_id);
   if (!el) return;
   try {
-    const d = await fetch('/api/logs/' + batch_id).then(r => r.json());
+    const d = await apiFetch('/api/logs/' + batch_id);
     el.textContent = (d.lines || []).join('\n') || d.error || '(empty)';
     el.scrollTop = el.scrollHeight;
   } catch { el.textContent = 'Failed to load log.'; }
@@ -507,22 +534,26 @@ async function showLog(batch_id) {
 }
 
 async function loadWds() {
-  const d = await fetch('/api/wds').then(r => r.json());
   const el = document.getElementById('wds-content');
-  if (!d.models || !Object.keys(d.models).length) {
-    el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return;
+  try {
+    const d = await apiFetch('/api/wds');
+    if (!d.models || !Object.keys(d.models).length) {
+      el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return;
+    }
+    el.innerHTML = Object.entries(d.models).map(([m, n]) =>
+      `<div class="wds-row"><span>${m}</span><span style="color:#4ade80;font-weight:600">${n} slides</span></div>`
+    ).join('') + `<div class="wds-row" style="margin-top:4px"><span>Total</span><b>${d.total}</b></div>`;
+  } catch(e) {
+    el.innerHTML = '<span class="no-data">Failed to load WDS data.</span>';
+    console.error('loadWds failed:', e);
   }
-  el.innerHTML = Object.entries(d.models).map(([m, n]) =>
-    `<div class="wds-row"><span>${m}</span><span style="color:#4ade80;font-weight:600">${n} slides</span></div>`
-  ).join('') + `<div class="wds-row" style="margin-top:4px"><span>Total</span><b>${d.total}</b></div>`;
 }
 
 async function loadS3() {
   const el = document.getElementById('s3-content');
-  const isFirstLoad = el.innerHTML.includes('…');
-  if (isFirstLoad) el.innerHTML = '<span class="no-data">Fetching ECS stats…</span>';
+  if (el.innerHTML.includes('Loading')) el.innerHTML = '<span class="no-data">Fetching ECS stats…</span>';
   try {
-    const d = await fetch('/api/s3').then(r => r.json());
+    const d = await apiFetch('/api/s3');
     if (!d.models || !Object.keys(d.models).length) {
       el.innerHTML = '<span class="no-data">' + (d.note || 'No data.') + '</span>'; return;
     }
@@ -531,19 +562,19 @@ async function loadS3() {
         ? `<div class="s3-row"><span>${m}</span><span style="color:#f87171">${v.error}</span></div>`
         : `<div class="s3-row"><span>${m}</span><span style="color:#38bdf8">${v.shards} shards / ${v.objects} objects</span></div>`
     ).join('');
-  } catch { el.innerHTML = '<span class="no-data">Failed to fetch S3 stats.</span>'; }
+  } catch(e) {
+    el.innerHTML = '<span class="no-data">Failed to fetch S3 stats.</span>';
+    console.error('loadS3 failed:', e);
+  }
 }
 
 async function refresh() {
   document.getElementById('last-updated').textContent = 'Refreshing…';
-  await Promise.all([loadStatus(), loadBatches(), loadWds()]);
+  await Promise.allSettled([loadStatus(), loadBatches(), loadWds()]);
   document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 }
 
-// S3 stats are slow (ECS round-trip); load independently so they don't block the main refresh
-async function refreshS3() {
-  await loadS3();
-}
+async function refreshS3() { await loadS3(); }
 
 refresh();
 refreshS3();

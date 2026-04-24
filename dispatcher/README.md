@@ -33,6 +33,9 @@ python dispatcher/mussel-dispatcher.py dispatcher/tcga_dispatcher.yaml
 
 # Collect and merge all per-run manifests into one file
 python dispatcher/mussel-dispatcher.py collect-manifests dispatcher/tcga_dispatcher.yaml
+
+# Launch the monitoring dashboard (default port 8050)
+python dispatcher/dashboard.py dispatcher/tcga_dispatcher.yaml --port 8050
 ```
 
 ## How It Works
@@ -183,3 +186,70 @@ python -m pytest dispatcher/test_dispatcher.py -v
 ```
 
 Tests cover: StateStore CRUD + lifecycle, BatchScheduler triggers, RunManager concurrency, crash recovery, TcgaWatcher enqueue/download/skip logic, and post_batch_hooks template substitution.
+
+---
+
+## Monitoring Dashboard
+
+`dashboard.py` is a self-contained real-time monitoring dashboard (Python stdlib HTTP server + embedded HTML/JS). It reads the same YAML config as the dispatcher and connects to the same SQLite state DB.
+
+```bash
+# Launch (runs on port 8050 by default)
+python dispatcher/dashboard.py dispatcher/tcga_dispatcher.yaml --port 8050
+# Then open http://localhost:8050/ (or SSH tunnel)
+```
+
+### Panels
+
+#### Slide Funnel
+- **Pending** / **Dispatched** / **Done** slide counts from the StateStore
+- Global % complete, estimated from completed batches + fractional progress of in-flight batches (parsed from NF logs)
+
+#### Batch Table
+Live table of all active and recently-completed batches, updated every 10 s:
+
+| Column | Description |
+|---|---|
+| Batch ID | Timestamp + random suffix; links to log viewer |
+| Status | `RUNNING` / `SUCCEEDED` / `FAILED` |
+| Slides | Number of slides in batch |
+| Duration | Elapsed time (⏳ indicator for running batches) |
+| Tasks | NF task progress: `done/total (%)` parsed from log |
+| SLURM | Running ▶ / Pending ⏳ SLURM jobs cross-referenced by work dir |
+| Alerts | ⚠ WARN count / 🚨 ERROR details / 🔥 infra-stop events |
+
+Click any batch row to open the live log viewer (streams the last 200 lines of the NF log).
+
+#### SLURM Panel
+Live `squeue` data (refreshed every 15 s):
+- Running / pending job counts, unique node list
+- Pending reasons breakdown (e.g. `Resources`, `Priority`)
+
+`sacct` history for the last 24 h:
+- Completed / failed / cancelled / timeout counts + average elapsed time
+- **Failure type breakdown** — classified per job by reading `.command.err` from the NF task work directory:
+
+| Type | Signal |
+|---|---|
+| `oom_gpu` | "CUDA out of memory" in stderr |
+| `oom_host` | exit 137 or "oom-kill" in stderr |
+| `sigterm` | exit 143, or SLURM CANCELLED state (infra restart / dispatcher stop) |
+| `disk_full` | "no space left" in stderr |
+| `s3_error` | S3 URL + exception in stderr |
+| `python_error` | Python traceback in stderr |
+| `timeout` | SLURM TIMEOUT state |
+| `error_exit1` | exit 1 with no specific pattern |
+| `unknown` | any other non-zero exit |
+
+#### S3 / WDS Panel
+If an S3 watcher is configured, shows per-model shard counts and total objects in the WDS destination prefix.
+
+### API Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/status` | Slide counts, pct_done, S3 stats |
+| `GET /api/batches` | All batch rows with NF log info + SLURM cross-ref |
+| `GET /api/logs/{batch_id}` | Last 200 lines of the NF log for a batch |
+| `GET /api/wds` | WDS shard counts from S3 |
+| `GET /api/slurm` | squeue + sacct stats with failure type breakdown |

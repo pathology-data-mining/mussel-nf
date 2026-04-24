@@ -38,12 +38,16 @@ _S3_CACHE_TTL = 300           # seconds — ECS listing is slow, cache for 5 min
 
 
 def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
-    """Return {model: {shards, objects}} from ECS, with 60-second cache."""
+    """Return {model: {shards, objects}} from ECS, with TTL cache.
+
+    Each model's S3 listing runs in a separate thread so they proceed in
+    parallel rather than sequentially (each listing can take 30-60s on ECS).
+    """
     import boto3
+    import threading as _threading
     from botocore.config import Config as BotoConfig
     from botocore.exceptions import BotoCoreError, ClientError
 
-    results: dict[str, dict] = {}
     now = time.time()
 
     client_kwargs: dict = {}
@@ -56,25 +60,22 @@ def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
         client_kwargs["aws_access_key_id"] = ak
     if sk:
         client_kwargs["aws_secret_access_key"] = sk
-    # Short timeouts so a slow ECS response doesn't block the dashboard
     client_kwargs["config"] = BotoConfig(
-        connect_timeout=5, read_timeout=10, retries={"max_attempts": 1}
+        connect_timeout=5, read_timeout=30, retries={"max_attempts": 1}
     )
 
-    for model, dest in watcher.wds_destinations.items():
+    results: dict[str, dict] = {}
+
+    def _fetch_model(model: str, dest: str):
         cached = _s3_cache.get(model)
-        if cached and (now - cached["ts"]) < _S3_CACHE_TTL:
+        if cached and (now - cached.get("ts", 0)) < _S3_CACHE_TTL:
             results[model] = {k: v for k, v in cached.items() if k != "ts"}
-            continue
-
-        # dest is like s3://bucket/prefix
-        if dest.startswith("s3://"):
-            rest = dest[5:]
-            bucket, _, prefix = rest.partition("/")
-        else:
+            return
+        if not dest.startswith("s3://"):
             results[model] = {"shards": 0, "objects": 0, "error": "not an s3 path"}
-            continue
-
+            return
+        rest = dest[5:]
+        bucket, _, prefix = rest.partition("/")
         try:
             s3 = boto3.client("s3", **client_kwargs)
             paginator = s3.get_paginator("list_objects_v2")
@@ -90,6 +91,15 @@ def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
             results[model] = {"shards": shards, "objects": objects}
         except (BotoCoreError, ClientError, Exception) as exc:
             results[model] = {"shards": 0, "objects": 0, "error": str(exc)[:120]}
+
+    threads = [
+        _threading.Thread(target=_fetch_model, args=(m, d), daemon=True)
+        for m, d in watcher.wds_destinations.items()
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     return results
 

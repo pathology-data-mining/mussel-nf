@@ -446,6 +446,19 @@ class StateStore:
         ).fetchone()
         return row is not None
 
+    def get_slides_by_id(self, slide_id: str) -> list:
+        """Return all DB records for a given slide_id."""
+        rows = self._conn().execute(
+            "SELECT slide_path, slide_id, status FROM slides WHERE slide_id = ?", (slide_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_slide(self, slide_path: str):
+        """Remove a slide record (used to clear stale PENDING entries before re-download)."""
+        conn = self._conn()
+        conn.execute("DELETE FROM slides WHERE slide_path = ?", (slide_path,))
+        conn.commit()
+
     def get_pending_slides(self) -> list:
         rows = self._conn().execute(
             "SELECT slide_path, slide_id FROM slides WHERE status = 'PENDING' AND slide_path != ''"
@@ -949,11 +962,35 @@ class TcgaWatcher(threading.Thread):
         if self.cfg.download_enabled and needs_dl:
             for s in needs_dl:
                 slide_id = s["slide_id"]
-                # Guard against re-submitting an already-in-progress download.
-                # Use slide_id (not empty slide_path) as the key.
-                if slide_id not in self._downloads_in_progress and not self.state.is_known_by_id(slide_id):
-                    self._downloads_in_progress.add(slide_id)
-                    self._download_executor.submit(self._download_and_enqueue, s)
+                if slide_id in self._downloads_in_progress:
+                    continue
+                # Check if slide is already in DB
+                existing = self.state.get_slides_by_id(slide_id)
+                if existing:
+                    # Skip slides that are already active or done
+                    active_statuses = {"DISPATCHED", "RUNNING", "COMPLETED"}
+                    if any(r["status"] in active_statuses for r in existing):
+                        continue
+                    # PENDING records with S3 paths are stale — the S3 check
+                    # confirmed these slides are not available on ECS.  Clear
+                    # them so the slide can be downloaded and re-enqueued.
+                    for r in existing:
+                        if r["status"] == "PENDING" and r["slide_path"].startswith("s3://"):
+                            log.info(
+                                "TcgaWatcher: removing stale S3 PENDING record for %s (%s) — will download from GDC",
+                                slide_id, r["slide_path"],
+                            )
+                            self.state.remove_slide(r["slide_path"])
+                    # Re-check: if any non-PENDING record remains, skip
+                    remaining = self.state.get_slides_by_id(slide_id)
+                    if remaining and not all(r["status"] == "PENDING" for r in remaining):
+                        continue
+                    # If only PENDING records remain (e.g. a local path that hasn't
+                    # been dispatched yet), don't duplicate the download.
+                    if remaining and any(not r["slide_path"].startswith("s3://") for r in remaining):
+                        continue
+                self._downloads_in_progress.add(slide_id)
+                self._download_executor.submit(self._download_and_enqueue, s)
         elif needs_dl:
             log.info(
                 "TcgaWatcher: %d slides need download but download_enabled=false — skipped",
@@ -978,7 +1015,10 @@ class TcgaWatcher(threading.Thread):
         dest_path = Path(download_root) / file_id / file_name
         if dest_path.exists():
             log.info("TcgaWatcher: %s already on disk, enqueuing", slide_id)
-            self.pending.append({"slide_id": slide_id, "slide_path": str(dest_path)})
+            slide_path = str(dest_path)
+            self.state.add_slide(slide_path, slide_id)
+            self.pending.append({"slide_id": slide_id, "slide_path": slide_path})
+            self._downloads_in_progress.discard(slide_id)
             return
 
         # gdc-client requires the destination directory to exist.

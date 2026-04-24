@@ -492,11 +492,18 @@ function badge(status) {
   return `<span class="badge badge-${cls}">${status}</span>`;
 }
 
-function fmtDuration(s) {
-  if (s === null || s === undefined) return '—';
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
-  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+function fmtDuration(s, startIso, ongoing) {
+  let sec = s;
+  if ((sec === null || sec === undefined) && startIso) {
+    // Compute elapsed from start to now for running batches
+    try { sec = Math.floor((Date.now() - new Date(startIso).getTime()) / 1000); } catch {}
+  }
+  if (sec === null || sec === undefined || isNaN(sec) || sec < 0) return '—';
+  let str;
+  if (sec < 60) str = sec + 's';
+  else if (sec < 3600) str = Math.floor(sec/60) + 'm ' + (sec%60) + 's';
+  else str = Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
+  return ongoing ? str + ' <span title="ongoing" style="color:#f59e0b">⏳</span>' : str;
 }
 
 function fmtTime(iso) {
@@ -568,7 +575,7 @@ async function loadBatches() {
         <td>${badge(b.status)}</td>
         <td>${b.slide_count ?? '—'}</td>
         <td>${fmtTime(b.dispatched_at)}</td>
-        <td>${fmtDuration(b.duration_s)}</td>
+        <td>${fmtDuration(b.duration_s, b.dispatched_at, b.status === 'RUNNING')}</td>
         <td>${b.nextflow_exit !== null && b.nextflow_exit !== undefined ? b.nextflow_exit : '—'}</td>
         <td>${b.has_log ? `<button class="btn-refresh" onclick="showLog('${b.batch_id}')">View</button>` : '—'}</td>
       </tr>`).join('');

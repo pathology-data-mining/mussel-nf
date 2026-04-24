@@ -17,6 +17,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import re
 import time
 from pathlib import Path
 
@@ -35,6 +36,30 @@ WatcherConfig = _disp.WatcherConfig
 # ---------------------------------------------------------------------------
 _s3_cache: dict = {}          # model → {shards, objects, ts}
 _S3_CACHE_TTL = 300           # seconds — ECS listing is slow, cache for 5 min
+
+# Matches NF progress lines like:
+#   [xx/xxxxxx] PROCESS_NAME (tag) [ 16%] 21 of 126
+_NF_PROGRESS_RE = re.compile(
+    r'\[\s*(\d+)%\]\s+(\d+)\s+of\s+(\d+)'
+)
+
+
+def _parse_nf_progress(log_path: str) -> dict | None:
+    """Return {pct, done, total} by scanning the last 4 KB of a NF log."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            tail = f.read().decode("utf-8", errors="replace")
+        # Take the last match (most recent progress line)
+        matches = _NF_PROGRESS_RE.findall(tail)
+        if not matches:
+            return None
+        pct_s, done_s, total_s = matches[-1]
+        return {"pct": int(pct_s), "done": int(done_s), "total": int(total_s)}
+    except Exception:
+        return None
 
 
 def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
@@ -149,13 +174,29 @@ def _build_handler(cfg: Config):
         total = sum(counts.values())
         succeeded = counts.get("SUCCEEDED", 0)
         pct = round(succeeded / total * 100, 1) if total else 0
+
         with _db() as conn:
-            n_running = conn.execute(
-                "SELECT COUNT(*) FROM batches WHERE status='RUNNING'"
-            ).fetchone()[0]
+            running_rows = conn.execute(
+                "SELECT log_path, slide_count FROM batches WHERE status='RUNNING'"
+            ).fetchall()
             n_blacklisted = conn.execute(
                 "SELECT COUNT(*) FROM slides WHERE fail_count >= 100"
             ).fetchone()[0]
+
+        n_running = len(running_rows)
+        # Improve pct_done: add fractional credit for in-flight NF tasks
+        in_flight_done = 0
+        in_flight_total = 0
+        for rb in running_rows:
+            np = _parse_nf_progress(rb["log_path"]) if rb["log_path"] else None
+            if np and np["total"] > 0:
+                slide_count = rb["slide_count"] or 0
+                in_flight_done += slide_count * np["done"] / np["total"]
+                in_flight_total += slide_count
+        if total:
+            effective_done = succeeded + in_flight_done
+            pct = round(effective_done / total * 100, 1)
+
         return {
             "counts": counts,
             "total": total,
@@ -199,6 +240,7 @@ def _build_handler(cfg: Config):
                 "duration_s": duration,
                 "nextflow_exit": r["nextflow_exit"],
                 "has_log": bool(r["log_path"] and os.path.exists(r["log_path"])),
+                "nf_progress": _parse_nf_progress(r["log_path"]) if r["status"] == "RUNNING" and r["log_path"] else None,
             })
         return result
 
@@ -570,16 +612,22 @@ async function loadBatches() {
       logsDiv.innerHTML = '<span class="no-data">No running batches.</span>';
       return;
     }
-    tbody.innerHTML = batches.map(b => `
+    tbody.innerHTML = batches.map(b => {
+      const np = b.nf_progress;
+      const slidesCell = np
+        ? `<span title="${np.done} of ${np.total} tasks">${np.done}/${np.total} <span style="color:#6ee7b7">(${np.pct}%)</span></span>`
+        : (b.slide_count ?? '—');
+      return `
       <tr>
         <td style="font-family:monospace;font-size:0.7rem">${b.batch_id}</td>
         <td>${badge(b.status)}</td>
-        <td>${b.slide_count ?? '—'}</td>
+        <td>${slidesCell}</td>
         <td>${fmtTime(b.dispatched_at)}</td>
         <td>${fmtDuration(b.duration_s, b.dispatched_at, b.status === 'RUNNING')}</td>
         <td>${b.nextflow_exit !== null && b.nextflow_exit !== undefined ? b.nextflow_exit : '—'}</td>
         <td>${b.has_log ? `<button class="btn-refresh" onclick="showLog('${b.batch_id}')">View</button>` : '—'}</td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
 
     const running = batches.filter(b => b.status === 'RUNNING');
     if (!running.length) {

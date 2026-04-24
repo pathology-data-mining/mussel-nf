@@ -125,21 +125,20 @@ def _parse_elapsed_s(elapsed: str) -> int | None:
     return None
 
 
-def _classify_task_failure(work_dir: str, exit_code: str) -> str:
-    """Classify a failed NF task by exit code + .command.err content."""
+def _classify_task_failure(work_dir: str, exit_code: str, slurm_state: str = "") -> str:
+    """Classify a failed NF task by SLURM state, exit code + .command.err content."""
     code = exit_code.split(":")[0] if ":" in exit_code else exit_code
     try:
         code_i = int(code)
     except ValueError:
         code_i = -1
 
-    # SIGTERM (143) = infrastructure kill (dispatcher restart, SLURM preempt)
+    # CANCELLED by SLURM/NF = infra stop (dispatcher restart, scancel, preempt)
+    if slurm_state.startswith("CANCEL"):
+        return "sigterm"
+    # SIGTERM (143) = infrastructure kill
     if code_i == 143:
         return "sigterm"
-    # SIGKILL (137) = OOM or hard kill
-    if code_i == 137:
-        # Try to distinguish OOM from hard kill via .command.err
-        pass
 
     # Read last 4KB of .command.err for content-based classification
     err_text = ""
@@ -184,8 +183,10 @@ def _sacct_stats() -> dict:
         "sacct_error": None,
     }
     try:
+        from datetime import datetime, timezone, timedelta
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M")
         out = subprocess.check_output(
-            ["sacct", f"--user={os.environ.get('USER', '')}", "--starttime=now-24hours",
+            ["sacct", f"--user={os.environ.get('USER', '')}", f"--starttime={since}",
              "--format=JobID,JobName,State,ExitCode,Elapsed,WorkDir%120",
              "--noheader", "--parsable2"],
             timeout=20, text=True, stderr=subprocess.DEVNULL,
@@ -206,11 +207,11 @@ def _sacct_stats() -> dict:
                     elapsed_list.append(s)
             elif state.startswith("FAILED"):
                 result["failed"] += 1
-                cat = _classify_task_failure(work_dir, exit_code)
+                cat = _classify_task_failure(work_dir, exit_code, state)
                 result["failure_types"][cat] = result["failure_types"].get(cat, 0) + 1
             elif state.startswith("CANCEL"):
                 result["cancelled"] += 1
-                cat = _classify_task_failure(work_dir, exit_code)
+                cat = _classify_task_failure(work_dir, exit_code, state)
                 result["failure_types"][cat] = result["failure_types"].get(cat, 0) + 1
             elif state == "TIMEOUT":
                 result["timeout"] += 1

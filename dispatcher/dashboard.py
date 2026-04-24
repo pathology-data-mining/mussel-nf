@@ -514,7 +514,7 @@ async function loadLog(batch_id) {
   if (!el) return;
   try {
     const d = await apiFetch('/api/logs/' + batch_id);
-    el.textContent = (d.lines || []).join('\n') || d.error || '(empty)';
+    el.textContent = (d.lines || []).join('\\n') || d.error || '(empty)';
     el.scrollTop = el.scrollHeight;
   } catch { el.textContent = 'Failed to load log.'; }
 }

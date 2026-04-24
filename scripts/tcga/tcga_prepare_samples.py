@@ -139,13 +139,17 @@ def _resolve_s3_credentials(
     return key, secret, endpoint
 
 
-def _list_s3_file_ids(
+def _list_s3_files(
     s3_base: str,
     endpoint_url: str | None = None,
     access_key: str | None = None,
     secret_key: str | None = None,
 ) -> set[str]:
-    """Return the set of file_id prefixes that exist under s3_base."""
+    """Return the set of '{file_id}/{file_name}' keys that exist under s3_base.
+
+    Lists actual object keys (not just directory prefixes) so that the caller
+    can verify both the directory AND the specific file exist on S3.
+    """
     try:
         import boto3
     except ImportError:
@@ -176,15 +180,17 @@ def _list_s3_file_ids(
     existing: set[str] = set()
     paginator = s3.get_paginator("list_objects_v2")
     try:
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
-            for cp in page.get("CommonPrefixes") or []:
-                part = cp["Prefix"].rstrip("/").split("/")[-1]
-                existing.add(part)
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents") or []:
+                # Key format: <prefix>/<file_id>/<file_name>
+                # Strip the prefix to get '<file_id>/<file_name>'
+                relative = obj["Key"][len(prefix):]
+                existing.add(relative)
     except Exception as exc:
         log.warning("S3 listing failed (%s) — will flag slides as needs_download", exc)
         return set()
 
-    log.info("S3 listing found %d existing file_id prefixes under %s", len(existing), s3_base)
+    log.info("S3 listing found %d existing file keys under %s", len(existing), s3_base)
     return existing
 
 
@@ -249,11 +255,13 @@ def prepare_samples(
         df = df.head(limit)
         log.info("Limited to first %d slides", limit)
 
-    # Pre-fetch S3 listing once (fast batch check) instead of per-file head_object
+    # Pre-fetch S3 listing once (fast batch check) instead of per-file head_object.
+    # Lists actual object keys ('{file_id}/{file_name}') so we verify the specific
+    # file exists, not just the directory prefix.
     s3_existing: set[str] | None = None
     if check_s3_exists and s3_base:
-        log.info("Fetching S3 file_id listing from %s …", s3_base)
-        s3_existing = _list_s3_file_ids(
+        log.info("Fetching S3 file listing from %s …", s3_base)
+        s3_existing = _list_s3_files(
             s3_base,
             endpoint_url=s3_endpoint,
             access_key=s3_access_key,
@@ -287,8 +295,11 @@ def prepare_samples(
         if slide_path is None and s3_base:
             candidate = f"{s3_base.rstrip('/')}/{file_id}/{file_name}"
             if check_s3_exists:
-                if s3_existing is not None and file_id in s3_existing:
+                # Check exact file key ('{file_id}/{file_name}'), not just directory prefix
+                if s3_existing is not None and f"{file_id}/{file_name}" in s3_existing:
                     slide_path = candidate
+                elif s3_existing is None:
+                    slide_path = candidate  # listing failed, assume present
             else:
                 slide_path = candidate  # assume present
 

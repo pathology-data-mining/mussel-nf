@@ -374,8 +374,8 @@ class TestUpdateStatus:
 
 # File_ids present on S3 (slides 2 & 3; slide 1 is local, slide 4 needs download)
 S3_FILE_IDS = {
-    "bbbb0000-0000-0000-0000-000000000002",
-    "cccc0000-0000-0000-0000-000000000003",
+    "bbbb0000-0000-0000-0000-000000000002/TCGA-BR-A44U-01Z-00-DX1.2B3C4D5E-0000-0000-0000-000000000000.svs",
+    "cccc0000-0000-0000-0000-000000000003/TCGA-LU-A5YX-01Z-00-DX1.3C4D5E6F-0000-0000-0000-000000000000.svs",
 }
 
 
@@ -398,7 +398,7 @@ class TestPrepareSamples:
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -423,7 +423,7 @@ class TestPrepareSamples:
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -450,7 +450,7 @@ class TestPrepareSamples:
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -474,7 +474,7 @@ class TestPrepareSamples:
         ])
 
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -501,7 +501,7 @@ class TestPrepareSamples:
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=set(),  # not on S3 either
         ):
             result = prepare_samples(
@@ -520,7 +520,7 @@ class TestPrepareSamples:
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -549,7 +549,7 @@ class TestPrepareSamples:
         inventory = pd.concat([make_inventory(), extra], ignore_index=True).astype(str)
 
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=set(),
         ):
             result = prepare_samples(
@@ -578,7 +578,7 @@ class TestPrepareSamples:
         inventory = pd.concat([make_inventory(), extra], ignore_index=True).fillna("").astype(str)
 
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=set(),
         ):
             result = prepare_samples(
@@ -984,9 +984,9 @@ class TestEndToEnd:
 
         # --- Stage 2: prepare samples for the 2 pending slides ---
         # Slide 2 (BRCA) is on S3; slide 4 (LUAD) needs download
-        s3_file_ids = {"bbbb0000-0000-0000-0000-000000000002"}
+        s3_file_ids = {"bbbb0000-0000-0000-0000-000000000002/TCGA-BR-A44U-01Z-00-DX1.2B3C4D5E-0000-0000-0000-000000000000.svs"}
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_file_ids",
+            "scripts.tcga.tcga_prepare_samples._list_s3_files",
             return_value=s3_file_ids,
         ):
             samples = prepare_samples(

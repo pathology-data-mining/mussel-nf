@@ -205,7 +205,10 @@ def make_app(cfg: Config):
 
     # ------------------------------------------------------------------
     # API: log tail for a batch
+    # Returns the latest NF status block + tail of shared .nextflow.log
     # ------------------------------------------------------------------
+    nf_log_path = os.path.join(cfg.repo_dir, ".nextflow.log")
+
     @app.get("/api/logs/{batch_id}")
     def api_logs(batch_id: str):
         with _db() as conn:
@@ -217,13 +220,30 @@ def make_app(cfg: Config):
         log_path = row["log_path"]
         if not os.path.exists(log_path):
             return JSONResponse({"lines": [], "error": "log file not found"}, status_code=404)
-        # Read last 100 lines efficiently
         try:
+            import re as _re
             with open(log_path, "r", errors="replace") as fh:
-                lines = fh.readlines()
-            return {"lines": [l.rstrip() for l in lines[-100:]]}
+                content = fh.read()
+            # Strip ANSI escape codes
+            ansi = _re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfnsuhl]|\r')
+            content = ansi.sub('', content)
+            # Show only the LAST status block (after final "executor >")
+            last = content.rfind("executor >")
+            block = content[last:].strip() if last >= 0 else content.strip()
+            lines = block.splitlines()
         except Exception as exc:
             return JSONResponse({"lines": [], "error": str(exc)}, status_code=500)
+
+        # Tail of shared .nextflow.log (last 40 lines)
+        nf_lines: list[str] = []
+        if os.path.exists(nf_log_path):
+            try:
+                with open(nf_log_path, "r", errors="replace") as fh:
+                    nf_lines = [l.rstrip() for l in fh.readlines()[-40:]]
+            except Exception:
+                pass
+
+        return {"lines": lines, "nf_log": nf_lines}
 
     # ------------------------------------------------------------------
     # API: WDS manifest stats
@@ -418,6 +438,12 @@ _HTML = """<!DOCTYPE html>
     <h2>Live Logs (Running Batches)</h2>
     <div id="logs-content"><span class="no-data">No running batches.</span></div>
   </div>
+
+  <!-- .nextflow.log tail -->
+  <div class="card full" id="nflog-card">
+    <h2>.nextflow.log <span style="font-weight:400;color:#475569;font-size:0.75rem">(shared, last 40 lines)</span></h2>
+    <pre id="nflog-content" style="background:#0f172a;border-radius:6px;padding:10px 12px;font-size:0.7rem;line-height:1.5;color:#64748b;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin:0">Loading…</pre>
+  </div>
 </div>
 
 <script>
@@ -518,16 +544,62 @@ async function loadBatches() {
 
     const running = batches.filter(b => b.status === 'RUNNING');
     if (!running.length) {
-      logsDiv.innerHTML = '<span class="no-data">No running batches. Click View in the table above to inspect any batch log.</span>';
+      logsDiv.innerHTML = '<span class="no-data">No running batches.</span>';
       return;
     }
-    logsDiv.innerHTML = running.map(b =>
-      `<button class="btn-refresh" style="margin:4px" onclick="showLog('${b.batch_id}')">${b.batch_id} (${b.slide_count} slides)</button>`
-    ).join('');
+
+    // Add panels for new running batches; keep existing ones (update in-place)
+    const existingIds = new Set([...logsDiv.querySelectorAll('[data-batch]')].map(el => el.dataset.batch));
+    const runningIds = new Set(running.map(b => b.batch_id));
+
+    // Remove panels for batches no longer running
+    logsDiv.querySelectorAll('[data-batch]').forEach(el => {
+      if (!runningIds.has(el.dataset.batch)) el.remove();
+    });
+    if (!logsDiv.querySelector('[data-batch]')) logsDiv.innerHTML = '';
+
+    // Add new panels
+    for (const b of running) {
+      if (!existingIds.has(b.batch_id)) {
+        const card = document.createElement('div');
+        card.dataset.batch = b.batch_id;
+        card.style.marginBottom = '12px';
+        card.innerHTML = `
+          <div class="log-header" style="display:flex;justify-content:space-between">
+            <span style="font-family:monospace">${b.batch_id} <span style="color:#475569">(${b.slide_count} slides)</span></span>
+            <button class="btn-refresh" onclick="showLog('${b.batch_id}')">Full log</button>
+          </div>
+          <pre class="log-block" id="logtext-${b.batch_id}" style="max-height:160px">Loading…</pre>`;
+        logsDiv.appendChild(card);
+      }
+    }
+
+    // Refresh log content for all running batches
+    running.forEach(b => refreshInlineLog(b.batch_id));
   } catch(e) {
     tbody.innerHTML = '<tr><td colspan="7" class="no-data">Failed to load batches.</td></tr>';
     console.error('loadBatches failed:', e);
   }
+}
+
+async function refreshInlineLog(batch_id) {
+  const el = document.getElementById('logtext-' + batch_id);
+  if (!el) return;
+  try {
+    const d = await apiFetch('/api/logs/' + batch_id);
+    const text = (d.lines || []).join('\\n') || d.error || '(empty)';
+    el.textContent = text;
+    el.scrollTop = el.scrollHeight;
+    // Update shared .nextflow.log panel (last writer wins, that's fine)
+    if (d.nf_log && d.nf_log.length) {
+      const nfEl = document.getElementById('nflog-content');
+      if (nfEl) {
+        const atBottom = nfEl.scrollHeight - nfEl.scrollTop <= nfEl.clientHeight + 20;
+        nfEl.textContent = d.nf_log.join('\\n');
+        if (atBottom) nfEl.scrollTop = nfEl.scrollHeight;
+      }
+    }
+  } catch { if (el) el.textContent = 'Failed to load log.'; }
 }
 
 let _modalBatchId = null;
@@ -555,9 +627,9 @@ async function refreshModalLog() {
   const el = document.getElementById('log-modal-body');
   try {
     const d = await apiFetch('/api/logs/' + _modalBatchId);
-    const text = (d.lines || []).join('\\n') || d.error || '(empty)';
+    const text = (d.lines || []).join('\\n') + (d.nf_log && d.nf_log.length ? '\\n\\n--- .nextflow.log ---\\n' + d.nf_log.join('\\n') : '');
     const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 20;
-    el.textContent = text;
+    el.textContent = text || d.error || '(empty)';
     if (atBottom) el.scrollTop = el.scrollHeight;
   } catch { el.textContent = 'Failed to load log.'; }
 }

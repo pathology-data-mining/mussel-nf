@@ -1,0 +1,578 @@
+#!/usr/bin/env python3
+"""Mussel-nf Dispatcher Monitoring Dashboard.
+
+Reads configuration from the dispatcher YAML file (same file used to run the
+dispatcher) and exposes a browser-based dashboard via FastAPI/uvicorn.
+
+Usage:
+    python dispatcher/dashboard.py dispatcher/tcga_dispatcher.yaml
+    python dispatcher/dashboard.py dispatcher/tcga_dispatcher.yaml --port 8080
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Import Config / WatcherConfig from the sibling mussel-dispatcher.py
+# ---------------------------------------------------------------------------
+_DISPATCHER_PY = Path(__file__).parent / "mussel-dispatcher.py"
+_spec = importlib.util.spec_from_file_location("mussel_dispatcher", _DISPATCHER_PY)
+_disp = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_disp)
+Config = _disp.Config
+WatcherConfig = _disp.WatcherConfig
+
+# ---------------------------------------------------------------------------
+# S3 stats cache
+# ---------------------------------------------------------------------------
+_s3_cache: dict = {}          # model → (timestamp, shard_count, object_count)
+_S3_CACHE_TTL = 60            # seconds
+
+
+def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
+    """Return {model: {shards, objects}} from ECS, with 60-second cache."""
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    results: dict[str, dict] = {}
+    now = time.time()
+
+    client_kwargs: dict = {}
+    endpoint = watcher.s3_endpoint or os.environ.get("ECS_ENDPOINT_URL")
+    ak = watcher.s3_access_key or os.environ.get("ECS_ACCESS_KEY")
+    sk = watcher.s3_secret_key or os.environ.get("ECS_SECRET_KEY")
+    if endpoint:
+        client_kwargs["endpoint_url"] = endpoint
+    if ak:
+        client_kwargs["aws_access_key_id"] = ak
+    if sk:
+        client_kwargs["aws_secret_access_key"] = sk
+
+    for model, dest in watcher.wds_destinations.items():
+        cached = _s3_cache.get(model)
+        if cached and (now - cached["ts"]) < _S3_CACHE_TTL:
+            results[model] = {k: v for k, v in cached.items() if k != "ts"}
+            continue
+
+        # dest is like s3://bucket/prefix
+        if dest.startswith("s3://"):
+            rest = dest[5:]
+            bucket, _, prefix = rest.partition("/")
+        else:
+            results[model] = {"shards": 0, "objects": 0, "error": "not an s3 path"}
+            continue
+
+        try:
+            s3 = boto3.client("s3", **client_kwargs)
+            paginator = s3.get_paginator("list_objects_v2")
+            shards = objects = 0
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if key.endswith(".tar"):
+                        shards += 1
+                    objects += 1
+            entry = {"shards": shards, "objects": objects, "ts": now}
+            _s3_cache[model] = entry
+            results[model] = {"shards": shards, "objects": objects}
+        except (BotoCoreError, ClientError, Exception) as exc:
+            results[model] = {"shards": 0, "objects": 0, "error": str(exc)[:120]}
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app factory
+# ---------------------------------------------------------------------------
+
+def make_app(cfg: Config):
+    try:
+        from fastapi import FastAPI
+        from fastapi.responses import HTMLResponse, JSONResponse
+    except ImportError:
+        sys.exit("fastapi is required: pip install fastapi uvicorn")
+
+    app = FastAPI(title="Mussel Dispatcher Dashboard")
+    db_path = os.path.join(cfg.state_dir, "dispatcher.db")
+    wds_manifest = os.path.join(cfg.outdir, "wds_manifest.csv")
+
+    # Find the tcga watcher (first one with wds_destinations)
+    tcga_watcher: Optional[WatcherConfig] = None
+    for w in cfg.watchers:
+        if w.wds_destinations:
+            tcga_watcher = w
+            break
+
+    def _db() -> sqlite3.Connection:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    # ------------------------------------------------------------------
+    # API: slide status counts
+    # ------------------------------------------------------------------
+    @app.get("/api/status")
+    def api_status():
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM slides GROUP BY status"
+            ).fetchall()
+        counts = {r["status"]: r["n"] for r in rows}
+        total = sum(counts.values())
+        succeeded = counts.get("SUCCEEDED", 0)
+        pct = round(succeeded / total * 100, 1) if total else 0
+
+        with _db() as conn:
+            n_running = conn.execute(
+                "SELECT COUNT(*) FROM batches WHERE status='RUNNING'"
+            ).fetchone()[0]
+            n_blacklisted = conn.execute(
+                "SELECT COUNT(*) FROM slides WHERE fail_count >= 100"
+            ).fetchone()[0]
+
+        return {
+            "counts": counts,
+            "total": total,
+            "pct_done": pct,
+            "running_batches": n_running,
+            "blacklisted": n_blacklisted,
+        }
+
+    # ------------------------------------------------------------------
+    # API: recent batches
+    # ------------------------------------------------------------------
+    @app.get("/api/batches")
+    def api_batches():
+        with _db() as conn:
+            rows = conn.execute("""
+                SELECT batch_id, status, slide_count, dispatched_at,
+                       completed_at, nextflow_exit, log_path
+                FROM batches
+                ORDER BY dispatched_at DESC
+                LIMIT 30
+            """).fetchall()
+
+        result = []
+        for r in rows:
+            start = r["dispatched_at"] or ""
+            end = r["completed_at"] or ""
+            duration = None
+            if start and end:
+                try:
+                    from datetime import datetime, timezone
+                    fmt = "%Y-%m-%dT%H:%M:%S.%f%z"
+                    def _parse(s):
+                        try:
+                            return datetime.fromisoformat(s)
+                        except Exception:
+                            return None
+                    t0, t1 = _parse(start), _parse(end)
+                    if t0 and t1:
+                        duration = int((t1 - t0).total_seconds())
+                except Exception:
+                    pass
+            result.append({
+                "batch_id": r["batch_id"],
+                "status": r["status"],
+                "slide_count": r["slide_count"],
+                "dispatched_at": start,
+                "completed_at": end,
+                "duration_s": duration,
+                "nextflow_exit": r["nextflow_exit"],
+                "has_log": bool(r["log_path"] and os.path.exists(r["log_path"])),
+            })
+        return result
+
+    # ------------------------------------------------------------------
+    # API: log tail for a batch
+    # ------------------------------------------------------------------
+    @app.get("/api/logs/{batch_id}")
+    def api_logs(batch_id: str):
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT log_path FROM batches WHERE batch_id=?", (batch_id,)
+            ).fetchone()
+        if not row or not row["log_path"]:
+            return JSONResponse({"lines": [], "error": "no log path"}, status_code=404)
+        log_path = row["log_path"]
+        if not os.path.exists(log_path):
+            return JSONResponse({"lines": [], "error": "log file not found"}, status_code=404)
+        # Read last 100 lines efficiently
+        try:
+            with open(log_path, "r", errors="replace") as fh:
+                lines = fh.readlines()
+            return {"lines": [l.rstrip() for l in lines[-100:]]}
+        except Exception as exc:
+            return JSONResponse({"lines": [], "error": str(exc)}, status_code=500)
+
+    # ------------------------------------------------------------------
+    # API: WDS manifest stats
+    # ------------------------------------------------------------------
+    @app.get("/api/wds")
+    def api_wds():
+        if not os.path.exists(wds_manifest):
+            return {"models": {}, "total": 0}
+        try:
+            import csv
+            counts: dict[str, int] = {}
+            with open(wds_manifest, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    model = row.get("model", "unknown")
+                    counts[model] = counts.get(model, 0) + 1
+            return {"models": counts, "total": sum(counts.values())}
+        except Exception as exc:
+            return {"models": {}, "total": 0, "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # API: S3 shard stats (cached)
+    # ------------------------------------------------------------------
+    @app.get("/api/s3")
+    def api_s3():
+        if not tcga_watcher or not tcga_watcher.wds_destinations:
+            return {"models": {}, "note": "no wds_destinations configured"}
+        stats = _s3_stats(tcga_watcher, "wds")
+        return {"models": stats}
+
+    # ------------------------------------------------------------------
+    # HTML dashboard
+    # ------------------------------------------------------------------
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard():
+        return HTMLResponse(_HTML)
+
+    return app
+
+
+# ---------------------------------------------------------------------------
+# Embedded HTML + JS dashboard
+# ---------------------------------------------------------------------------
+_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mussel Dispatcher Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+  header { background: #1e293b; border-bottom: 1px solid #334155; padding: 12px 24px;
+           display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 1.2rem; font-weight: 600; color: #f8fafc; }
+  #last-updated { font-size: 0.75rem; color: #94a3b8; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
+  .full { grid-column: 1 / -1; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 0.85rem; font-weight: 600; color: #94a3b8; text-transform: uppercase;
+             letter-spacing: .05em; margin-bottom: 12px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .stat { background: #0f172a; border-radius: 6px; padding: 12px 16px; }
+  .stat .val { font-size: 1.8rem; font-weight: 700; }
+  .stat .lbl { font-size: 0.7rem; color: #94a3b8; margin-top: 2px; text-transform: uppercase; }
+  .chart-wrap { display: flex; justify-content: center; align-items: center; max-height: 220px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  th { text-align: left; color: #64748b; font-weight: 600; padding: 6px 8px;
+       border-bottom: 1px solid #334155; text-transform: uppercase; font-size: 0.7rem; }
+  td { padding: 6px 8px; border-bottom: 1px solid #1e293b; vertical-align: middle; }
+  tr:hover td { background: #0f172a; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.7rem; font-weight: 600; }
+  .badge-running   { background:#0c4a6e; color:#38bdf8; }
+  .badge-succeeded { background:#14532d; color:#4ade80; }
+  .badge-failed    { background:#450a0a; color:#f87171; }
+  .badge-pending   { background:#312e81; color:#a5b4fc; }
+  .log-block { background: #0f172a; border-radius: 6px; padding: 10px 12px;
+               font-family: monospace; font-size: 0.72rem; line-height: 1.5;
+               max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+               color: #94a3b8; margin-bottom: 8px; }
+  .log-header { font-size: 0.75rem; color: #e2e8f0; margin-bottom: 4px; font-weight: 600; }
+  .progress-bar-wrap { background: #334155; border-radius: 999px; height: 8px; margin-top: 4px; }
+  .progress-bar { background: #22c55e; border-radius: 999px; height: 8px; transition: width .5s; }
+  .wds-row { display: flex; justify-content: space-between; padding: 4px 0;
+             border-bottom: 1px solid #334155; font-size: 0.8rem; }
+  .wds-row:last-child { border-bottom: none; }
+  .s3-row { display: flex; justify-content: space-between; padding: 4px 0;
+            border-bottom: 1px solid #334155; font-size: 0.8rem; }
+  .s3-row:last-child { border-bottom: none; }
+  .no-data { color: #475569; font-size: 0.8rem; }
+  details summary { cursor: pointer; padding: 4px 0; color: #94a3b8; font-size: 0.8rem; }
+  details summary:hover { color: #e2e8f0; }
+  details[open] summary { color: #38bdf8; }
+  .btn-refresh { background: #334155; border: none; color: #94a3b8; padding: 4px 12px;
+                border-radius: 4px; cursor: pointer; font-size: 0.75rem; }
+  .btn-refresh:hover { background: #475569; color: #e2e8f0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🦪 Mussel Dispatcher Dashboard</h1>
+  <div style="display:flex;gap:12px;align-items:center">
+    <span id="last-updated">Loading…</span>
+    <button class="btn-refresh" onclick="refresh()">↻ Refresh</button>
+  </div>
+</header>
+
+<div class="grid">
+  <!-- Summary -->
+  <div class="card full">
+    <h2>Overview</h2>
+    <div class="summary-grid" id="summary-grid">
+      <div class="stat"><div class="val" id="s-total">—</div><div class="lbl">Total Slides</div></div>
+      <div class="stat"><div class="val" id="s-done" style="color:#4ade80">—</div><div class="lbl">Succeeded</div></div>
+      <div class="stat"><div class="val" id="s-failed" style="color:#f87171">—</div><div class="lbl">Failed</div></div>
+      <div class="stat"><div class="val" id="s-pending" style="color:#a5b4fc">—</div><div class="lbl">Pending</div></div>
+      <div class="stat"><div class="val" id="s-dispatched" style="color:#38bdf8">—</div><div class="lbl">Dispatched</div></div>
+      <div class="stat"><div class="val" id="s-pct">—</div><div class="lbl">% Done</div></div>
+      <div class="stat"><div class="val" id="s-running">—</div><div class="lbl">Running Batches</div></div>
+      <div class="stat"><div class="val" id="s-blacklisted" style="color:#fb923c">—</div><div class="lbl">Blacklisted</div></div>
+    </div>
+    <div class="progress-bar-wrap" style="margin-top:12px">
+      <div class="progress-bar" id="progress-bar" style="width:0%"></div>
+    </div>
+  </div>
+
+  <!-- Slide status chart -->
+  <div class="card">
+    <h2>Slide Status</h2>
+    <div class="chart-wrap"><canvas id="statusChart"></canvas></div>
+  </div>
+
+  <!-- WDS + S3 -->
+  <div class="card">
+    <h2>WDS Uploads</h2>
+    <div id="wds-content"><span class="no-data">Loading…</span></div>
+    <h2 style="margin-top:16px">S3 Shards (ECS)</h2>
+    <div id="s3-content"><span class="no-data">Loading…</span></div>
+  </div>
+
+  <!-- Batch table -->
+  <div class="card full">
+    <h2>Recent Batches</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Batch ID</th>
+            <th>Status</th>
+            <th>Slides</th>
+            <th>Started</th>
+            <th>Duration</th>
+            <th>NF Exit</th>
+            <th>Log</th>
+          </tr>
+        </thead>
+        <tbody id="batch-tbody"><tr><td colspan="7" class="no-data">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Log tails -->
+  <div class="card full" id="logs-card">
+    <h2>Live Logs (Running Batches)</h2>
+    <div id="logs-content"><span class="no-data">No running batches.</span></div>
+  </div>
+</div>
+
+<script>
+let statusChart = null;
+
+function badge(status) {
+  const cls = {RUNNING:'running',SUCCEEDED:'succeeded',FAILED:'failed',PENDING:'pending',DISPATCHED:'running'}[status] || 'pending';
+  return `<span class="badge badge-${cls}">${status}</span>`;
+}
+
+function fmtDuration(s) {
+  if (s === null || s === undefined) return '—';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString();
+  } catch { return iso; }
+}
+
+async function loadStatus() {
+  const d = await fetch('/api/status').then(r => r.json());
+  const c = d.counts || {};
+  document.getElementById('s-total').textContent = d.total ?? '—';
+  document.getElementById('s-done').textContent = c.SUCCEEDED ?? 0;
+  document.getElementById('s-failed').textContent = c.FAILED ?? 0;
+  document.getElementById('s-pending').textContent = c.PENDING ?? 0;
+  document.getElementById('s-dispatched').textContent = c.DISPATCHED ?? 0;
+  document.getElementById('s-pct').textContent = (d.pct_done ?? 0) + '%';
+  document.getElementById('s-running').textContent = d.running_batches ?? 0;
+  document.getElementById('s-blacklisted').textContent = d.blacklisted ?? 0;
+  document.getElementById('progress-bar').style.width = (d.pct_done ?? 0) + '%';
+
+  // Chart
+  const labels = Object.keys(c);
+  const values = Object.values(c);
+  const colors = labels.map(l => ({
+    SUCCEEDED:'#22c55e', FAILED:'#ef4444', PENDING:'#6366f1', DISPATCHED:'#0ea5e9'
+  }[l] || '#64748b'));
+
+  if (!statusChart) {
+    statusChart = new Chart(document.getElementById('statusChart'), {
+      type: 'doughnut',
+      data: { labels, datasets: [{ data: values, backgroundColor: colors, borderWidth: 0 }] },
+      options: { plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
+                 cutout: '60%' }
+    });
+  } else {
+    statusChart.data.labels = labels;
+    statusChart.data.datasets[0].data = values;
+    statusChart.data.datasets[0].backgroundColor = colors;
+    statusChart.update();
+  }
+}
+
+async function loadBatches() {
+  const batches = await fetch('/api/batches').then(r => r.json());
+  const tbody = document.getElementById('batch-tbody');
+  if (!batches.length) { tbody.innerHTML = '<tr><td colspan="7" class="no-data">No batches yet.</td></tr>'; return; }
+  tbody.innerHTML = batches.map(b => `
+    <tr>
+      <td style="font-family:monospace;font-size:0.7rem">${b.batch_id}</td>
+      <td>${badge(b.status)}</td>
+      <td>${b.slide_count ?? '—'}</td>
+      <td>${fmtTime(b.dispatched_at)}</td>
+      <td>${fmtDuration(b.duration_s)}</td>
+      <td>${b.nextflow_exit !== null && b.nextflow_exit !== undefined ? b.nextflow_exit : '—'}</td>
+      <td>${b.has_log ? `<button class="btn-refresh" onclick="showLog('${b.batch_id}')">View</button>` : '—'}</td>
+    </tr>`).join('');
+
+  // Load logs for running batches
+  const running = batches.filter(b => b.status === 'RUNNING');
+  const logsDiv = document.getElementById('logs-content');
+  if (!running.length) { logsDiv.innerHTML = '<span class="no-data">No running batches.</span>'; return; }
+  logsDiv.innerHTML = '';
+  for (const b of running) {
+    const detail = document.createElement('details');
+    detail.id = 'log-' + b.batch_id;
+    detail.open = true;
+    detail.innerHTML = `<summary>${b.batch_id} (${b.slide_count} slides)</summary>
+      <div class="log-block" id="logtext-${b.batch_id}">Loading…</div>`;
+    logsDiv.appendChild(detail);
+    loadLog(b.batch_id);
+  }
+}
+
+async function loadLog(batch_id) {
+  const el = document.getElementById('logtext-' + batch_id);
+  if (!el) return;
+  try {
+    const d = await fetch('/api/logs/' + batch_id).then(r => r.json());
+    el.textContent = (d.lines || []).join('\n') || d.error || '(empty)';
+    el.scrollTop = el.scrollHeight;
+  } catch { el.textContent = 'Failed to load log.'; }
+}
+
+async function showLog(batch_id) {
+  const logsDiv = document.getElementById('logs-content');
+  let detail = document.getElementById('log-' + batch_id);
+  if (!detail) {
+    detail = document.createElement('details');
+    detail.id = 'log-' + batch_id;
+    detail.open = true;
+    detail.innerHTML = `<summary>${batch_id}</summary>
+      <div class="log-block" id="logtext-${batch_id}">Loading…</div>`;
+    logsDiv.prepend(detail);
+  }
+  loadLog(batch_id);
+}
+
+async function loadWds() {
+  const d = await fetch('/api/wds').then(r => r.json());
+  const el = document.getElementById('wds-content');
+  if (!d.models || !Object.keys(d.models).length) {
+    el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return;
+  }
+  el.innerHTML = Object.entries(d.models).map(([m, n]) =>
+    `<div class="wds-row"><span>${m}</span><span style="color:#4ade80;font-weight:600">${n} slides</span></div>`
+  ).join('') + `<div class="wds-row" style="margin-top:4px"><span>Total</span><b>${d.total}</b></div>`;
+}
+
+async function loadS3() {
+  const el = document.getElementById('s3-content');
+  try {
+    const d = await fetch('/api/s3').then(r => r.json());
+    if (!d.models || !Object.keys(d.models).length) {
+      el.innerHTML = '<span class="no-data">' + (d.note || 'No data.') + '</span>'; return;
+    }
+    el.innerHTML = Object.entries(d.models).map(([m, v]) =>
+      v.error
+        ? `<div class="s3-row"><span>${m}</span><span style="color:#f87171">${v.error}</span></div>`
+        : `<div class="s3-row"><span>${m}</span><span style="color:#38bdf8">${v.shards} shards / ${v.objects} objects</span></div>`
+    ).join('');
+  } catch { el.innerHTML = '<span class="no-data">Failed to fetch S3 stats.</span>'; }
+}
+
+async function refresh() {
+  document.getElementById('last-updated').textContent = 'Refreshing…';
+  await Promise.all([loadStatus(), loadBatches(), loadWds(), loadS3()]);
+  document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("config", help="Path to dispatcher YAML config file")
+    parser.add_argument("--port", type=int, default=8050,
+                        help="HTTP port to listen on (default: 8050)")
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="Host to bind (default: 0.0.0.0)")
+    args = parser.parse_args()
+
+    cfg = Config.load(args.config)
+
+    # If ECS credentials aren't in env, try to read them from Nextflow secrets
+    for env_key, nf_secret in [("ECS_ACCESS_KEY", "ECS_ACCESS_KEY"),
+                                ("ECS_SECRET_KEY", "ECS_SECRET_KEY")]:
+        if not os.environ.get(env_key):
+            try:
+                val = subprocess.check_output(
+                    ["nextflow", "secrets", "get", nf_secret],
+                    text=True, stderr=subprocess.DEVNULL,
+                ).strip()
+                if val:
+                    os.environ[env_key] = val
+            except Exception:
+                pass
+
+    app = make_app(cfg)
+
+    try:
+        import uvicorn
+    except ImportError:
+        sys.exit("uvicorn is required: pip install uvicorn")
+
+    print(f"Dashboard: http://localhost:{args.port}/")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

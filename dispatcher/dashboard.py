@@ -125,6 +125,52 @@ def _parse_elapsed_s(elapsed: str) -> int | None:
     return None
 
 
+def _classify_task_failure(work_dir: str, exit_code: str) -> str:
+    """Classify a failed NF task by exit code + .command.err content."""
+    code = exit_code.split(":")[0] if ":" in exit_code else exit_code
+    try:
+        code_i = int(code)
+    except ValueError:
+        code_i = -1
+
+    # SIGTERM (143) = infrastructure kill (dispatcher restart, SLURM preempt)
+    if code_i == 143:
+        return "sigterm"
+    # SIGKILL (137) = OOM or hard kill
+    if code_i == 137:
+        # Try to distinguish OOM from hard kill via .command.err
+        pass
+
+    # Read last 4KB of .command.err for content-based classification
+    err_text = ""
+    try:
+        err_path = os.path.join(work_dir, ".command.err")
+        with open(err_path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 4096))
+            err_text = f.read().decode("utf-8", errors="replace").lower()
+    except Exception:
+        pass
+
+    if "cuda out of memory" in err_text or "cudaoutofmemoryerror" in err_text:
+        return "oom_gpu"
+    if "out of memory" in err_text or "oom-kill" in err_text or "cannot allocate memory" in err_text:
+        return "oom_host"
+    if code_i == 137:
+        return "oom_host"  # SIGKILL without clear OOM message still likely OOM
+    if "no space left" in err_text or "disk quota" in err_text:
+        return "disk_full"
+    if "s3://" in err_text and ("error" in err_text or "exception" in err_text):
+        return "s3_error"
+    if "traceback" in err_text or "runtimeerror" in err_text or "valueerror" in err_text:
+        return "python_error"
+    if code_i == 1:
+        return "error_exit1"
+    if code_i > 0:
+        return f"exit_{code_i}"
+    return "unknown"
+
+
 def _sacct_stats() -> dict:
     """Return summary of completed mussel SLURM jobs from the last 24h via sacct."""
     now = time.time()
@@ -134,22 +180,22 @@ def _sacct_stats() -> dict:
     result: dict = {
         "completed": 0, "failed": 0, "cancelled": 0, "timeout": 0,
         "avg_elapsed_s": None, "min_elapsed_s": None, "max_elapsed_s": None,
+        "failure_types": {},   # category -> count
         "sacct_error": None,
     }
     try:
         out = subprocess.check_output(
             ["sacct", f"--user={os.environ.get('USER', '')}", "--starttime=now-24hours",
-             "--format=JobID,JobName,State,ExitCode,Elapsed",
+             "--format=JobID,JobName,State,ExitCode,Elapsed,WorkDir%120",
              "--noheader", "--parsable2"],
             timeout=20, text=True, stderr=subprocess.DEVNULL,
         )
         elapsed_list = []
         for line in out.splitlines():
             parts = line.split("|")
-            if len(parts) < 5:
+            if len(parts) < 6:
                 continue
-            job_id, job_name, state, _exit, elapsed = parts[:5]
-            # Skip sub-steps (.batch, .extern) and non-mussel jobs
+            job_id, job_name, state, exit_code, elapsed, work_dir = parts[:6]
             if "." in job_id or "nf-MUSSEL" not in job_name:
                 continue
             state = state.strip()
@@ -160,10 +206,15 @@ def _sacct_stats() -> dict:
                     elapsed_list.append(s)
             elif state.startswith("FAILED"):
                 result["failed"] += 1
+                cat = _classify_task_failure(work_dir, exit_code)
+                result["failure_types"][cat] = result["failure_types"].get(cat, 0) + 1
             elif state.startswith("CANCEL"):
                 result["cancelled"] += 1
+                cat = _classify_task_failure(work_dir, exit_code)
+                result["failure_types"][cat] = result["failure_types"].get(cat, 0) + 1
             elif state == "TIMEOUT":
                 result["timeout"] += 1
+                result["failure_types"]["timeout"] = result["failure_types"].get("timeout", 0) + 1
         if elapsed_list:
             result["avg_elapsed_s"] = int(sum(elapsed_list) / len(elapsed_list))
             result["min_elapsed_s"] = min(elapsed_list)
@@ -1025,7 +1076,29 @@ async function loadSlurm() {
       if (d.avg_elapsed_s !== null && d.avg_elapsed_s !== undefined) {
         avgStr = ` &nbsp; <span style="color:#94a3b8">avg ${fmtDuration(d.avg_elapsed_s)} &nbsp; min ${fmtDuration(d.min_elapsed_s)} &nbsp; max ${fmtDuration(d.max_elapsed_s)}</span>`;
       }
-      histHtml = `<div><span style="color:#94a3b8;font-size:0.75rem">LAST 24H</span><br>${parts.join(' &nbsp; ')}${avgStr}</div>`;
+      histHtml = `<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">LAST 24H</span><br>${parts.join(' &nbsp; ')}${avgStr}</div>`;
+
+      // Failure type breakdown
+      const ftypes = d.failure_types || {};
+      const ftypeLabels = {
+        sigterm:      {icon:'⚡', label:'SIGTERM (infra)', color:'#94a3b8'},
+        oom_gpu:      {icon:'🔥', label:'GPU OOM',         color:'#f87171'},
+        oom_host:     {icon:'💥', label:'Host OOM',        color:'#f87171'},
+        disk_full:    {icon:'💾', label:'Disk full',       color:'#fcd34d'},
+        s3_error:     {icon:'☁️', label:'S3 error',        color:'#fbbf24'},
+        python_error: {icon:'🐍', label:'Python error',    color:'#fb923c'},
+        timeout:      {icon:'⏱', label:'Timeout',          color:'#fcd34d'},
+        error_exit1:  {icon:'❌', label:'Exit 1',          color:'#f87171'},
+        unknown:      {icon:'❓', label:'Unknown',          color:'#94a3b8'},
+      };
+      const ftypeEntries = Object.entries(ftypes).sort((a,b) => b[1]-a[1]);
+      if (ftypeEntries.length) {
+        const ftHtml = ftypeEntries.map(([k, n]) => {
+          const lbl = ftypeLabels[k] || {icon:'⚠️', label:k, color:'#94a3b8'};
+          return `<span style="color:${lbl.color}" title="${lbl.label}">${lbl.icon} ${lbl.label}: ${n}</span>`;
+        }).join(' &nbsp; ');
+        histHtml += `<div style="font-size:0.8rem">${ftHtml}</div>`;
+      }
       if (d.sacct_error) histHtml += `<div style="color:#f87171;font-size:0.75rem">sacct: ${d.sacct_error}</div>`;
     }
 

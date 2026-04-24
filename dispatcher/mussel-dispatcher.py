@@ -149,7 +149,6 @@ class WatcherConfig:
     project: str = ""
     slide_type: str = "DX"
     sample_type: str = "Primary Tumor"   # GDC sample_type substring filter; "all" to disable
-    download_dir: str = ""
     gdc_token_file: str = ""
     gdc_max_age_hours: float = 24.0
     scripts_dir: str = ""  # path to scripts/tcga/; defaults to {repo_dir}/scripts/tcga
@@ -235,7 +234,6 @@ class Config:
             "inventory_csv",
             "status_csv",
             "local_slides_dir",
-            "download_dir",
             "wds_staging_dir",
             "scripts_dir",
             "gdc_token_file",
@@ -962,52 +960,46 @@ class TcgaWatcher(threading.Thread):
 
         # Enqueue needs-download slides — NF's DOWNLOAD_SLIDE process handles
         # the actual GDC download via storeDir (cached across runs).
-        # Use the expected storeDir path so the record is unique in the DB and
-        # NF skips the download if the file was already fetched in a prior run.
+        # Use a synthetic gdc:// URI as the DB primary key so no path knowledge
+        # is needed in the dispatcher; slide_path in the batch CSV is set to the
+        # bare filename (correct extension, NF ignores it for needs_download slides).
         if needs_dl:
-            download_dir = self.cfg.download_dir
-            if not download_dir:
-                log.warning(
-                    "TcgaWatcher: %d slides need download but download_dir is not set"
-                    " — set download_dir in the config (must match params.download.local_dir)",
-                    len(needs_dl),
+            n_new = 0
+            for s in needs_dl:
+                file_id = s.get("file_id", "")
+                file_name = s.get("file_name", "")
+                slide_id = s["slide_id"]
+                if not file_id or not file_name:
+                    log.warning("TcgaWatcher: missing file_id/file_name for %s — skipping", slide_id)
+                    continue
+                # Synthetic URI used as the unique DB key.
+                db_key = f"gdc://{file_id}/{file_name}"
+                if self.state.is_known(db_key):
+                    continue
+                # Remove any stale PENDING S3 record for the same slide_id
+                # (can appear when a slide was first found on S3 then disappeared).
+                for r in self.state.get_slides_by_id(slide_id):
+                    if r["status"] == "PENDING" and r["slide_path"].startswith("s3://"):
+                        log.info(
+                            "TcgaWatcher: removing stale S3 PENDING record for %s (%s)",
+                            slide_id, r["slide_path"],
+                        )
+                        self.state.remove_slide(r["slide_path"])
+                self.state.add_slide(
+                    db_key, slide_id,
+                    file_id=file_id, file_name=file_name, needs_download=True,
                 )
-            else:
-                n_new = 0
-                for s in needs_dl:
-                    file_id = s.get("file_id", "")
-                    file_name = s.get("file_name", "")
-                    slide_id = s["slide_id"]
-                    if not file_id or not file_name:
-                        log.warning("TcgaWatcher: missing file_id/file_name for %s — skipping", slide_id)
-                        continue
-                    # Expected storeDir path (mirrors NF's DOWNLOAD_SLIDE storeDir).
-                    slide_path = str(Path(download_dir) / file_id / file_name)
-                    if self.state.is_known(slide_path):
-                        continue
-                    # Remove any stale PENDING S3 record for the same slide_id
-                    # (can appear when a slide was first found on S3 then disappeared).
-                    for r in self.state.get_slides_by_id(slide_id):
-                        if r["status"] == "PENDING" and r["slide_path"].startswith("s3://"):
-                            log.info(
-                                "TcgaWatcher: removing stale S3 PENDING record for %s (%s)",
-                                slide_id, r["slide_path"],
-                            )
-                            self.state.remove_slide(r["slide_path"])
-                    self.state.add_slide(
-                        slide_path, slide_id,
-                        file_id=file_id, file_name=file_name, needs_download=True,
-                    )
-                    self.pending.append({
-                        "slide_id": slide_id,
-                        "slide_path": slide_path,
-                        "file_id": file_id,
-                        "file_name": file_name,
-                        "needs_download": True,
-                    })
-                    n_new += 1
-                if n_new:
-                    log.info("TcgaWatcher: queued %d slide(s) for GDC download via NF", n_new)
+                self.pending.append({
+                    "slide_id": slide_id,
+                    "slide_path": file_name,   # bare filename; NF ignores for needs_download
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "needs_download": True,
+                    "_db_key": db_key,         # internal: used by mark_dispatched
+                })
+                n_new += 1
+            if n_new:
+                log.info("TcgaWatcher: queued %d slide(s) for GDC download via NF", n_new)
 
 
 # ---------------------------------------------------------------------------
@@ -1102,7 +1094,10 @@ class NextflowRunner:
             os.makedirs(self.cfg.log_dir, exist_ok=True)
 
             self.state.add_batch(self.batch_id, csv_path, work_dir, len(self.slides), log_path)
-            self.state.mark_dispatched([s["slide_path"] for s in self.slides], self.batch_id)
+            self.state.mark_dispatched(
+                [s.get("_db_key") or s["slide_path"] for s in self.slides],
+                self.batch_id,
+            )
 
         cmd = [
             "nextflow", "run", self.cfg.repo_dir,
@@ -1111,17 +1106,13 @@ class NextflowRunner:
             "--samples_csv", csv_path,
             "--outdir", self.cfg.outdir,
         ]
-        # If this batch includes slides that need GDC download, tell NF where
-        # to cache them (must match download_dir in the dispatcher config, which
-        # is used to construct the storeDir path stored in the DB).
+        # If this batch includes slides that need GDC download, pass the token
+        # file to NF if configured (open-access TCGA data needs no token).
         has_download = any(s.get("needs_download") for s in self.slides)
         if has_download:
-            # Find the download_dir from the first tcga watcher that has one.
             for w in self.cfg.watchers:
-                if getattr(w, "download_dir", ""):
-                    cmd += ["--download.local_dir", w.download_dir]
-                    if getattr(w, "gdc_token_file", ""):
-                        cmd += ["--download.gdc_token_file", w.gdc_token_file]
+                if getattr(w, "gdc_token_file", ""):
+                    cmd += ["--download.gdc_token_file", w.gdc_token_file]
                     break
         if self._resume:
             cmd.append("-resume")

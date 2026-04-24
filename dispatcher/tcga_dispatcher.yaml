@@ -60,8 +60,7 @@ watchers:
     gdc_max_age_hours: 24.0
 
     # Slides not found on S3 are routed through NF's DOWNLOAD_SLIDE process.
-    # download_dir must match params.download.local_dir (NF storeDir for GDC files).
-    download_dir: tcga-downloads
+    # NF caches downloads in params.download.local_dir (default: tcga-slides).
     # gdc_token_file: /path/to/gdc-user-token.txt
 
     # When set, a tcga_append_wds.py post-batch hook is generated automatically

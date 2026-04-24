@@ -103,10 +103,85 @@ def _parse_nf_log(log_path: str) -> dict:
 
 _squeue_cache: dict = {}
 _SQUEUE_TTL = 15  # seconds
+_sacct_cache: dict = {}
+_SACCT_TTL = 60  # seconds — sacct is slower
+
+
+def _parse_elapsed_s(elapsed: str) -> int | None:
+    """Parse sacct elapsed string (HH:MM:SS or D-HH:MM:SS) to seconds."""
+    try:
+        if "-" in elapsed:
+            days, rest = elapsed.split("-", 1)
+            d = int(days)
+        else:
+            rest, d = elapsed, 0
+        parts = rest.split(":")
+        if len(parts) == 3:
+            return d * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        if len(parts) == 2:
+            return d * 86400 + int(parts[0]) * 60 + int(parts[1])
+    except Exception:
+        pass
+    return None
+
+
+def _sacct_stats() -> dict:
+    """Return summary of completed mussel SLURM jobs from the last 24h via sacct."""
+    now = time.time()
+    if _sacct_cache.get("ts", 0) + _SACCT_TTL > now:
+        return _sacct_cache.get("data", {})
+
+    result: dict = {
+        "completed": 0, "failed": 0, "cancelled": 0, "timeout": 0,
+        "avg_elapsed_s": None, "min_elapsed_s": None, "max_elapsed_s": None,
+        "sacct_error": None,
+    }
+    try:
+        out = subprocess.check_output(
+            ["sacct", f"--user={os.environ.get('USER', '')}", "--starttime=now-24hours",
+             "--format=JobID,JobName,State,ExitCode,Elapsed",
+             "--noheader", "--parsable2"],
+            timeout=20, text=True, stderr=subprocess.DEVNULL,
+        )
+        elapsed_list = []
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 5:
+                continue
+            job_id, job_name, state, _exit, elapsed = parts[:5]
+            # Skip sub-steps (.batch, .extern) and non-mussel jobs
+            if "." in job_id or "nf-MUSSEL" not in job_name:
+                continue
+            state = state.strip()
+            if state == "COMPLETED":
+                result["completed"] += 1
+                s = _parse_elapsed_s(elapsed)
+                if s is not None:
+                    elapsed_list.append(s)
+            elif state.startswith("FAILED"):
+                result["failed"] += 1
+            elif state.startswith("CANCEL"):
+                result["cancelled"] += 1
+            elif state == "TIMEOUT":
+                result["timeout"] += 1
+        if elapsed_list:
+            result["avg_elapsed_s"] = int(sum(elapsed_list) / len(elapsed_list))
+            result["min_elapsed_s"] = min(elapsed_list)
+            result["max_elapsed_s"] = max(elapsed_list)
+    except FileNotFoundError:
+        result["sacct_error"] = "sacct not found"
+    except subprocess.TimeoutExpired:
+        result["sacct_error"] = "sacct timed out"
+    except Exception as exc:
+        result["sacct_error"] = str(exc)[:80]
+
+    _sacct_cache["data"] = result
+    _sacct_cache["ts"] = now
+    return result
 
 
 def _slurm_stats() -> dict:
-    """Return summary of current user's SLURM jobs via squeue."""
+    """Return summary of current user's SLURM jobs via squeue + sacct."""
     now = time.time()
     if _squeue_cache.get("ts", 0) + _SQUEUE_TTL > now:
         return _squeue_cache.get("data", {})
@@ -137,6 +212,9 @@ def _slurm_stats() -> dict:
         result["error"] = "squeue timed out"
     except Exception as exc:
         result["error"] = str(exc)[:80]
+
+    # Merge sacct history (runs on its own TTL, non-blocking relative to squeue)
+    result.update(_sacct_stats())
 
     _squeue_cache["data"] = result
     _squeue_cache["ts"] = now
@@ -898,11 +976,27 @@ async function loadSlurm() {
 
     // Pending reasons
     const reasons = Object.entries(d.pending_reasons || {}).sort((a,b) => b[1]-a[1]);
-    const reasonHtml = reasons.length ? `<div><span style="color:#94a3b8;font-size:0.75rem">PENDING REASONS</span><br>` +
+    const reasonHtml = reasons.length ? `<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem">PENDING REASONS</span><br>` +
       reasons.map(([r,c]) => `<span style="color:#fcd34d">${r}</span>: ${c}`).join(' &nbsp; ') +
       `</div>` : '';
 
-    el.innerHTML = summary + nodeHtml + reasonHtml;
+    // sacct history (last 24h)
+    let histHtml = '';
+    if (d.completed !== undefined) {
+      const parts = [];
+      if (d.completed) parts.push(`<span style="color:#6ee7b7">✔ ${d.completed} completed</span>`);
+      if (d.failed)    parts.push(`<span style="color:#f87171">✖ ${d.failed} failed</span>`);
+      if (d.cancelled) parts.push(`<span style="color:#94a3b8">⊘ ${d.cancelled} cancelled</span>`);
+      if (d.timeout)   parts.push(`<span style="color:#fcd34d">⏱ ${d.timeout} timeout</span>`);
+      let avgStr = '';
+      if (d.avg_elapsed_s !== null && d.avg_elapsed_s !== undefined) {
+        avgStr = ` &nbsp; <span style="color:#94a3b8">avg ${fmtDuration(d.avg_elapsed_s)} &nbsp; min ${fmtDuration(d.min_elapsed_s)} &nbsp; max ${fmtDuration(d.max_elapsed_s)}</span>`;
+      }
+      histHtml = `<div><span style="color:#94a3b8;font-size:0.75rem">LAST 24H</span><br>${parts.join(' &nbsp; ')}${avgStr}</div>`;
+      if (d.sacct_error) histHtml += `<div style="color:#f87171;font-size:0.75rem">sacct: ${d.sacct_error}</div>`;
+    }
+
+    el.innerHTML = summary + nodeHtml + reasonHtml + histHtml;
   } catch(e) {
     el.innerHTML = '<span class="no-data">Failed to load SLURM data.</span>';
   }

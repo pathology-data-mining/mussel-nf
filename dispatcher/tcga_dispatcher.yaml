@@ -47,6 +47,8 @@ watchers:
     s3_endpoint: http://pmindecs.mskcc.org:9020
     # s3_access_key: ...   # or set ECS_ACCESS_KEY env var
     # s3_secret_key: ...   # or set ECS_SECRET_KEY env var
+    # secrets_env_file: /path/to/secrets.env  # shell env file with ECS_ACCESS_KEY / ECS_SECRET_KEY
+    secrets_env_file: /gpfs/mskmind_ess/limr/repos/Mussel-3/secrets.env
 
     # Optional: restrict to a single project or slide/sample type
     # project: TCGA-BRCA
@@ -69,7 +71,7 @@ watchers:
       hoptimus1: s3://reef-tcga-v2-0/wds/hoptimus1
       titan_slide: s3://reef-tcga-v2-0/wds/titan_slide
       # uni2h: s3://your-bucket/wds/uni2h
-    # wds_staging_dir: /path/to/local/staging   # base dir; each model uses {staging}/{model}/
+    wds_staging_dir: tcga-results/wds-staging   # local staging base for S3 uploads; each model uses {staging}/{model}/
 
     # When set, a tcga_sync_databricks.py post-batch hook is generated automatically.
     # After each successful batch, status + inventory are joined into a timestamped

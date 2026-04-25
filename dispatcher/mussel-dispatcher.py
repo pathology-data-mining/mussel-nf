@@ -158,6 +158,8 @@ class WatcherConfig:
     wds_destinations: dict = field(default_factory=dict)
     wds_staging_dir: str = ""  # local staging base for s3:// destinations; each model uses {staging}/{model}/
     wds_s3_max_concurrency: int = 4  # boto3 multipart threads per S3 upload/download (reduce to limit ECS load)
+    secrets_env_file: str = ""  # path to a shell env file (KEY=value) with S3/ECS credentials; values are
+                                # loaded into s3_access_key / s3_secret_key if not already set in the config
     # When set, a tcga_sync_databricks.py hook is generated automatically.
     # Credentials come from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.
     databricks_volume_folder: str = ""  # UC volume folder; files uploaded as tcga_inventory_<ts>.parquet
@@ -239,6 +241,7 @@ class Config:
             "wds_staging_dir",
             "scripts_dir",
             "gdc_token_file",
+            "secrets_env_file",
         )
 
         def _resolve_watcher_path(val: str) -> str:
@@ -255,6 +258,11 @@ class Config:
 
         raw["watchers"] = watcher_cfgs
         cfg = cls(**raw)
+
+        # Load S3 credentials from secrets_env_file if specified and not already set.
+        for w in cfg.watchers:
+            if w.secrets_env_file and os.path.isfile(w.secrets_env_file):
+                _load_secrets_env(w.secrets_env_file, w)
 
         # Auto-detect model_types from nextflow.config for watchers that didn't
         # specify them explicitly.
@@ -336,6 +344,36 @@ class Config:
                 )
 
         return hooks + db_hooks
+
+
+def _load_secrets_env(path: str, watcher: "WatcherConfig") -> None:
+    """Parse a shell env file (KEY=value or export KEY=value lines) and populate
+    watcher S3 credentials if not already set.
+
+    Recognises ECS_ACCESS_KEY / ECS_SECRET_KEY and the standard
+    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY variants.
+    """
+    key_map = {
+        "ECS_ACCESS_KEY": "s3_access_key",
+        "AWS_ACCESS_KEY_ID": "s3_access_key",
+        "ECS_SECRET_KEY": "s3_secret_key",
+        "AWS_SECRET_ACCESS_KEY": "s3_secret_key",
+    }
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip().lstrip("export").strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                attr = key_map.get(k)
+                if attr and not getattr(watcher, attr):
+                    setattr(watcher, attr, v)
+        log.debug("Loaded secrets_env_file: %s", path)
+    except OSError as exc:
+        log.warning("Could not read secrets_env_file %s: %s", path, exc)
 
 
 def _read_nf_model_types(repo_dir: str) -> list[str]:

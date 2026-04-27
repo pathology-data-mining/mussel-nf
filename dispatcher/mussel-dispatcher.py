@@ -509,7 +509,8 @@ class StateStore:
     def get_slides_by_id(self, slide_id: str) -> list:
         """Return all DB records for a given slide_id."""
         rows = self._conn().execute(
-            "SELECT slide_path, slide_id, status FROM slides WHERE slide_id = ?", (slide_id,)
+            "SELECT slide_path, slide_id, status, fail_count FROM slides WHERE slide_id = ?",
+            (slide_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -882,6 +883,7 @@ class TcgaWatcher(threading.Thread):
         stop_event: threading.Event,
         repo_dir: str,
         outdir: str,
+        max_slide_retries: int = 0,
     ):
         super().__init__(name="tcga-watcher", daemon=True)
         self.cfg = cfg
@@ -890,6 +892,7 @@ class TcgaWatcher(threading.Thread):
         self.stop_event = stop_event
         self._outdir = outdir
         self._scripts_dir = cfg.scripts_dir or str(Path(repo_dir) / "scripts" / "tcga")
+        self._max_slide_retries = max_slide_retries
 
     def run(self):
         log.info(
@@ -1025,13 +1028,25 @@ class TcgaWatcher(threading.Thread):
                 db_key = f"gdc://{file_id}/{file_name}"
                 if self.state.is_known(db_key):
                     continue
-                # Remove any stale PENDING S3 record for the same slide_id
-                # (can appear when a slide was first found on S3 then disappeared).
-                for r in self.state.get_slides_by_id(slide_id):
-                    if r["status"] == "PENDING" and r["slide_path"].startswith("s3://"):
+                # Check if this slide is permanently blacklisted (fail_count >= max_retries).
+                # A permanently blacklisted slide should not be re-added via a new path.
+                existing = self.state.get_slides_by_id(slide_id)
+                max_retries = self._max_slide_retries
+                if max_retries > 0 and any(
+                    r.get("fail_count", 0) >= max_retries for r in existing
+                ):
+                    log.debug(
+                        "TcgaWatcher: skipping permanently blacklisted slide %s", slide_id
+                    )
+                    continue
+                # Remove any stale S3 record (PENDING or non-permanent FAILED) for the
+                # same slide_id.  This happens when a slide was first found on S3 then
+                # disappeared — we fall back to GDC download instead.
+                for r in existing:
+                    if r["slide_path"].startswith("s3://") and r["status"] in ("PENDING", "FAILED"):
                         log.info(
-                            "TcgaWatcher: removing stale S3 PENDING record for %s (%s)",
-                            slide_id, r["slide_path"],
+                            "TcgaWatcher: removing stale S3 %s record for %s (%s)",
+                            r["status"], slide_id, r["slide_path"],
                         )
                         self.state.remove_slide(r["slide_path"])
                 self.state.add_slide(
@@ -1555,7 +1570,8 @@ def main():
         elif w_cfg.type == "s3":
             watcher = S3Watcher(w_cfg, pending_deque, state, stop_event)
         elif w_cfg.type == "tcga":
-            watcher = TcgaWatcher(w_cfg, pending_deque, state, stop_event, cfg.repo_dir, cfg.outdir)
+            watcher = TcgaWatcher(w_cfg, pending_deque, state, stop_event, cfg.repo_dir, cfg.outdir,
+                                   max_slide_retries=cfg.max_slide_retries)
         else:
             log.warning("Unknown watcher type '%s', skipping.", w_cfg.type)
             continue

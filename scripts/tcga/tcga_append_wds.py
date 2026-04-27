@@ -348,6 +348,14 @@ def append_wds(
     pt_files = sorted(pt_dir.rglob("*.features.pt"))
     log.info("Found %d .pt files in %s", len(pt_files), pt_dir)
 
+    # Pre-build a slide_id → h5_path lookup to avoid O(N²) rglob calls in the loop.
+    h5_lookup: dict[str, Path] = {}
+    if h5_dir is not None:
+        for h5_path in h5_dir.rglob("*.patch.h5"):
+            sid = h5_path.name.split(".")[0]
+            h5_lookup[sid] = h5_path
+        log.info("Found %d .patch.h5 files in %s", len(h5_lookup), h5_dir)
+
     writers: dict[str, _ShardWriter] = {}
     n_appended = n_skipped = n_missing_project = 0
     appended_locals: list[tuple[Path, Path | None]] = []  # (pt_path, h5_path) for delete_local
@@ -360,6 +368,9 @@ def append_wds(
 
         if slide_id in already_indexed:
             n_skipped += 1
+            # Even though already in WDS, clean up the local file if requested.
+            if delete_local:
+                appended_locals.append((pt_path, h5_lookup.get(slide_id)))
             continue
 
         project_id = slide_to_project.get(slide_id)
@@ -374,13 +385,10 @@ def append_wds(
             log.error("Failed to load %s: %s", pt_path, exc)
             continue
 
-        h5_path_for_slide: Path | None = None
+        h5_path_for_slide: Path | None = h5_lookup.get(slide_id)
         coords: np.ndarray | None = None
-        if h5_dir is not None:
-            h5_candidates = list(h5_dir.rglob(f"{slide_id}.patch.h5"))
-            if h5_candidates:
-                h5_path_for_slide = h5_candidates[0]
-                coords = _load_coords(h5_path_for_slide)
+        if h5_path_for_slide is not None:
+            coords = _load_coords(h5_path_for_slide)
 
         if project_id not in writers:
             writers[project_id] = _ShardWriter(
@@ -408,7 +416,9 @@ def append_wds(
     for writer in writers.values():
         writer.flush()
 
-    # Delete local source files now that data is durably in WDS / S3
+    # Delete local source files now that data is durably in WDS / S3.
+    # Includes both newly-appended slides and already-indexed slides whose
+    # local files were still present (cleanup of files from prior runs).
     if delete_local and not dry_run and appended_locals:
         n_deleted = 0
         for pt_path, h5_path in appended_locals:

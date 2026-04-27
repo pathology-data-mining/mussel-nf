@@ -419,14 +419,20 @@ def append_wds(
     # Delete local source files now that data is durably in WDS / S3.
     # Includes both newly-appended slides and already-indexed slides whose
     # local files were still present (cleanup of files from prior runs).
+    # Also deletes the companion .features.h5 (H5 duplicate of the .pt data)
+    # that the pipeline publishes alongside every .features.pt file.
     if delete_local and not dry_run and appended_locals:
         n_deleted = 0
         for pt_path, h5_path in appended_locals:
             pt_path.unlink(missing_ok=True)
+            # Delete the .features.h5 companion published next to the .pt file
+            # pt_path ends in .features.pt; .with_suffix(".h5") gives .features.h5
+            companion_h5 = pt_path.with_suffix(".h5")
+            companion_h5.unlink(missing_ok=True)
             if h5_path:
                 h5_path.unlink(missing_ok=True)
             n_deleted += 1
-        log.info("Deleted %d local source file pair(s) (pt + patch.h5)", n_deleted)
+        log.info("Deleted %d local source file pair(s) (pt + features.h5 + patch.h5)", n_deleted)
 
     # Write / append WDS manifest CSV: slide_id, model, wds_path (full S3 or local path)
     if manifest_csv is not None and not dry_run and n_appended > 0:

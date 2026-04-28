@@ -517,29 +517,54 @@ def _build_handler(cfg: Config):
         return {"lines": lines, "nf_log": nf_lines}, None
 
     def _api_wds():
-        # WDS manifest counts
+        import glob as _glob
+
+        # SUCCEEDED count from DB (same across all models)
+        with _db() as conn:
+            db_succeeded = conn.execute(
+                "SELECT COUNT(*) FROM slides WHERE status='SUCCEEDED'"
+            ).fetchone()[0]
+
+        # WDS manifest counts + per-shard distribution
         wds_counts: dict = {}
+        shard_slide_counts: dict = {}  # model → {shard_path: slide_count}
         if os.path.exists(wds_manifest):
             try:
                 with open(wds_manifest, newline="") as f:
                     for row in csv.DictReader(f):
                         model = row.get("model", "unknown")
+                        shard = row.get("wds_path", "")
                         wds_counts[model] = wds_counts.get(model, 0) + 1
+                        if model not in shard_slide_counts:
+                            shard_slide_counts[model] = {}
+                        shard_slide_counts[model][shard] = shard_slide_counts[model].get(shard, 0) + 1
             except Exception as exc:
-                return {"models": {}, "total": 0, "error": str(exc)}
+                return {"models": {}, "total": 0, "db_succeeded": db_succeeded, "error": str(exc)}
+
+        # Local .pt file counts per model (fast glob; shows cleanup status)
+        local_pt: dict = {}
+        features_dir = os.path.join(cfg.outdir, "features")
+        if os.path.isdir(features_dir):
+            try:
+                for model_dir in os.scandir(features_dir):
+                    if model_dir.is_dir():
+                        count = sum(1 for _ in _glob.iglob(
+                            os.path.join(model_dir.path, "**", "*.features.pt"),
+                            recursive=True,
+                        ))
+                        if count:
+                            local_pt[model_dir.name] = count
+            except Exception:
+                pass
+
         # S3 shard stats — return from cache only; background thread refreshes
         s3_stats: dict = {}
         if tcga_watcher and tcga_watcher.wds_destinations:
             now = time.time()
             cached = {m: _s3_cache[m] for m in _s3_cache}
             if cached:
-                # Return cached values immediately
                 s3_stats = {m: {"shards": v.get("shards", 0), "objects": v.get("objects", 0),
                                 "error": v.get("error")} for m, v in cached.items()}
-            else:
-                # No cache yet — note that prewarm thread is running
-                s3_stats = {}
-            # Trigger a background refresh if cache is stale
             oldest = min((v.get("ts", 0) for v in _s3_cache.values()), default=0)
             if now - oldest > _S3_CACHE_TTL:
                 threading.Thread(
@@ -547,14 +572,29 @@ def _build_handler(cfg: Config):
                 ).start()
 
         models: dict = {}
-        all_keys = set(wds_counts) | set(s3_stats)
+        all_keys = set(wds_counts) | set(s3_stats) | set(local_pt)
         for m in sorted(all_keys):
+            wds_slides = wds_counts.get(m, 0)
+            per_shard = list((shard_slide_counts.get(m) or {}).values())
+            manifest_shards = len(per_shard)
+            shard_stats = {}
+            if per_shard:
+                shard_stats = {
+                    "avg": round(sum(per_shard) / manifest_shards, 1),
+                    "min": min(per_shard),
+                    "max": max(per_shard),
+                    "count": manifest_shards,
+                }
             models[m] = {
-                "slides": wds_counts.get(m, 0),
+                "slides": wds_slides,
+                "gap": max(0, db_succeeded - wds_slides),
                 "shards": s3_stats.get(m, {}).get("shards", 0),
+                "manifest_shards": manifest_shards,
+                "shard_stats": shard_stats,
+                "local_pt": local_pt.get(m, 0),
                 "error": s3_stats.get(m, {}).get("error"),
             }
-        return {"models": models, "total": sum(wds_counts.values())}
+        return {"models": models, "total": sum(wds_counts.values()), "db_succeeded": db_succeeded}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # suppress default access log spam
@@ -710,7 +750,8 @@ _HTML = """<!DOCTYPE html>
       <div class="stat"><div class="val" id="s-failed" style="color:#f87171">—</div><div class="lbl">Failed</div></div>
       <div class="stat"><div class="val" id="s-pending" style="color:#a5b4fc">—</div><div class="lbl">Pending</div></div>
       <div class="stat"><div class="val" id="s-dispatched" style="color:#38bdf8">—</div><div class="lbl">Dispatched</div></div>
-      <div class="stat"><div class="val" id="s-pct">—</div><div class="lbl">% Done</div></div>
+      <div class="stat" title="Slides with pt/h5 features generated (Nextflow succeeded). Does not include WDS upload status."><div class="val" id="s-pct">—</div><div class="lbl">% Features Extracted</div></div>
+      <div class="stat" title="Slides confirmed written to WDS shards and uploaded to S3, as a percentage of all SUCCEEDED slides."><div class="val" id="s-wds-pct" style="color:#38bdf8">—</div><div class="lbl">% in WDS</div></div>
       <div class="stat"><div class="val" id="s-running">—</div><div class="lbl">Running Batches</div></div>
       <div class="stat"><div class="val" id="s-blacklisted" style="color:#fb923c">—</div><div class="lbl">Blacklisted</div></div>
     </div>
@@ -1010,22 +1051,63 @@ async function loadWds() {
     const data = await apiFetch('/api/wds');
     const models = data.models || {};
     const keys = Object.keys(models);
+    const dbSucceeded = data.db_succeeded || 0;
+
+    // Update summary grid % in WDS stat
+    const totalWds = keys.reduce((a, m) => a + (models[m].slides || 0), 0);
+    const wdsPctEl = document.getElementById('s-wds-pct');
+    if (wdsPctEl && dbSucceeded > 0) {
+      // Use minimum across models (weakest link = true completion)
+      const minWds = keys.length ? Math.min(...keys.map(m => models[m].slides || 0)) : 0;
+      const pct = Math.round(minWds / dbSucceeded * 100);
+      wdsPctEl.textContent = pct + '%';
+    }
+
     if (!keys.length) { el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return; }
+
+    const header = `<table style="width:100%;border-collapse:collapse;font-size:0.78rem">
+      <thead><tr style="color:#64748b;text-align:left">
+        <th style="padding:4px 6px">Model</th>
+        <th style="padding:4px 6px;text-align:right">WDS Slides</th>
+        <th style="padding:4px 6px;text-align:right" title="SUCCEEDED in DB minus WDS-indexed slides">Gap</th>
+        <th style="padding:4px 6px;text-align:right" title="Shards on S3 (from listing) / shards in manifest">S3 / Manifest Shards</th>
+        <th style="padding:4px 6px;text-align:right" title="Average · min–max slides per shard (from manifest)">Slides/Shard</th>
+        <th style="padding:4px 6px;text-align:right" title="Features .pt files still on local disk (pending cleanup)">Local .pt</th>
+      </tr></thead><tbody>`;
+
     const rows = keys.map(m => {
       const mv = models[m];
       const n = mv.slides || 0;
+      const gap = mv.gap || 0;
       const ns = mv.shards || 0;
+      const ms = mv.manifest_shards || 0;
+      const ss = mv.shard_stats || {};
+      const localPt = mv.local_pt || 0;
+      const gapColor = gap === 0 ? '#4ade80' : gap < 100 ? '#fcd34d' : '#f87171';
       const shardStr = mv.error
-        ? `<span style="color:#f87171">${mv.error}</span>`
-        : `<span style="color:#38bdf8">${ns} shard${ns === 1 ? '' : 's'}</span>`;
-      return `<div class="wds-row">
-        <span>${m}</span>
-        <span><span style="color:#4ade80;font-weight:600">${n} slides</span> &nbsp;·&nbsp; ${shardStr}</span>
-      </div>`;
+        ? `<span style="color:#f87171" title="${mv.error}">err</span> / ${ms}`
+        : `<span style="color:#38bdf8">${ns}</span> / ${ms}`;
+      const slidesPerShard = ss.avg != null
+        ? `<span style="color:#c4b5fd">${ss.avg}</span> <span style="color:#64748b;font-size:0.7rem">(${ss.min}–${ss.max})</span>`
+        : '—';
+      const localColor = localPt === 0 ? '#4ade80' : localPt < 200 ? '#fcd34d' : '#f87171';
+      return `<tr style="border-top:1px solid #1e293b">
+        <td style="padding:4px 6px;font-weight:600">${m}</td>
+        <td style="padding:4px 6px;text-align:right;color:#4ade80">${n}</td>
+        <td style="padding:4px 6px;text-align:right;color:${gapColor}">${gap > 0 ? '+'+gap : '✓'}</td>
+        <td style="padding:4px 6px;text-align:right">${shardStr}</td>
+        <td style="padding:4px 6px;text-align:right">${slidesPerShard}</td>
+        <td style="padding:4px 6px;text-align:right;color:${localColor}">${localPt}</td>
+      </tr>`;
     });
-    const total = keys.reduce((a, m) => a + (models[m].slides || 0), 0);
-    if (total) rows.push(`<div class="wds-row" style="margin-top:4px;border-top:1px solid #334155"><span>Total slides</span><b>${total}</b></div>`);
-    el.innerHTML = rows.join('');
+
+    const footer = dbSucceeded
+      ? `<tr style="border-top:1px solid #334155;color:#94a3b8">
+          <td style="padding:4px 6px" colspan="2">SUCCEEDED in DB: <b style="color:#fff">${dbSucceeded}</b></td>
+          <td colspan="4" style="padding:4px 6px;font-size:0.7rem;color:#64748b">Gap = SUCCEEDED − WDS indexed</td>
+        </tr>` : '';
+
+    el.innerHTML = header + rows.join('') + footer + '</tbody></table>';
   } catch(e) {
     el.innerHTML = '<span class="no-data">Failed to load WDS data.</span>';
     console.error('loadWds failed:', e);

@@ -65,6 +65,8 @@ CONFIG KEYS (top level)
     cleanup_batch_csv        Delete the per-batch samples CSV after success (default false)
     cleanup_logs_after_days  Delete NF log files for batches older than N days (0 = keep forever)
     cleanup_results          Delete local .pt / .patch.h5 after WDS push succeeds (default false)
+    nextflow_config          Path to an extra Nextflow config file passed as -c to every run.
+                             Relative paths are resolved relative to the dispatcher config file.
 
   Hooks:
     post_batch_hooks    List of {command, args} run after each successful NF run.
@@ -119,7 +121,7 @@ log = logging.getLogger("mussel-dispatcher")
 
 @dataclass
 class WatcherConfig:
-    type: str                          # "local", "s3", or "tcga"
+    type: str                          # "local", "s3", "tcga", or "databricks"
     # local
     path: Optional[str] = None
     recursive: bool = True
@@ -166,6 +168,11 @@ class WatcherConfig:
     databricks_volume_path: str = ""    # [Legacy] single overwritten file path
     databricks_table: str = ""          # Delta table to MERGE INTO (passed to notebook as target_table)
     databricks_job_id: str = ""         # Databricks job to trigger after upload
+    # databricks watcher — joins impact_matched_slides + slide_inventory to get S3 paths.
+    # Credentials from DATABRICKS_HOST / DATABRICKS_TOKEN env vars (or ~/.databrickscfg).
+    warehouse_id: str = ""              # Databricks SQL warehouse ID (required for type: databricks)
+    source_filter: list = field(default_factory=list)  # filter slide_inventory.source (e.g. ['ECS2'])
+    additional_where: str = ""          # extra SQL WHERE conditions appended to the query
 
 
 @dataclass
@@ -194,6 +201,7 @@ class Config:
     cleanup_batch_csv: bool = False       # delete per-batch samples CSV after success
     cleanup_logs_after_days: int = 0      # delete NF log files older than N days (0 = keep forever)
     cleanup_results: bool = False         # delete local .pt / .patch.h5 after WDS push succeeds
+    nextflow_config: str = ""             # optional -c <file> passed to every nextflow run
     combined_manifest_path: Optional[str] = None  # defaults to {outdir}/manifest-combined.csv
     post_batch_hooks: list = field(default_factory=list)
     # list of {"command": "...", "args": ["..."]}
@@ -230,6 +238,10 @@ class Config:
         outdir = raw.get("outdir", "")
         if outdir and not os.path.isabs(outdir):
             raw["outdir"] = os.path.join(config_dir, outdir)
+        # nextflow_config: resolve relative to config dir if not absolute
+        nf_cfg = raw.get("nextflow_config", "")
+        if nf_cfg and not os.path.isabs(nf_cfg):
+            raw["nextflow_config"] = os.path.join(config_dir, nf_cfg)
 
         # Resolve path fields in watcher configs relative to the config file.
         # Applies to all string fields that represent filesystem paths.
@@ -585,6 +597,60 @@ class StateStore:
         conn.commit()
         return n
 
+    def blacklist_slides_from_log(self, log_path: str, max_retries: int) -> list[str]:
+        """Parse a Nextflow log for S3 staging failures and blacklist the culprit slides.
+
+        Returns a list of slide IDs that were blacklisted.  Non-culprit slides in the
+        same batch are immediately reset to PENDING so they can be retried without
+        waiting for the next reset_failed_to_pending cycle.
+        """
+        if not log_path or not os.path.exists(log_path):
+            return []
+
+        # Pattern: "Can't stage file s3://.../<uuid>/<slide_id>.<uuid>.svs"
+        # or "Exception thrown downloading S3 object s3://.../<slide_id>..."
+        s3_fail_re = re.compile(
+            r"(?:Can't stage file|Exception thrown downloading S3 object)\s+(s3://\S+)"
+        )
+        failed_paths: set[str] = set()
+        with open(log_path, errors="replace") as fh:
+            for line in fh:
+                m = s3_fail_re.search(line)
+                if m:
+                    failed_paths.add(m.group(1))
+
+        if not failed_paths:
+            return []
+
+        conn = self._conn()
+        blacklisted: list[str] = []
+        for s3_path in failed_paths:
+            # Match against slide_path (exact or prefix)
+            row = conn.execute(
+                "SELECT slide_id FROM slides WHERE slide_path = ?", (s3_path,)
+            ).fetchone()
+            if row is None:
+                # Try prefix match in case trailing filename varies
+                row = conn.execute(
+                    "SELECT slide_id FROM slides WHERE slide_path LIKE ?",
+                    (s3_path[:s3_path.rfind("/")] + "/%",),
+                ).fetchone()
+            if row:
+                slide_id = row[0]
+                conn.execute(
+                    """UPDATE slides SET status='FAILED', fail_count=?, error_msg=?,
+                       completed_at=?, batch_id=NULL WHERE slide_id=?""",
+                    (max_retries,
+                     f"Auto-blacklisted: S3 staging failure for {s3_path}",
+                     datetime.now(timezone.utc).isoformat(),
+                     slide_id),
+                )
+                blacklisted.append(slide_id)
+                log.warning("Auto-blacklisted slide %s (S3 staging failure: %s)", slide_id, s3_path)
+
+        conn.commit()
+        return blacklisted
+
     def blacklist_slide(self, slide_id: str, reason: str, max_retries: int = 999):
         """Permanently exclude a slide from future dispatch.
 
@@ -853,6 +919,174 @@ class S3Watcher(threading.Thread):
                 self.state.add_slide(s3_path, slide_id)
                 self.pending.append({"slide_path": s3_path, "slide_id": slide_id})
 
+
+# ---------------------------------------------------------------------------
+# Databricks watcher
+# ---------------------------------------------------------------------------
+
+class DatabricksWatcher(threading.Thread):
+    """
+    Polls a Databricks SQL warehouse for slides to dispatch.
+
+    Joins:
+        cdsi_eng_phi.pdm_base_tables.impact_matched_slides  (m)
+        cdsi_eng_phi.pdm_base_tables.slide_inventory        (i)
+    on m.image_id = i.image_id
+
+    Produces slide records with:
+        slide_id      → m.image_id
+        slide_path    → i.path  (S3 URI, e.g. s3://mskmind-bkt/reef-slides/1234.svs)
+        oncotree_code → m.ONCOTREE_CODE
+
+    Credentials are resolved by the Databricks SDK in priority order:
+        1. DATABRICKS_HOST + DATABRICKS_TOKEN environment variables
+        2. ~/.databrickscfg DEFAULT profile
+
+    Config fields (WatcherConfig):
+        warehouse_id      Required. SQL warehouse to execute queries against.
+        source_filter     Optional list of slide_inventory.source values to include.
+                          e.g. ['ECS2'].  Empty list = all sources.
+        additional_where  Optional extra SQL WHERE clause appended with AND.
+        min_file_size_bytes  Skip slides with i.size < this value (default 10 MB).
+        poll_interval_seconds  Seconds between polls. Defaults to 86400 (1 day) if
+                               not set in config, since the IMPACT tables update infrequently.
+    """
+
+    _DEFAULT_POLL_INTERVAL = 86400  # 1 day
+
+    _QUERY_TEMPLATE = """
+SELECT
+    m.image_id    AS slide_id,
+    i.path        AS slide_path,
+    m.ONCOTREE_CODE AS oncotree_code
+FROM cdsi_eng_phi.pdm_base_tables.impact_matched_slides m
+JOIN cdsi_eng_phi.pdm_base_tables.slide_inventory i
+  ON m.image_id = i.image_id
+WHERE i.path IS NOT NULL
+  AND i.size >= {min_size}
+{source_clause}{additional_clause}
+"""
+
+    def __init__(self, cfg: WatcherConfig, pending: deque, state: StateStore,
+                 stop_event: threading.Event):
+        super().__init__(daemon=True, name="DatabricksWatcher")
+        self.cfg = cfg
+        self.pending = pending
+        self.state = state
+        self.stop_event = stop_event
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            try:
+                from databricks.sdk import WorkspaceClient
+            except ImportError:
+                raise RuntimeError(
+                    "databricks-sdk required for Databricks watching: pip install databricks-sdk"
+                )
+            self._client = WorkspaceClient()
+        return self._client
+
+    def run(self):
+        if not self.cfg.warehouse_id:
+            log.error("DatabricksWatcher: warehouse_id is required — watcher will not start")
+            return
+        interval = self.cfg.poll_interval_seconds or self._DEFAULT_POLL_INTERVAL
+        log.info("DatabricksWatcher started (warehouse=%s, poll_interval=%ds)",
+                 self.cfg.warehouse_id, interval)
+        self._poll()
+        while not self.stop_event.is_set():
+            self.stop_event.wait(interval)
+            if not self.stop_event.is_set():
+                self._poll()
+
+    def _build_query(self) -> str:
+        source_clause = ""
+        if self.cfg.source_filter:
+            quoted = ", ".join(f"'{s}'" for s in self.cfg.source_filter)
+            source_clause = f"  AND i.source IN ({quoted})\n"
+
+        additional_clause = ""
+        if self.cfg.additional_where:
+            additional_clause = f"  AND ({self.cfg.additional_where})\n"
+
+        return self._QUERY_TEMPLATE.format(
+            min_size=self.cfg.min_file_size_bytes,
+            source_clause=source_clause,
+            additional_clause=additional_clause,
+        ).strip()
+
+    def _poll(self):
+        log.info("DatabricksWatcher: querying Databricks warehouse %s…", self.cfg.warehouse_id)
+        try:
+            from databricks.sdk.service.sql import StatementState
+            client = self._get_client()
+            query = self._build_query()
+            log.debug("DatabricksWatcher SQL:\n%s", query)
+
+            resp = client.statement_execution.execute_statement(
+                warehouse_id=self.cfg.warehouse_id,
+                statement=query,
+                wait_timeout="50s",
+            )
+
+            # Poll until terminal state if not already done
+            while resp.status.state not in (
+                StatementState.SUCCEEDED,
+                StatementState.FAILED,
+                StatementState.CANCELED,
+                StatementState.CLOSED,
+            ):
+                time.sleep(2)
+                resp = client.statement_execution.get_statement(resp.statement_id)
+
+            if resp.status.state != StatementState.SUCCEEDED:
+                log.error(
+                    "DatabricksWatcher: query failed (state=%s): %s",
+                    resp.status.state,
+                    resp.status.error,
+                )
+                return
+
+            cols = [c.name for c in resp.manifest.schema.columns]
+            n_new = 0
+
+            # Iterate over all result chunks
+            chunk = resp.result
+            while chunk is not None:
+                for row_arr in chunk.data_array or []:
+                    row = dict(zip(cols, row_arr))
+                    slide_path = row.get("slide_path") or ""
+                    slide_id = row.get("slide_id") or ""
+                    oncotree_code = row.get("oncotree_code") or ""
+
+                    if not slide_path or not slide_id:
+                        continue
+                    if self.state.is_known(slide_path):
+                        continue
+
+                    log.info("DatabricksWatcher: new slide %s → %s", slide_id, slide_path)
+                    self.state.add_slide(slide_path, slide_id)
+                    self.pending.append({
+                        "slide_id": slide_id,
+                        "slide_path": slide_path,
+                        "oncotree_code": oncotree_code,
+                    })
+                    n_new += 1
+
+                # Advance to next chunk (if result was paginated)
+                next_chunk_index = getattr(chunk, "next_chunk_index", None)
+                if next_chunk_index is None:
+                    break
+                chunk_resp = client.statement_execution.get_statement_result_chunk_n(
+                    resp.statement_id, next_chunk_index
+                )
+                chunk = chunk_resp
+
+            log.info("DatabricksWatcher: poll complete — %d new slide(s) enqueued", n_new)
+
+        except Exception as exc:
+            log.error("DatabricksWatcher: poll error: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1170,6 +1404,8 @@ class NextflowRunner:
             "--samples_csv", csv_path,
             "--outdir", self.cfg.outdir,
         ]
+        if self.cfg.nextflow_config:
+            cmd += ["-c", self.cfg.nextflow_config]
         # If this batch includes slides that need GDC download, pass the token
         # file to NF if configured (open-access TCGA data needs no token).
         has_download = any(s.get("needs_download") for s in self.slides)
@@ -1208,6 +1444,18 @@ class NextflowRunner:
             self._cleanup(csv_path, log_path, work_dir, succeeded=True)
         else:
             log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
+            # Auto-blacklist slides that caused S3 staging failures; immediately
+            # reset the remaining (innocent) FAILED slides back to PENDING.
+            bad = self.state.blacklist_slides_from_log(
+                log_path, max_retries=self.cfg.max_slide_retries or 999
+            )
+            if bad:
+                log.warning(
+                    "Batch %s: auto-blacklisted %d slide(s) with S3 errors: %s",
+                    self.batch_id, len(bad), bad,
+                )
+                n = self.state.reset_failed_to_pending(self.cfg.max_slide_retries or 0)
+                log.info("Reset %d innocent slide(s) to PENDING after blacklisting culprits.", n)
             self._cleanup(csv_path, log_path, work_dir, succeeded=False)
 
         return exit_code
@@ -1572,6 +1820,8 @@ def main():
         elif w_cfg.type == "tcga":
             watcher = TcgaWatcher(w_cfg, pending_deque, state, stop_event, cfg.repo_dir, cfg.outdir,
                                    max_slide_retries=cfg.max_slide_retries)
+        elif w_cfg.type == "databricks":
+            watcher = DatabricksWatcher(w_cfg, pending_deque, state, stop_event)
         else:
             log.warning("Unknown watcher type '%s', skipping.", w_cfg.type)
             continue

@@ -1065,7 +1065,7 @@ async function loadWds() {
       const activeKeys = keys.filter(m => (models[m].slides || 0) > 0);
       const minWds = activeKeys.length ? Math.min(...activeKeys.map(m => models[m].slides)) : 0;
       const pct = Math.round(minWds / dbSucceeded * 100);
-      wdsPctEl.textContent = pct + '%';
+      wdsPctEl.textContent = Math.min(100, pct) + '%';
     }
 
     if (!keys.length) { el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return; }

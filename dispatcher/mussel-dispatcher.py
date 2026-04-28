@@ -1536,26 +1536,31 @@ class BatchScheduler:
         self._lock = threading.Lock()
         self._s3_client = None  # lazily built for pre-dispatch S3 validation
 
+    # Number of threads for concurrent S3 existence checks — also sets boto3 pool size.
+    _S3_CHECK_WORKERS = 32
+
     def _get_s3_client(self):
         """Return a boto3 S3 client built from the first watcher that has S3 credentials."""
         if self._s3_client is not None:
             return self._s3_client
         try:
             import boto3
+            from botocore.config import Config as BotocoreConfig
         except ImportError:
             return None
+        s3_cfg = BotocoreConfig(max_pool_connections=self._S3_CHECK_WORKERS)
         for w in self.cfg.watchers:
-            kwargs: dict = {}
+            kwargs: dict = {"config": s3_cfg}
             if w.s3_access_key and w.s3_secret_key:
                 kwargs["aws_access_key_id"] = w.s3_access_key
                 kwargs["aws_secret_access_key"] = w.s3_secret_key
             if w.s3_endpoint:
                 kwargs["endpoint_url"] = w.s3_endpoint
-            if kwargs:
+            if w.s3_access_key or w.s3_endpoint:
                 self._s3_client = boto3.client("s3", **kwargs)
                 return self._s3_client
         # Fall back to default credentials
-        self._s3_client = boto3.client("s3")
+        self._s3_client = boto3.client("s3", config=s3_cfg)
         return self._s3_client
 
     def _s3_path_exists(self, s3_path: str, s3) -> bool:
@@ -1596,7 +1601,7 @@ class BatchScheduler:
         def check(slide):
             return slide, self._s3_path_exists(slide["slide_path"], s3)
 
-        with ThreadPoolExecutor(max_workers=16, thread_name_prefix="s3-check") as pool:
+        with ThreadPoolExecutor(max_workers=self._S3_CHECK_WORKERS, thread_name_prefix="s3-check") as pool:
             for slide, exists in pool.map(check, s3_slides):
                 if not exists:
                     missing.append(slide["slide_id"])

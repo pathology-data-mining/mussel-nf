@@ -597,60 +597,6 @@ class StateStore:
         conn.commit()
         return n
 
-    def blacklist_slides_from_log(self, log_path: str, max_retries: int) -> list[str]:
-        """Parse a Nextflow log for S3 staging failures and blacklist the culprit slides.
-
-        Returns a list of slide IDs that were blacklisted.  Non-culprit slides in the
-        same batch are immediately reset to PENDING so they can be retried without
-        waiting for the next reset_failed_to_pending cycle.
-        """
-        if not log_path or not os.path.exists(log_path):
-            return []
-
-        # Pattern: "Can't stage file s3://.../<uuid>/<slide_id>.<uuid>.svs"
-        # or "Exception thrown downloading S3 object s3://.../<slide_id>..."
-        s3_fail_re = re.compile(
-            r"(?:Can't stage file|Exception thrown downloading S3 object)\s+(s3://\S+)"
-        )
-        failed_paths: set[str] = set()
-        with open(log_path, errors="replace") as fh:
-            for line in fh:
-                m = s3_fail_re.search(line)
-                if m:
-                    failed_paths.add(m.group(1))
-
-        if not failed_paths:
-            return []
-
-        conn = self._conn()
-        blacklisted: list[str] = []
-        for s3_path in failed_paths:
-            # Match against slide_path (exact or prefix)
-            row = conn.execute(
-                "SELECT slide_id FROM slides WHERE slide_path = ?", (s3_path,)
-            ).fetchone()
-            if row is None:
-                # Try prefix match in case trailing filename varies
-                row = conn.execute(
-                    "SELECT slide_id FROM slides WHERE slide_path LIKE ?",
-                    (s3_path[:s3_path.rfind("/")] + "/%",),
-                ).fetchone()
-            if row:
-                slide_id = row[0]
-                conn.execute(
-                    """UPDATE slides SET status='FAILED', fail_count=?, error_msg=?,
-                       completed_at=?, batch_id=NULL WHERE slide_id=?""",
-                    (max_retries,
-                     f"Auto-blacklisted: S3 staging failure for {s3_path}",
-                     datetime.now(timezone.utc).isoformat(),
-                     slide_id),
-                )
-                blacklisted.append(slide_id)
-                log.warning("Auto-blacklisted slide %s (S3 staging failure: %s)", slide_id, s3_path)
-
-        conn.commit()
-        return blacklisted
-
     def blacklist_slide(self, slide_id: str, reason: str, max_retries: int = 999):
         """Permanently exclude a slide from future dispatch.
 
@@ -1444,18 +1390,6 @@ class NextflowRunner:
             self._cleanup(csv_path, log_path, work_dir, succeeded=True)
         else:
             log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
-            # Auto-blacklist slides that caused S3 staging failures; immediately
-            # reset the remaining (innocent) FAILED slides back to PENDING.
-            bad = self.state.blacklist_slides_from_log(
-                log_path, max_retries=self.cfg.max_slide_retries or 999
-            )
-            if bad:
-                log.warning(
-                    "Batch %s: auto-blacklisted %d slide(s) with S3 errors: %s",
-                    self.batch_id, len(bad), bad,
-                )
-                n = self.state.reset_failed_to_pending(self.cfg.max_slide_retries or 0)
-                log.info("Reset %d innocent slide(s) to PENDING after blacklisting culprits.", n)
             self._cleanup(csv_path, log_path, work_dir, succeeded=False)
 
         return exit_code
@@ -1600,6 +1534,92 @@ class BatchScheduler:
         self._pending: deque = deque()
         self._first_seen_at: Optional[float] = None
         self._lock = threading.Lock()
+        self._s3_client = None  # lazily built for pre-dispatch S3 validation
+
+    def _get_s3_client(self):
+        """Return a boto3 S3 client built from the first watcher that has S3 credentials."""
+        if self._s3_client is not None:
+            return self._s3_client
+        try:
+            import boto3
+        except ImportError:
+            return None
+        for w in self.cfg.watchers:
+            kwargs: dict = {}
+            if w.s3_access_key and w.s3_secret_key:
+                kwargs["aws_access_key_id"] = w.s3_access_key
+                kwargs["aws_secret_access_key"] = w.s3_secret_key
+            if w.s3_endpoint:
+                kwargs["endpoint_url"] = w.s3_endpoint
+            if kwargs:
+                self._s3_client = boto3.client("s3", **kwargs)
+                return self._s3_client
+        # Fall back to default credentials
+        self._s3_client = boto3.client("s3")
+        return self._s3_client
+
+    def _s3_path_exists(self, s3_path: str, s3) -> bool:
+        """Return True if the S3 object exists, False on 404/NoSuchKey."""
+        from urllib.parse import urlparse
+        parsed = urlparse(s3_path)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        try:
+            s3.head_object(Bucket=bucket, Key=key)
+            return True
+        except Exception as exc:
+            resp = getattr(exc, "response", None)
+            code = (resp or {}).get("Error", {}).get("Code", "") if resp else ""
+            if code in ("404", "NoSuchKey") or "404" in str(exc) or "NoSuchKey" in str(exc):
+                return False
+            # Unexpected error (auth, network) — treat as present to avoid false blacklisting
+            log.warning("S3 head_object error for %s: %s (treating as present)", s3_path, exc)
+            return True
+
+    def _validate_s3_batch(self, batch: list) -> tuple[list, list]:
+        """Check each s3:// slide for existence; return (valid_batch, blacklisted_ids).
+
+        Uses a thread pool to check all paths concurrently.  Non-s3 paths pass through.
+        Slides that fail the check are blacklisted in the DB and excluded from the batch.
+        """
+        s3_slides = [s for s in batch if s.get("slide_path", "").startswith("s3://")]
+        if not s3_slides:
+            return batch, []
+
+        s3 = self._get_s3_client()
+        if s3 is None:
+            return batch, []  # boto3 unavailable; skip check
+
+        max_retries = self.cfg.max_slide_retries or 999
+        missing: list[str] = []
+
+        def check(slide):
+            return slide, self._s3_path_exists(slide["slide_path"], s3)
+
+        with ThreadPoolExecutor(max_workers=16, thread_name_prefix="s3-check") as pool:
+            for slide, exists in pool.map(check, s3_slides):
+                if not exists:
+                    missing.append(slide["slide_id"])
+
+        if not missing:
+            return batch, []
+
+        blacklisted_ids: list[str] = []
+        for slide_id in missing:
+            self.state.blacklist_slide(
+                slide_id,
+                reason="Pre-dispatch S3 check: object not found",
+                max_retries=max_retries,
+            )
+            blacklisted_ids.append(slide_id)
+
+        missing_set = set(missing)
+        valid_batch = [s for s in batch if s.get("slide_id") not in missing_set]
+        log.warning(
+            "Pre-dispatch S3 check: blacklisted %d missing slide(s): %s",
+            len(blacklisted_ids), blacklisted_ids,
+        )
+        return valid_batch, blacklisted_ids
 
     def enqueue(self, slide: dict):
         with self._lock:
@@ -1640,6 +1660,10 @@ class BatchScheduler:
         if batch:
             log.info("Dispatching batch of %d slides (force=%s, size_trigger=%s, time_trigger=%s)",
                      len(batch), force, size_trigger, time_trigger)
+            batch, _ = self._validate_s3_batch(batch)
+            if not batch:
+                log.warning("Batch cancelled: all slides failed pre-dispatch S3 check.")
+                return
             batch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
             self.run_manager.submit(batch_id, batch)
 

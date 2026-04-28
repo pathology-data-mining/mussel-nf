@@ -572,7 +572,13 @@ def _build_handler(cfg: Config):
                 ).start()
 
         models: dict = {}
-        all_keys = set(wds_counts) | set(s3_stats) | set(local_pt)
+        # Only include models that have WDS manifest entries or are configured S3 destinations.
+        # Local .pt-only entries (e.g. stale ctranspath files) are excluded from the table
+        # but their counts are still attached to matching models.
+        configured_models = set(tcga_watcher.wds_destinations.keys()) if (
+            tcga_watcher and tcga_watcher.wds_destinations
+        ) else set()
+        all_keys = set(wds_counts) | configured_models
         for m in sorted(all_keys):
             wds_slides = wds_counts.get(m, 0)
             per_shard = list((shard_slide_counts.get(m) or {}).values())
@@ -1057,8 +1063,9 @@ async function loadWds() {
     const totalWds = keys.reduce((a, m) => a + (models[m].slides || 0), 0);
     const wdsPctEl = document.getElementById('s-wds-pct');
     if (wdsPctEl && dbSucceeded > 0) {
-      // Use minimum across models (weakest link = true completion)
-      const minWds = keys.length ? Math.min(...keys.map(m => models[m].slides || 0)) : 0;
+      // Use minimum across models with actual slides (weakest link = true completion)
+      const activeKeys = keys.filter(m => (models[m].slides || 0) > 0);
+      const minWds = activeKeys.length ? Math.min(...activeKeys.map(m => models[m].slides)) : 0;
       const pct = Math.round(minWds / dbSucceeded * 100);
       wdsPctEl.textContent = pct + '%';
     }

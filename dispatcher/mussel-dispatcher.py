@@ -701,6 +701,13 @@ class StateStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_finished_batches_with_work_dirs(self) -> list:
+        """Return SUCCEEDED/FAILED batches whose work_dir column is non-null."""
+        rows = self._conn().execute(
+            "SELECT batch_id, work_dir FROM batches WHERE status IN ('SUCCEEDED','FAILED') AND work_dir IS NOT NULL"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
 
 # ---------------------------------------------------------------------------
 # Readiness Checker
@@ -1724,15 +1731,29 @@ class RunManager:
 # ---------------------------------------------------------------------------
 
 def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: bool = True,
-                      max_slide_retries: int = 0):
+                      max_slide_retries: int = 0, cleanup_work_dir: bool = False):
     """
     On restart, recover interrupted batches:
     - If the batch's work dir still exists, schedule a -resume run to skip already-done tasks.
     - If the work dir is gone, reset slides to PENDING for fresh re-dispatch.
     When retry_failed=True (default), also resets FAILED slides back to PENDING, unless
     their fail_count >= max_slide_retries (when max_slide_retries > 0).
+    Also cleans up any orphaned work dirs for already-finished batches (can happen when
+    shutil.rmtree silently fails because the NF process was still running at cleanup time).
     Returns a list of (batch_id, csv_path, work_dir) tuples to be submitted as resume runs.
     """
+    import shutil
+
+    # Purge orphaned work dirs for batches that are already SUCCEEDED or FAILED.
+    # These are left behind when _cleanup's rmtree runs while NF is still writing to the dir.
+    if cleanup_work_dir:
+        for batch in state.get_finished_batches_with_work_dirs():
+            work_dir = batch.get("work_dir")
+            if work_dir and os.path.isdir(work_dir):
+                log.info("Startup cleanup: removing orphaned work dir for finished batch %s: %s",
+                         batch["batch_id"], work_dir)
+                shutil.rmtree(work_dir, ignore_errors=True)
+
     resume_specs = []
     running = state.get_running_batches()
     if running:
@@ -1815,7 +1836,10 @@ def main():
     pending_deque: deque = deque()
 
     # Recovery
-    resume_specs = recover_in_flight(state, pending_deque, cfg.retry_failed, cfg.max_slide_retries)
+    resume_specs = recover_in_flight(
+        state, pending_deque, cfg.retry_failed, cfg.max_slide_retries,
+        cleanup_work_dir=cfg.cleanup_work_dir,
+    )
 
     # RunManager
     run_manager = RunManager(cfg, state)

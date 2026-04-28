@@ -478,6 +478,12 @@ class StateStore:
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Migrate existing databases that pre-date the nf_session_id column.
+        try:
+            conn.execute("ALTER TABLE batches ADD COLUMN nf_session_id TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # Migrate existing databases that pre-date the file_id/file_name/needs_download columns.
         for col_def in (
             "file_id TEXT",
@@ -697,9 +703,25 @@ class StateStore:
 
     def get_running_batches(self) -> list:
         rows = self._conn().execute(
-            "SELECT batch_id, csv_path, work_dir, log_path FROM batches WHERE status='RUNNING'"
+            "SELECT batch_id, csv_path, work_dir, log_path, nf_session_id FROM batches WHERE status='RUNNING'"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def set_batch_session_id(self, batch_id: str, session_id: str):
+        conn = self._conn()
+        conn.execute(
+            "UPDATE batches SET nf_session_id=? WHERE batch_id=?",
+            (session_id, batch_id),
+        )
+        conn.commit()
+
+    def get_batch_session_id(self, batch_id: str) -> str | None:
+        row = self._conn().execute(
+            "SELECT nf_session_id FROM batches WHERE batch_id=?", (batch_id,)
+        ).fetchone()
+        if row and row["nf_session_id"]:
+            return row["nf_session_id"]
+        return None
 
     def get_finished_batches_with_work_dirs(self) -> list:
         """Return SUCCEEDED/FAILED batches whose work_dir column is non-null."""
@@ -1317,6 +1339,62 @@ def collect_manifests(outdir: str, combined_path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# NF session ID helpers
+# ---------------------------------------------------------------------------
+
+def _parse_run_name_from_log(log_path: str) -> str | None:
+    """Parse the Nextflow run name from the batch stdout log file.
+
+    NF prints a line like:
+        runName                 : desperate_meucci
+    """
+    try:
+        with open(log_path) as f:
+            for line in f:
+                if "runName" in line and ":" in line:
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _lookup_session_id_in_history(repo_dir: str, run_name: str) -> str | None:
+    """Look up a NF session UUID from .nextflow/history by run name.
+
+    History columns (tab-separated):
+        date  time  duration  run_name  status  session_uuid  command
+    """
+    history_file = os.path.join(repo_dir, ".nextflow", "history")
+    try:
+        with open(history_file) as f:
+            for line in f:
+                parts = line.split("\t")
+                if len(parts) >= 6 and parts[3].strip() == run_name:
+                    return parts[5].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _extract_nf_session_id_from_log(log_path: str, repo_dir: str) -> str | None:
+    """Extract the NF session UUID for the batch identified by log_path."""
+    run_name = _parse_run_name_from_log(log_path)
+    if not run_name:
+        return None
+    return _lookup_session_id_in_history(repo_dir, run_name)
+
+
+def _lookup_nf_session_id(repo_dir: str, batch_id: str, log_path: str) -> str | None:
+    """Look up the NF session UUID for a batch, trying DB first then log file.
+
+    The session ID is stored in the DB after the first run completes.
+    For batches that ran before this feature was added, fall back to parsing
+    the run name from the log file and looking it up in .nextflow/history.
+    """
+    return _extract_nf_session_id_from_log(log_path, repo_dir)
+
+
+# ---------------------------------------------------------------------------
 # NextflowRunner
 # ---------------------------------------------------------------------------
 
@@ -1368,7 +1446,21 @@ class NextflowRunner:
                     cmd += ["--download.gdc_token_file", w.gdc_token_file]
                     break
         if self._resume:
-            cmd.append("-resume")
+            # Use the stored session ID to avoid lock conflicts when multiple batches
+            # resume concurrently (bare -resume uses the last entry in the shared
+            # .nextflow/history, causing all resumes to target the same session).
+            session_id = self.state.get_batch_session_id(self.batch_id)
+            if not session_id:
+                # Fall back to parsing from log + history (for pre-fix batches)
+                session_id = _lookup_nf_session_id(
+                    self.cfg.repo_dir, self.batch_id, log_path
+                )
+            if session_id:
+                cmd += ["-resume", session_id]
+                log.info("Batch %s: resuming NF session %s", self.batch_id, session_id)
+            else:
+                cmd.append("-resume")
+                log.warning("Batch %s: session ID not found, resuming without explicit ID", self.batch_id)
 
         label = "resume" if self._resume else f"{len(self.slides)} slides"
         log.info("Dispatching batch %s (%s): %s", self.batch_id, label, " ".join(cmd))
@@ -1386,6 +1478,14 @@ class NextflowRunner:
             exit_code = result.returncode
         except Exception as e:
             log.error("Batch %s failed to launch: %s", self.batch_id, e)
+
+        # Capture and store the NF session ID so future resumes can use -resume <uuid>
+        # instead of bare -resume (which would collide across concurrent batches).
+        if not self._resume:
+            session_id = _extract_nf_session_id_from_log(log_path, self.cfg.repo_dir)
+            if session_id:
+                self.state.set_batch_session_id(self.batch_id, session_id)
+                log.debug("Batch %s: recorded NF session ID %s", self.batch_id, session_id)
 
         self.state.complete_batch(self.batch_id, exit_code)
         self.state.mark_slides_complete(self.batch_id, exit_code == 0)

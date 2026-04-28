@@ -664,8 +664,6 @@ _HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mussel Dispatcher Dashboard</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦪</text></svg>">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" async
-  onload="onChartJsReady()"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
@@ -1101,7 +1099,7 @@ async function loadWds() {
       return `<tr style="border-top:1px solid #1e293b">
         <td style="padding:4px 6px;font-weight:600">${m}</td>
         <td style="padding:4px 6px;text-align:right;color:#4ade80">${n}</td>
-        <td style="padding:4px 6px;text-align:right;color:${gapColor}">${gap > 0 ? '+'+gap : '✓'}</td>
+        <td style="padding:4px 6px;text-align:right;color:${gapColor}">${gap > 0 ? '+'+gap : '0'}</td>
         <td style="padding:4px 6px;text-align:right">${shardStr}</td>
         <td style="padding:4px 6px;text-align:right">${slidesPerShard}</td>
         <td style="padding:4px 6px;text-align:right;color:${localColor}">${localPt}</td>
@@ -1203,6 +1201,8 @@ setInterval(refresh, 10000);
 setInterval(loadSlurm, 15000);  // matches squeue cache TTL
 setInterval(loadWds, 60000);  // S3 stats are expensive — refresh less often via loadWds
 </script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"
+  onload="onChartJsReady()"></script>
 </body>
 </html>
 """

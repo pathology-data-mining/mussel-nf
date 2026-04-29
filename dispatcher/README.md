@@ -102,7 +102,7 @@ Example use: append newly extracted features to WebDataset shards immediately af
 
 ```yaml
 post_batch_hooks:
-  - command: "python {repo_dir}/scripts/tcga/tcga_append_wds.py"
+  - command: "python {repo_dir}/scripts/append_wds.py"
     args:
       - "--pt-dir={outdir}/features/ctranspath/pt"
       - "--h5-dir={outdir}/features/ctranspath/tile_h5"

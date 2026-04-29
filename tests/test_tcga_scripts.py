@@ -4,7 +4,7 @@ Covers the core data-processing steps used by the mussel-dispatcher:
 
     1. tcga_update_status  — scan a results directory → status CSV
     2. tcga_prepare_samples — resolve paths (local → S3 → needs_download)
-    3. tcga_append_wds      — write per-cancer WDS shards from .pt outputs
+    3. append_wds      — write per-cancer WDS shards from .pt outputs
 
 Each test uses only in-memory / tmp-dir data; no network calls are made.
 S3 listing in tcga_prepare_samples is monkey-patched to return a fixed set
@@ -85,7 +85,7 @@ def make_inventory() -> pd.DataFrame:
 
 
 def make_pt_file(path: Path, n_patches: int = 8, dim: int = 512) -> None:
-    """Write a minimal .features.pt file that tcga_append_wds can load."""
+    """Write a minimal .features.pt file that append_wds can load."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tensor = torch.randn(n_patches, dim)
     torch.save(tensor, path)
@@ -634,7 +634,7 @@ class TestPrepareSamples:
 
 
 # ---------------------------------------------------------------------------
-# 3. tcga_append_wds — append_wds()
+# 3. append_wds — append_wds()
 # ---------------------------------------------------------------------------
 
 class TestAppendWds:
@@ -658,7 +658,7 @@ class TestAppendWds:
         return tmp_path, model, pt_dir, h5_dir
 
     def test_shards_created_per_cancer_type(self, tmp_path, results_dir):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -680,7 +680,7 @@ class TestAppendWds:
         assert luad_shard.exists(), "LUAD shard not created"
 
     def test_index_has_correct_entries(self, tmp_path, results_dir):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -702,7 +702,7 @@ class TestAppendWds:
         assert index["TCGA-LU-A5YX-01Z-00-DX1"]["project_id"] == "TCGA-LUAD"
 
     def test_index_json_persisted(self, tmp_path, results_dir):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -723,7 +723,7 @@ class TestAppendWds:
         assert len(saved) == 3
 
     def test_shard_contains_features_npy(self, tmp_path, results_dir):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -746,7 +746,7 @@ class TestAppendWds:
         assert len(feature_entries) == 2  # 2 BRCA slides
 
     def test_h5_coords_embedded_in_shard(self, tmp_path, results_dir):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -771,7 +771,7 @@ class TestAppendWds:
 
     def test_idempotent_second_run(self, tmp_path, results_dir):
         """Running append_wds twice must not duplicate entries."""
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -799,7 +799,7 @@ class TestDeleteLocal:
     """append_wds() with delete_local=True removes source files after WDS flush."""
 
     def test_delete_local_removes_pt_and_h5(self, tmp_path):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -826,7 +826,7 @@ class TestDeleteLocal:
         assert not h5_file.exists(), ".patch.h5 should be deleted after WDS flush"
 
     def test_delete_local_false_keeps_files(self, tmp_path):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -853,7 +853,7 @@ class TestDeleteLocal:
         assert h5_file.exists(), ".patch.h5 should be kept when delete_local=False"
 
     def test_delete_local_dry_run_keeps_files(self, tmp_path):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -883,7 +883,7 @@ class TestWdsManifest:
 
     def test_manifest_csv_written_with_full_path(self, tmp_path):
         import pandas as pd
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         model = "ctranspath"
         wds_dest = str(tmp_path / "wds")
@@ -913,7 +913,7 @@ class TestWdsManifest:
 
     def test_manifest_csv_appends_across_runs(self, tmp_path):
         import pandas as pd
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         model = "ctranspath"
         wds_dest = str(tmp_path / "wds")
@@ -936,7 +936,7 @@ class TestWdsManifest:
         assert set(df["slide_id"]) == {"TCGA-BR-A44T-01Z-00-DX1", "TCGA-BR-A44U-01Z-00-DX1"}
 
     def test_manifest_csv_not_written_on_dry_run(self, tmp_path):
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -964,7 +964,7 @@ class TestEndToEnd:
     def test_full_pipeline(self, tmp_path):
         from scripts.tcga.tcga_update_status import build_status
         from scripts.tcga.tcga_prepare_samples import prepare_samples
-        from scripts.tcga.tcga_append_wds import append_wds
+        from scripts.append_wds import append_wds
 
         model = "ctranspath"
         inventory = make_inventory()

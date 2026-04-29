@@ -180,7 +180,7 @@ jobs:
             tests/pipeline_stub_clip.nf.test \
             tests/pipeline_stub_multi_slide.nf.test
 
-  # ── TCGA scripts integration: stub pipeline output → tcga_append_wds ────────
+  # ── TCGA scripts integration: stub pipeline output → append_wds ────────
   nf-test-stub-tcga:
     name: nf-test — TCGA scripts integration (stub)
     runs-on: ubuntu-latest

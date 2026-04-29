@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Append new slides to per-cancer-type WDS shard directories.
+"""Append new slides to per-group WDS shard directories.
 
 Reads .features.pt and .patch.h5 files produced by the mussel-nf pipeline
-and appends them to WebDataset tar shards organised by cancer type:
+and appends them to WebDataset tar shards organised by a routing key (e.g.
+cancer type, oncotree code, or any project identifier):
 
-    wds/<model>/<project_id>/000000.tar
-    wds/<model>/<project_id>/000001.tar
+    wds/<model>/<group>/000000.tar
+    wds/<model>/<group>/000001.tar
     ...
     wds/<model>/wds_index.json   ← slide_id → {project_id, shard_file}
 
-Slides are routed to the correct project directory using tcga_inventory.csv.
+Slides are routed to the correct group directory using either:
+  - an inventory CSV with slide_id → project_id mapping (--inventory), or
+  - a column in the batch slide-ids CSV (--project-id-column), e.g. oncotree_code.
+
 Shards are capped by byte size (--max-shard-bytes) rather than slide count,
 which keeps shard files consistently sized across different model feature
 dimensions (e.g. ctranspath 768-d vs uni2h 1024-d).
@@ -22,21 +26,21 @@ incremental progress is immediately visible on S3.
 
 Usage
 -----
-    # Local destination
-    python tcga_append_wds.py \\
-        --pt-dir /data/tcga-results/features/ctranspath/pt \\
-        --h5-dir /data/tcga-results/features/ctranspath/h5 \\
+    # Route by inventory CSV (e.g. TCGA project_id)
+    python append_wds.py \\
+        --pt-dir /data/results/features/ctranspath/pt \\
+        --h5-dir /data/results/features/ctranspath/h5 \\
         --inventory tcga_inventory.csv \\
-        --wds-dest /data/tcga-wds \\
+        --wds-dest /data/wds \\
         --model-type ctranspath
 
-    # S3 destination
-    python tcga_append_wds.py \\
-        --pt-dir /data/tcga-results/features/ctranspath/pt \\
-        --h5-dir /data/tcga-results/features/ctranspath/h5 \\
-        --inventory tcga_inventory.csv \\
-        --wds-dest s3://pathology/tcga-features/wds \\
-        --staging-dir /data/tcga-wds-staging \\
+    # Route by column in batch CSV (e.g. oncotree_code from IMPACT dispatcher)
+    python append_wds.py \\
+        --pt-dir /data/results/features/ctranspath/pt \\
+        --slide-ids-csv batch.csv \\
+        --project-id-column oncotree_code \\
+        --wds-dest s3://bucket/wds \\
+        --staging-dir /data/wds-staging \\
         --model-type ctranspath
 """
 
@@ -325,6 +329,7 @@ def append_wds(
     delete_local: bool = False,
     manifest_csv: Path | None = None,
     s3_max_concurrency: int = 4,
+    slide_to_project: "dict[str, str] | None" = None,
 ) -> dict:
     """Append all .features.pt files in pt_dir to WDS shards.
 
@@ -334,12 +339,16 @@ def append_wds(
     If manifest_csv is set, appends rows (slide_id, model, wds_path) to that
     CSV so callers can look up the full S3 shard path for each slide.
     s3_max_concurrency limits boto3 multipart threads per upload/download.
+    slide_to_project: pre-built slide_id → routing key (e.g. oncotree_code) dict.
+      When provided, inventory_df is not used for routing. Useful when the
+      routing key is already present in the batch CSV (e.g. Databricks watcher).
     Returns the updated index dict.
     """
-    # Build slide_id → project_id lookup from inventory
-    inv = inventory_df.copy()
-    inv["slide_id"] = inv["file_name"].apply(lambda fn: fn.split(".")[0])
-    slide_to_project: dict[str, str] = dict(zip(inv["slide_id"], inv["project_id"]))
+    # Build slide_id → project_id lookup: prefer explicit dict, fall back to inventory_df
+    if slide_to_project is None:
+        inv = inventory_df.copy()
+        inv["slide_id"] = inv["file_name"].apply(lambda fn: fn.split(".")[0])
+        slide_to_project = dict(zip(inv["slide_id"], inv["project_id"]))
 
     index = _load_index(wds_dest, model_type, staging_dir, s3_max_concurrency)
     already_indexed = set(index.keys())
@@ -485,8 +494,13 @@ def main(argv: list[str] | None = None) -> int:
                              "--pt-dir / --model-type are not specified.")
     parser.add_argument("--h5-dir", default=None,
                         help="Directory containing .patch.h5 files (coords; optional)")
-    parser.add_argument("--inventory", default="tcga_inventory.csv",
-                        help="tcga_inventory.csv for project_id lookup")
+    parser.add_argument("--inventory", default=None,
+                        help="tcga_inventory.csv for project_id lookup. "
+                             "Required unless --project-id-column is set.")
+    parser.add_argument("--project-id-column", default=None,
+                        help="Column name in --slide-ids-csv to use as the routing key "
+                             "(e.g. 'oncotree_code'). When set, --inventory is not needed; "
+                             "slides are routed into per-value subdirectories using this column.")
     parser.add_argument("--wds-dest", required=True,
                         help="WDS destination: local path or s3://bucket/prefix")
     parser.add_argument("--staging-dir", default=None,
@@ -538,10 +552,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     import pandas as pd
-    inventory_df = pd.read_csv(args.inventory, dtype=str).fillna("")
 
-    # Optional: restrict to a specific set of slide_ids (e.g. the current orchestrator chunk)
+    # Validate: need either --inventory or --project-id-column (with --slide-ids-csv)
+    if not args.project_id_column and not args.inventory:
+        log.error("Either --inventory or --project-id-column (with --slide-ids-csv) must be set")
+        return 1
+    if args.project_id_column and not args.slide_ids_csv:
+        log.error("--project-id-column requires --slide-ids-csv")
+        return 1
+
+    # Optional: restrict to a specific set of slide_ids AND/OR build routing lookup
     slide_id_filter: set[str] | None = None
+    slide_to_project: dict[str, str] | None = None
+    ids_df = None
     if args.slide_ids_csv:
         ids_df = pd.read_csv(args.slide_ids_csv, dtype=str).fillna("")
         if "slide_id" in ids_df.columns:
@@ -550,6 +573,23 @@ def main(argv: list[str] | None = None) -> int:
                      len(slide_id_filter), args.slide_ids_csv)
         else:
             log.warning("--slide-ids-csv has no 'slide_id' column — ignoring filter")
+
+    inventory_df = None
+    if args.project_id_column:
+        # Route slides by a column in the batch CSV (e.g. oncotree_code)
+        if ids_df is None or "slide_id" not in ids_df.columns:
+            log.error("--slide-ids-csv must have a 'slide_id' column when using --project-id-column")
+            return 1
+        col = args.project_id_column
+        if col not in ids_df.columns:
+            log.error("Column '%s' not found in %s (available: %s)",
+                      col, args.slide_ids_csv, ", ".join(ids_df.columns))
+            return 1
+        slide_to_project = dict(zip(ids_df["slide_id"].str.strip(), ids_df[col].str.strip()))
+        log.info("Routing %d slides by column '%s' from %s",
+                 len(slide_to_project), col, args.slide_ids_csv)
+    else:
+        inventory_df = pd.read_csv(args.inventory, dtype=str).fillna("")
 
     staging_dir = Path(args.staging_dir) if args.staging_dir else None
 
@@ -595,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
                 delete_local=args.delete_local,
                 manifest_csv=Path(args.manifest_csv) if args.manifest_csv else None,
                 s3_max_concurrency=args.s3_max_concurrency,
+                slide_to_project=slide_to_project,
             )
         except Exception as exc:
             log.error("Failed to append WDS for model %s: %s", model, exc)

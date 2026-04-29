@@ -49,7 +49,7 @@ TCGA-{TSS}-{Patient}-{SampleType}{Vial}-{Portion}-{SlideType}{Seq}.<UUID>.svs
 | Prefix | Full name       | Description                                         | Count  | On S3 |
 |--------|-----------------|-----------------------------------------------------|--------|-------|
 | `DX`   | Diagnostic      | H&E-stained diagnostic glass slide; primary imaging modality for computational pathology | 11,848 | ✅ Yes |
-| `TS`   | Top Section     | Frozen section from the top of the tissue block     | 8,997  | b�� No |
+| `TS`   | Top Section     | Frozen section from the top of the tissue block     | 8,997  | b�� No |
 | `BS`   | Bottom Section  | Frozen section from the bottom of the tissue block  | 4,941  | ❌ No |
 | `MS`   | Middle Section  | Frozen section from the middle of the tissue block  | 77     | ❌ No |
 
@@ -107,7 +107,7 @@ dispatcher/mussel-dispatcher.py        ← primary orchestrator (streaming)
   ├─ BatchScheduler → nextflow run     ← parallel Nextflow batches (SLURM)
   │
   └─ Post-batch hooks:
-       └─ tcga_append_wds.py           ← append .pt/.h5 → per-cancer WDS shards (S3)
+       └─ scripts/append_wds.py        ← append .pt/.h5 → per-group WDS shards (S3)
 ```
 
 ### Path Resolution
@@ -236,23 +236,23 @@ Exit codes: `0` = success, `2` = no pending slides, `1` = error.
 
 ---
 
-### `tcga_append_wds.py` — WDS Shard Building
+### `scripts/append_wds.py` — WDS Shard Building
 
 Appends `.features.pt` (and optionally `.patch.h5` coords) to
 [WebDataset](https://webdataset.github.io/webdataset/) tar shards, grouped
-by cancer type. Maintains a `wds_index.json` for idempotency — re-running
+by a routing key. Maintains a `wds_index.json` for idempotency — re-running
 never duplicates entries.
 
 ```bash
-# Via results dir (auto-discovers models):
-python tcga_append_wds.py \
+# Via results dir (auto-discovers models), routing by TCGA inventory:
+python scripts/append_wds.py \
     --results-dir /data/tcga-results \
     --inventory tcga_inventory.csv \
     --wds-dest s3://pathology/tcga-features/wds \
     --staging-dir /data/wds-staging
 
 # Explicit model and dirs:
-python tcga_append_wds.py \
+python scripts/append_wds.py \
     --pt-dir /data/tcga-results/features/ctranspath/pt \
     --h5-dir /data/tcga-results/features/ctranspath/tile_h5 \
     --model-type ctranspath \

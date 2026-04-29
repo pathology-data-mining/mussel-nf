@@ -84,6 +84,24 @@ workflow {
         def enriched = raw_list.collect { meta, slide ->
             def sid = meta.sample_id ?: meta.slide_id.toString()
             def enriched_meta = meta + [sample_id: sid, n_slides: sample_counts[sid]]
+            // For GDC download slides, nf-schema may return [] for empty optional fields.
+            // Extract file_id and file_name from the gdc:// slide_path URI when missing.
+            if (enriched_meta.needs_download) {
+                def fid = enriched_meta.file_id
+                def fname = enriched_meta.file_name
+                def fid_missing = !fid || (fid instanceof List && fid.isEmpty())
+                def fname_missing = !fname || (fname instanceof List && fname.isEmpty())
+                if (fid_missing || fname_missing) {
+                    def sp = slide?.toUriString() ?: slide?.toString() ?: ""
+                    def m = sp =~ /^gdc:\/\/([^\/]+)\/(.+)$/
+                    if (m) {
+                        enriched_meta = enriched_meta + [
+                            file_id:   fid_missing   ? m[0][1] : fid,
+                            file_name: fname_missing ? m[0][2] : fname,
+                        ]
+                    }
+                }
+            }
             tuple(enriched_meta, slide)
         }
         ch_samples = Channel.fromList(enriched)

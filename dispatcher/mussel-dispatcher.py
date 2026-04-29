@@ -578,7 +578,19 @@ class StateStore:
             "SELECT slide_path, slide_id, file_id, file_name, needs_download FROM slides"
             " WHERE status = 'PENDING' AND slide_path != ''"
         ).fetchall()
-        return [dict(r) for r in rows]
+        slides = [dict(r) for r in rows]
+        # Backfill file_id/file_name from gdc:// URIs for rows migrated from older DB
+        # schema that pre-dates those columns (they default to empty string).
+        for s in slides:
+            if s.get("needs_download") and not s.get("file_id"):
+                sp = s.get("slide_path", "")
+                if sp.startswith("gdc://"):
+                    rest = sp[len("gdc://"):]
+                    slash = rest.find("/")
+                    if slash > 0:
+                        s["file_id"] = rest[:slash]
+                        s["file_name"] = rest[slash + 1:]
+        return slides
 
     def mark_dispatched(self, slide_paths: list, batch_id: str):
         conn = self._conn()
@@ -589,7 +601,8 @@ class StateStore:
         )
         conn.commit()
 
-    def mark_slides_complete(self, batch_id: str, succeeded: bool):
+    def mark_slides_complete(self, batch_id: str, succeeded: bool,
+                             charge_fail_count: bool = True):
         conn = self._conn()
         status = "SUCCEEDED" if succeeded else "FAILED"
         if succeeded:
@@ -598,11 +611,18 @@ class StateStore:
                 (status, datetime.now(timezone.utc).isoformat(), batch_id),
             )
         else:
-            # Increment fail_count for each slide in this failed batch
-            conn.execute(
-                "UPDATE slides SET status=?, completed_at=?, fail_count=fail_count+1 WHERE batch_id=?",
-                (status, datetime.now(timezone.utc).isoformat(), batch_id),
-            )
+            if charge_fail_count:
+                # Increment fail_count for each slide in this failed batch
+                conn.execute(
+                    "UPDATE slides SET status=?, completed_at=?, fail_count=fail_count+1 WHERE batch_id=?",
+                    (status, datetime.now(timezone.utc).isoformat(), batch_id),
+                )
+            else:
+                # Fast-fail (infra/config error) — reset to PENDING without charging fail_count
+                conn.execute(
+                    "UPDATE slides SET status='PENDING', batch_id=NULL, dispatched_at=NULL WHERE batch_id=?",
+                    (batch_id,),
+                )
         conn.commit()
 
     def reset_dispatched_to_pending(self, batch_id: str):
@@ -1535,7 +1555,20 @@ class NextflowRunner:
                 log.debug("Batch %s: recorded NF session ID %s", self.batch_id, session_id)
 
         self.state.complete_batch(self.batch_id, exit_code)
-        self.state.mark_slides_complete(self.batch_id, exit_code == 0)
+
+        # Only charge fail_count if the batch ran long enough to have actually
+        # attempted slide-level work (≥60 s). Shorter runs indicate an infra or
+        # config failure (wrong binary, bad params file, NF launch error) — those
+        # should reset slides to PENDING rather than burning a retry slot.
+        batch_duration = time.time() - run_started_at
+        fast_fail = exit_code != 0 and batch_duration < 60
+        if fast_fail:
+            log.warning(
+                "Batch %s failed in %.0fs — treating as infra failure, resetting slides to PENDING.",
+                self.batch_id, batch_duration,
+            )
+        self.state.mark_slides_complete(self.batch_id, exit_code == 0,
+                                        charge_fail_count=not fast_fail)
 
         if exit_code == 0:
             log.info("Batch %s completed successfully.", self.batch_id)
@@ -1661,9 +1694,26 @@ class NextflowRunner:
                     "oncotree_code": s.get("oncotree_code", ""),
                 }
                 if has_download:
+                    file_id = s.get("file_id", "") or ""
+                    file_name = s.get("file_name", "") or ""
+                    # Backfill from gdc:// URI if file_id/file_name are missing
+                    if not file_id:
+                        sp = s.get("slide_path", "")
+                        if sp.startswith("gdc://"):
+                            rest = sp[len("gdc://"):]
+                            slash = rest.find("/")
+                            if slash > 0:
+                                file_id = rest[:slash]
+                                file_name = rest[slash + 1:]
+                    if not file_id:
+                        log.warning(
+                            "Batch %s: slide %s needs_download but has no file_id — skipping",
+                            self.batch_id, s.get("slide_id"),
+                        )
+                        continue
                     row["needs_download"] = "true" if s.get("needs_download") else "false"
-                    row["file_id"] = s.get("file_id", "")
-                    row["file_name"] = s.get("file_name", "")
+                    row["file_id"] = file_id
+                    row["file_name"] = file_name
                 writer.writerow(row)
         log.debug("Wrote batch CSV: %s", csv_path)
         return csv_path

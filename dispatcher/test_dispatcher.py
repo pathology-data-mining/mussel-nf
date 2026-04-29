@@ -33,6 +33,7 @@ BatchScheduler = _mod.BatchScheduler
 NextflowRunner = _mod.NextflowRunner
 TcgaWatcher = _mod.TcgaWatcher
 recover_in_flight = _mod.recover_in_flight
+DatabricksWatcher = _mod.DatabricksWatcher
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +252,31 @@ class TestStateStore:
         assert len(running) == 1
         assert running[0]["batch_id"] == "batch-002"
 
+    def test_get_pending_slides_backfills_gdc_uri(self, store):
+        """Slides with gdc:// URIs but empty file_id/file_name get backfilled."""
+        fid = "acbbcfa8-90c4-408a-966a-294b7b30eca3"
+        fname = "TCGA-UW-A7GC-11Z-00-DX1.ADAF7B0F.svs"
+        db_key = f"gdc://{fid}/{fname}"
+        # Simulate a migrated row: gdc:// URI but file_id/file_name are empty
+        store._conn().execute(
+            "INSERT INTO slides (slide_path, slide_id, status, file_id, file_name, needs_download, first_seen_at)"
+            " VALUES (?, ?, 'PENDING', '', '', 1, '2024-01-01')",
+            (db_key, "TCGA-UW-A7GC-11Z-00-DX1"),
+        )
+        store._conn().commit()
+        pending = store.get_pending_slides()
+        assert len(pending) == 1
+        assert pending[0]["file_id"] == fid
+        assert pending[0]["file_name"] == fname
 
-# ===========================================================================
-# ReadinessChecker
-# ===========================================================================
+    def test_get_pending_slides_no_backfill_without_gdc_uri(self, store):
+        """Non-gdc slides with empty file_id are left as-is."""
+        store.add_slide("/slides/a.svs", "a", needs_download=False)
+        pending = store.get_pending_slides()
+        assert pending[0]["file_id"] == ""
+
+
+
 
 class TestReadinessChecker:
     def test_skip_part_extension(self, tmp_path):
@@ -577,6 +599,27 @@ class TestNextflowRunnerWriteCsv:
         assert rows[0] == {"slide_id": "a", "slide_path": "/slides/a.svs", "oncotree_code": "BRCA"}
         assert rows[1]["oncotree_code"] == ""  # missing key defaults to empty string
 
+    def test_csv_backfills_file_id_from_gdc_uri(self, tmp_path):
+        """_write_csv extracts file_id/file_name from gdc:// URI when empty."""
+        cfg = make_config(dispatch_dir=str(tmp_path))
+        fid = "acbbcfa8-90c4-408a-966a-294b7b30eca3"
+        fname = "TCGA-UW-A7GC.svs"
+        slides = [{
+            "slide_path": f"gdc://{fid}/{fname}",
+            "slide_id": "TCGA-UW-A7GC",
+            "oncotree_code": "",
+            "needs_download": True,
+            "file_id": "",      # empty — should be backfilled
+            "file_name": "",
+        }]
+        runner = NextflowRunner(cfg, "batch-backfill", slides, MagicMock())
+        csv_path = runner._write_csv()
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 1
+        assert rows[0]["file_id"] == fid
+        assert rows[0]["file_name"] == fname
+
     def test_csv_filename_includes_batch_id(self, tmp_path):
         cfg = make_config(dispatch_dir=str(tmp_path))
         runner = NextflowRunner(cfg, "batch-XYZ", [], MagicMock())
@@ -585,8 +628,111 @@ class TestNextflowRunnerWriteCsv:
 
 
 # ===========================================================================
-# recover_in_flight
+# NextflowRunner command construction
 # ===========================================================================
+
+class TestNextflowRunnerCommand:
+    def test_no_nextflow_config_by_default(self, tmp_path):
+        cfg = make_config()
+        slides = [{"slide_path": "/slides/a.svs", "slide_id": "a"}]
+        state = MagicMock()
+        runner = NextflowRunner(cfg, "batch-001", slides, state)
+        # Simulate the cmd list construction directly (mirrors NextflowRunner.run logic)
+        work_dir = "/tmp/work/batch_001"
+        csv_path = "/tmp/dispatch/batch_001.csv"
+        cmd = [
+            "nextflow", "run", cfg.repo_dir,
+            "-profile", cfg.nextflow_profiles,
+            "-work-dir", work_dir,
+            "--samples_csv", csv_path,
+            "--outdir", cfg.outdir,
+        ]
+        if cfg.nextflow_config:
+            cmd += ["-c", cfg.nextflow_config]
+        assert "-c" not in cmd
+
+    def test_nextflow_config_appended_when_set(self, tmp_path):
+        cfg = make_config(nextflow_config="/path/to/custom.config")
+        slides = [{"slide_path": "/slides/a.svs", "slide_id": "a"}]
+        runner = NextflowRunner(cfg, "batch-001", slides, MagicMock())
+        work_dir = "/tmp/work/batch_001"
+        csv_path = "/tmp/dispatch/batch_001.csv"
+        cmd = [
+            "nextflow", "run", cfg.repo_dir,
+            "-profile", cfg.nextflow_profiles,
+            "-work-dir", work_dir,
+            "--samples_csv", csv_path,
+            "--outdir", cfg.outdir,
+        ]
+        if cfg.nextflow_config:
+            cmd += ["-c", cfg.nextflow_config]
+        assert "-c" in cmd
+        assert "/path/to/custom.config" in cmd
+
+    def test_nextflow_config_resolved_from_yaml(self, tmp_path):
+        """Relative nextflow_config paths are resolved relative to the config file."""
+        custom_cfg = tmp_path / "custom.config"
+        custom_cfg.write_text("// custom")
+        data = {
+            "nextflow_profiles": "standard",
+            "outdir": "/out",
+            "nextflow_config": "custom.config",
+            "watchers": [],
+        }
+        yaml_path = tmp_path / "dispatcher.yaml"
+        yaml_path.write_text(yaml.dump(data))
+        cfg = Config.load(str(yaml_path))
+        assert cfg.nextflow_config == str(tmp_path / "custom.config")
+
+    def test_nextflow_config_absent_when_not_set_in_yaml(self, tmp_path):
+        data = {
+            "nextflow_profiles": "standard",
+            "outdir": "/out",
+            "watchers": [],
+        }
+        yaml_path = tmp_path / "dispatcher.yaml"
+        yaml_path.write_text(yaml.dump(data))
+        cfg = Config.load(str(yaml_path))
+        assert cfg.nextflow_config == ""
+
+    def test_no_nextflow_params_file_by_default(self, tmp_path):
+        cfg = make_config()
+        cmd = ["nextflow", "run", cfg.repo_dir, "-profile", cfg.nextflow_profiles,
+               "-work-dir", "/tmp/work", "--samples_csv", "/tmp/batch.csv", "--outdir", cfg.outdir]
+        if cfg.nextflow_params_file:
+            cmd += ["-params-file", cfg.nextflow_params_file]
+        assert "-params-file" not in cmd
+
+    def test_nextflow_params_file_appended_when_set(self, tmp_path):
+        cfg = make_config(nextflow_params_file="/path/to/params.yaml")
+        cmd = ["nextflow", "run", cfg.repo_dir, "-profile", cfg.nextflow_profiles,
+               "-work-dir", "/tmp/work", "--samples_csv", "/tmp/batch.csv", "--outdir", cfg.outdir]
+        if cfg.nextflow_params_file:
+            cmd += ["-params-file", cfg.nextflow_params_file]
+        assert "-params-file" in cmd
+        assert "/path/to/params.yaml" in cmd
+
+    def test_nextflow_params_file_resolved_from_yaml(self, tmp_path):
+        """Relative nextflow_params_file paths are resolved relative to the config file."""
+        params_file = tmp_path / "params.yaml"
+        params_file.write_text("key: value")
+        data = {
+            "nextflow_profiles": "standard",
+            "outdir": "/out",
+            "nextflow_params_file": "params.yaml",
+            "watchers": [],
+        }
+        yaml_path = tmp_path / "dispatcher.yaml"
+        yaml_path.write_text(yaml.dump(data))
+        cfg = Config.load(str(yaml_path))
+        assert cfg.nextflow_params_file == str(tmp_path / "params.yaml")
+
+    def test_nextflow_params_file_absent_when_not_set_in_yaml(self, tmp_path):
+        data = {"nextflow_profiles": "standard", "outdir": "/out", "watchers": []}
+        yaml_path = tmp_path / "dispatcher.yaml"
+        yaml_path.write_text(yaml.dump(data))
+        cfg = Config.load(str(yaml_path))
+        assert cfg.nextflow_params_file == ""
 
 class TestRecoverInFlight:
     def test_no_running_batches_does_nothing(self, tmp_path):
@@ -997,7 +1143,7 @@ class TestAutoHooks:
         })
         assert len(cfg.post_batch_hooks) == 1
         hook = cfg.post_batch_hooks[0]
-        assert "tcga_append_wds.py" in hook["command"]
+        assert "append_wds.py" in hook["command"]
         args = " ".join(hook["args"])
         assert "ctranspath" in args
         assert "s3://bucket/wds/ctranspath" in args
@@ -1031,7 +1177,7 @@ class TestAutoHooks:
             extra_raw={"post_batch_hooks": explicit},
         )
         assert len(cfg.post_batch_hooks) == 2
-        assert "tcga_append_wds.py" in cfg.post_batch_hooks[0]["command"]
+        assert "append_wds.py" in cfg.post_batch_hooks[0]["command"]
         assert cfg.post_batch_hooks[1] == explicit[0]
 
     def test_one_auto_hook_per_watcher(self, tmp_path):
@@ -1254,3 +1400,137 @@ class TestCleanup:
         )
 
         assert work_dir.exists(), "work dir should be kept when cleanup_work_dir=False"
+
+
+# ===========================================================================
+# DatabricksWatcher
+# ===========================================================================
+
+
+def _make_sdk_mock(rows, *, fail=False):
+    """Build a minimal mock of the databricks-sdk StatementExecution API."""
+    from unittest.mock import MagicMock
+    from types import SimpleNamespace
+
+    # Build column descriptors
+    col_names = ["slide_id", "slide_path", "oncotree_code"]
+    cols = [SimpleNamespace(name=n) for n in col_names]
+
+    # Build the response
+    mock_resp = MagicMock()
+    if fail:
+        from databricks.sdk.service.sql import StatementState
+        mock_resp.status.state = StatementState.FAILED
+        mock_resp.status.error = SimpleNamespace(message="forced failure")
+    else:
+        from databricks.sdk.service.sql import StatementState
+        mock_resp.status.state = StatementState.SUCCEEDED
+        mock_resp.manifest.schema.columns = cols
+        mock_resp.result.data_array = [[r["slide_id"], r["slide_path"], r.get("oncotree_code", "")] for r in rows]
+        # No next chunk
+        mock_resp.result.next_chunk_index = None
+
+    mock_client = MagicMock()
+    mock_client.statement_execution.execute_statement.return_value = mock_resp
+
+    return mock_client
+
+
+class TestDatabricksWatcher:
+    def _watcher(self, tmp_path, cfg_overrides=None):
+        """Create a DatabricksWatcher with a temp StateStore."""
+        state = StateStore(str(tmp_path / "state.db"))
+        pending = deque()
+        stop_event = threading.Event()
+        cfg_kwargs = dict(
+            type="databricks",
+            warehouse_id="wh-123",
+            poll_interval_seconds=3600,
+            source_filter=["ECS2"],
+            additional_where="",
+            min_file_size_bytes=10_000_000,
+        )
+        if cfg_overrides:
+            cfg_kwargs.update(cfg_overrides)
+        cfg = WatcherConfig(**cfg_kwargs)
+        w = DatabricksWatcher(cfg, pending, state, stop_event)
+        return w, pending, state
+
+    def test_enqueues_new_slides(self, tmp_path):
+        w, pending, state = self._watcher(tmp_path)
+        rows = [
+            {"slide_id": "1001", "slide_path": "s3://bucket/1001.svs", "oncotree_code": "PAAD"},
+            {"slide_id": "1002", "slide_path": "s3://bucket/1002.svs", "oncotree_code": "LUAD"},
+        ]
+        w._get_client = lambda: _make_sdk_mock(rows)
+        w._poll()
+
+        assert len(pending) == 2
+        paths = {s["slide_path"] for s in pending}
+        assert paths == {"s3://bucket/1001.svs", "s3://bucket/1002.svs"}
+        ids = {s["slide_id"] for s in pending}
+        assert ids == {"1001", "1002"}
+        assert pending[0]["oncotree_code"] == "PAAD"
+
+    def test_skips_known_slides(self, tmp_path):
+        w, pending, state = self._watcher(tmp_path)
+        state.add_slide("s3://bucket/1001.svs", "1001")
+        rows = [
+            {"slide_id": "1001", "slide_path": "s3://bucket/1001.svs", "oncotree_code": "PAAD"},
+            {"slide_id": "1002", "slide_path": "s3://bucket/1002.svs", "oncotree_code": "LUAD"},
+        ]
+        w._get_client = lambda: _make_sdk_mock(rows)
+        w._poll()
+
+        assert len(pending) == 1
+        assert pending[0]["slide_id"] == "1002"
+
+    def test_deduplicates_on_second_poll(self, tmp_path):
+        w, pending, state = self._watcher(tmp_path)
+        rows = [{"slide_id": "1001", "slide_path": "s3://bucket/1001.svs", "oncotree_code": "PAAD"}]
+        w._get_client = lambda: _make_sdk_mock(rows)
+        w._poll()
+        w._poll()
+
+        # Only enqueued once despite two polls
+        assert len(pending) == 1
+
+    def test_handles_query_failure_gracefully(self, tmp_path):
+        w, pending, state = self._watcher(tmp_path)
+        w._get_client = lambda: _make_sdk_mock([], fail=True)
+        w._poll()  # should not raise
+        assert len(pending) == 0
+
+    def test_source_filter_in_query(self, tmp_path):
+        w, pending, state = self._watcher(tmp_path, {"source_filter": ["ECS2", "On-prem Storage"]})
+        query = w._build_query()
+        assert "i.source IN ('ECS2', 'On-prem Storage')" in query
+
+    def test_no_source_filter_omits_clause(self, tmp_path):
+        w, pending, state = self._watcher(tmp_path, {"source_filter": []})
+        query = w._build_query()
+        assert "i.source" not in query
+
+    def test_additional_where_included(self, tmp_path):
+        w, pending, state = self._watcher(tmp_path, {"additional_where": "m.IS_HNE = 1"})
+        query = w._build_query()
+        assert "m.IS_HNE = 1" in query
+
+    def test_missing_warehouse_id_does_not_start(self, tmp_path, caplog):
+        import logging
+        w, pending, state = self._watcher(tmp_path, {"warehouse_id": ""})
+        with caplog.at_level(logging.ERROR, logger="mussel-dispatcher"):
+            w.run()
+        assert len(pending) == 0
+
+    def test_watcher_config_databricks_fields(self):
+        cfg = WatcherConfig(
+            type="databricks",
+            warehouse_id="abc123",
+            source_filter=["ECS2"],
+            additional_where="m.IS_HNE = 1",
+        )
+        assert cfg.warehouse_id == "abc123"
+        assert cfg.source_filter == ["ECS2"]
+        assert cfg.additional_where == "m.IS_HNE = 1"
+

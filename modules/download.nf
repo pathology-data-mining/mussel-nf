@@ -18,9 +18,13 @@
 process DOWNLOAD_SLIDE {
     label "downloadTask"
 
-    // No container — gdc-client must be in PATH on the executor node.
-    // Use `conda` profile or install gdc-client into the cluster environment.
+    // No container — uses the gdc conda env (gdc_env.yaml) when -profile conda is active.
+    // The binary path is set via params.download.gdc_client_bin (see tcga_params.yaml).
     container null
+
+    // Limit concurrent downloads to avoid overwhelming the GDC API.
+    // Override with params.download.max_concurrent if needed.
+    maxForks { (params.download?.max_concurrent ?: 16) as int }
 
     // Cache downloads outside the work directory so they survive -resume and
     // are shared across pipeline runs.  The path mirrors the layout written by
@@ -40,9 +44,13 @@ process DOWNLOAD_SLIDE {
     token_opt  = (params.download?.gdc_token_file)
         ? "-t ${params.download.gdc_token_file}"
         : ""
-    n_conn = params.download?.n_connections ?: 8
+    n_conn    = params.download?.n_connections ?: 8
+    jitter    = params.download?.jitter_seconds ?: 30
     """
-    gdc-client download \\
+    # Spread concurrent tasks to avoid hammering GDC's metadata API simultaneously.
+    sleep \$((RANDOM % ${jitter}))
+
+    ${params.download?.gdc_client_bin ?: "gdc-client"} download \\
         --no-related-files \\
         -n ${n_conn} \\
         -d . \\

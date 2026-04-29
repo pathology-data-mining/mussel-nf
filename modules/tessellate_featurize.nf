@@ -6,11 +6,11 @@ process TESSELLATE_FEATURIZE_BATCH {
     secret 'HF_TOKEN'
 
     // Publish slide encoder features (always created)
-    publishDir path: "${params.outdir}/features/${model_type_name}", mode: "${params.publish_mode}", pattern: "pt/*.features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
-    publishDir path: "${params.outdir}/features/${model_type_name}", mode: "${params.publish_mode}", pattern: "h5/*.features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
+    publishDir path: { "${params.outdir}/features/${model_type_input}" }, mode: "${params.publish_mode}", pattern: "pt/*.features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
+    publishDir path: { "${params.outdir}/features/${model_type_input}" }, mode: "${params.publish_mode}", pattern: "h5/*.features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
     // Publish patch encoder features (only created when using slide-level model)
-    publishDir path: "${params.outdir}/features/${patch_encoder_name}", mode: "${params.publish_mode}", pattern: "pt/*.patch_features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
-    publishDir path: "${params.outdir}/features/${patch_encoder_name}", mode: "${params.publish_mode}", pattern: "h5/*.patch_features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
+    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; "${params.outdir}/features/${mt}" }, mode: "${params.publish_mode}", pattern: "pt/*.patch_features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
+    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; "${params.outdir}/features/${mt}" }, mode: "${params.publish_mode}", pattern: "h5/*.patch_features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
     publishDir path: "${params.outdir}/tiles", mode: "${params.publish_mode}", pattern: "tile_h5/*.h5", saveAs: { fn -> fn.replaceFirst("tile_h5/", "") }
 
     input:

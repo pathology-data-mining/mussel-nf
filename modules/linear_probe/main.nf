@@ -2,7 +2,7 @@
 process MERGE_ANNOTATION_FEATURES {
     label "bigTask"
 
-    publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/annotation_features/${model_type}/" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(meta), val(model_type), path(features_h5), path(annotation_bmp)
@@ -27,7 +27,7 @@ process MERGE_ANNOTATION_FEATURES {
 process STACK_ANNOTATION_FEATURES {
     label "bigTask"
 
-    publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/annotation_features/${model_type}/" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(model_type), path(annotation_features)
@@ -50,7 +50,7 @@ process STACK_ANNOTATION_FEATURES {
 process LINEAR_PROBE_BENCHMARK {
     label "bigTask"
 
-    publishDir "${params.outdir}/linear_probe_benchmark/${model_type}/", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/linear_probe_benchmark/${model_type}/" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(model_type), path(annotation_features)

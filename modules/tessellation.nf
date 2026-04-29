@@ -5,24 +5,23 @@ process TESSELLATE {
 
     scratch params.scratch_dir ?: false
 
-    publishDir path: "${params.outdir}/${publish_path}", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(meta), path(slide)
 
     output:
     tuple val(meta), path("${meta.slide_id}.patch.h5"), optional: true, emit: h5
-    tuple val(meta), val("tiles_h5_path"), val("${publish_path}/${meta.slide_id}.patch.h5"), path("${meta.slide_id}.patch.h5"), optional: true, topic: slide_meta
+    tuple val(meta), val("tiles_h5_path"), val("tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.patch.h5"), path("${meta.slide_id}.patch.h5"), optional: true, topic: slide_meta
     path "${meta.slide_id}_png/*.png", optional: true, emit: png
     path "${meta.slide_id}.*.png", optional: true, emit: thumbnail_png
-    tuple val(meta), val("thumbnail_path"), val("${publish_path}/${meta.slide_id}.thumbnail.png"), path("${meta.slide_id}.thumbnail.png"), optional: true, topic: slide_meta
-    tuple val(meta), val("grid_mask_path"), val("${publish_path}/${meta.slide_id}.grid_mask.png"), path("${meta.slide_id}.grid_mask.png"), optional: true, topic: slide_meta
-    tuple val(meta), val("mask_path"), val("${publish_path}/${meta.slide_id}.mask.png"), path("${meta.slide_id}.mask.png"), optional: true, topic: slide_meta
-    tuple val(meta), val("tile_png_path"), val("${publish_path}/${meta.slide_id}_png"), path("${meta.slide_id}_png/*.png"), optional: true, topic: slide_meta
+    tuple val(meta), val("thumbnail_path"), val("tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.thumbnail.png"), path("${meta.slide_id}.thumbnail.png"), optional: true, topic: slide_meta
+    tuple val(meta), val("grid_mask_path"), val("tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.grid_mask.png"), path("${meta.slide_id}.grid_mask.png"), optional: true, topic: slide_meta
+    tuple val(meta), val("mask_path"), val("tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.mask.png"), path("${meta.slide_id}.mask.png"), optional: true, topic: slide_meta
+    tuple val(meta), val("tile_png_path"), val("tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}_png"), path("${meta.slide_id}_png/*.png"), optional: true, topic: slide_meta
 
     script:
-    publish_path = "tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
-    save_tile_param = ""
+    def save_tile_param = ""
     if (params.tiling.save_tile_png)
         save_tile_param = "output_png_dir=${meta.slide_id}_png"
     stitch_tile_param = ""
@@ -67,7 +66,6 @@ process TESSELLATE {
     """
 
     stub:
-    publish_path = "tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     #!/usr/bin/env python3
     import h5py, numpy as np
@@ -80,8 +78,8 @@ process FILTER_TILES {
     label "bigTask"
     label "cpuTask"
 
-    publishDir path: "${params.outdir}/${tiles_publish_path}", mode: "${params.publish_mode}", pattern: "*.h5"
-    publishDir path: "${params.outdir}/${pt_publish_path}", mode: "${params.publish_mode}", pattern: "*.pt"
+    publishDir path: { "${params.outdir}/filter_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}" }, mode: "${params.publish_mode}", pattern: "*.h5"
+    publishDir path: { "${params.outdir}/features/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}" }, mode: "${params.publish_mode}", pattern: "*.pt"
 
     input:
     tuple val(meta), val(model_type), path(features_h5)
@@ -89,12 +87,10 @@ process FILTER_TILES {
     output:
     tuple val(meta), path("${meta.slide_id}.patch.h5"), emit: h5
     tuple val(meta), path("${meta.slide_id}.features.pt"), emit: pt
-    tuple val(meta), val("filtered_tiles_h5_path"), val("${tiles_publish_path}/${meta.slide_id}.patch.h5"), topic: slide_meta
-    tuple val(meta), val("${model_type}_features_tensor_path"), val("${pt_publish_path}/${meta.slide_id}.features.pt"), topic: slide_meta
+    tuple val(meta), val("filtered_tiles_h5_path"), val("filter_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.patch.h5"), topic: slide_meta
+    tuple val(meta), val("${model_type}_features_tensor_path"), val("features/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.features.pt"), topic: slide_meta
 
     script:
-    tiles_publish_path = "filter_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
-    pt_publish_path = "features/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     filter_features \
         features_h5_path=${features_h5} \
@@ -105,8 +101,6 @@ process FILTER_TILES {
     """
 
     stub:
-    tiles_publish_path = "filter_tiles/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
-    pt_publish_path    = "features/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     #!/usr/bin/env python3
     import h5py, numpy as np, torch

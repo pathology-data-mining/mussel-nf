@@ -26,7 +26,7 @@ process WDS_SHARD {
     label "bigTask"
     label "cpuTask"
 
-    publishDir path: "${params.outdir}/wds/${model_type}/${group_name}",
+    publishDir path: { "${params.outdir}/wds/${model_type}/${group_name}" },
                mode: "${params.publish_mode}",
                pattern: "*.tar"
 

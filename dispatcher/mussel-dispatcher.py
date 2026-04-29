@@ -1297,9 +1297,14 @@ class TcgaWatcher(threading.Thread):
                 db_key = f"gdc://{file_id}/{file_name}"
                 if self.state.is_known(db_key):
                     continue
-                # Check if this slide is permanently blacklisted (fail_count >= max_retries).
-                # A permanently blacklisted slide should not be re-added via a new path.
+                # Check if this slide is permanently blacklisted (fail_count >= max_retries),
+                # or already SUCCEEDED via another path (e.g. s3://) — skip in both cases.
                 existing = self.state.get_slides_by_id(slide_id)
+                if any(r.get("status") == "SUCCEEDED" for r in existing):
+                    log.debug(
+                        "TcgaWatcher: skipping %s — already SUCCEEDED via another path", slide_id
+                    )
+                    continue
                 max_retries = self._max_slide_retries
                 if max_retries > 0 and any(
                     r.get("fail_count", 0) >= max_retries for r in existing

@@ -7,9 +7,6 @@ validateParameters()
 log.info paramsSummaryLog(workflow)
 
 
-import org.apache.commons.io.FilenameUtils
-import groovy.json.JsonOutput
-
 timestamp = new Date().getTime()
 
 // nextflow.preview.topic = true
@@ -69,7 +66,7 @@ process saveParams {
     script:
         params_out = params.subMap(['workflow_id', 'tiling'])
         params_out["outdir"] = new File(params.outdir).absolutePath
-        "echo '${JsonOutput.toJson(params_out)}' > params.json"
+        "echo '${groovy.json.JsonOutput.toJson(params_out)}' > params.json"
 }
 
 workflow {

@@ -67,6 +67,8 @@ CONFIG KEYS (top level)
     cleanup_results          Delete local .pt / .patch.h5 after WDS push succeeds (default false)
     nextflow_config          Path to an extra Nextflow config file passed as -c to every run.
                              Relative paths are resolved relative to the dispatcher config file.
+    nextflow_params_file     Path to a YAML/JSON params file passed as -params-file to every run.
+                             Relative paths are resolved relative to the dispatcher config file.
 
   Hooks:
     post_batch_hooks    List of {command, args} run after each successful NF run.
@@ -155,7 +157,7 @@ class WatcherConfig:
     gdc_max_age_hours: float = 24.0
     scripts_dir: str = ""  # path to scripts/tcga/; defaults to {repo_dir}/scripts/tcga
     # Per-model WDS destinations: {model_type: s3_or_local_path}.
-    # A tcga_append_wds.py hook is auto-generated for each entry.
+    # A append_wds.py hook is auto-generated for each entry.
     # Example: {ctranspath: s3://bucket/wds/ctranspath, uni2h: s3://bucket/wds/uni2h}
     wds_destinations: dict = field(default_factory=dict)
     wds_staging_dir: str = ""  # local staging base for s3:// destinations; each model uses {staging}/{model}/
@@ -202,6 +204,8 @@ class Config:
     cleanup_logs_after_days: int = 0      # delete NF log files older than N days (0 = keep forever)
     cleanup_results: bool = False         # delete local .pt / .patch.h5 after WDS push succeeds
     nextflow_config: str = ""             # optional -c <file> passed to every nextflow run
+    nextflow_params_file: str = ""        # optional -params-file <file> passed to every nextflow run
+    nextflow_version: str = ""            # optional NXF_VER to pin the Nextflow version
     combined_manifest_path: Optional[str] = None  # defaults to {outdir}/manifest-combined.csv
     post_batch_hooks: list = field(default_factory=list)
     # list of {"command": "...", "args": ["..."]}
@@ -242,6 +246,10 @@ class Config:
         nf_cfg = raw.get("nextflow_config", "")
         if nf_cfg and not os.path.isabs(nf_cfg):
             raw["nextflow_config"] = os.path.join(config_dir, nf_cfg)
+        # nextflow_params_file: resolve relative to config dir if not absolute
+        nf_params = raw.get("nextflow_params_file", "")
+        if nf_params and not os.path.isabs(nf_params):
+            raw["nextflow_params_file"] = os.path.join(config_dir, nf_params)
 
         # Resolve path fields in watcher configs relative to the config file.
         # Applies to all string fields that represent filesystem paths.
@@ -295,8 +303,12 @@ class Config:
         """Generate post-batch hooks automatically from watcher configuration.
 
         For each tcga watcher:
-          - wds_dest set       → prepend a tcga_append_wds.py hook
+          - wds_dest set       → prepend a append_wds.py hook (routes via inventory)
           - databricks_volume_path set → append a tcga_sync_databricks.py hook
+
+        For each databricks watcher:
+          - wds_dest set       → prepend a append_wds.py hook (routes by oncotree_code
+                                 column in the batch CSV, no inventory required)
 
         Order per watcher: WDS append first, then Databricks sync.
         Explicit post_batch_hooks run after all auto-generated hooks.
@@ -304,6 +316,29 @@ class Config:
         hooks = []
         db_hooks = []
         for w in self.watchers:
+            if w.type == "databricks" and w.wds_destinations:
+                for model, dest in w.wds_destinations.items():
+                    args = [
+                        "--pt-dir={outdir}/features/" + model,
+                        "--h5-dir={outdir}/tiles",
+                        "--wds-dest=" + dest,
+                        "--model-type=" + model,
+                        "--slide-ids-csv={batch_csv}",
+                        "--project-id-column=oncotree_code",
+                        "--manifest-csv={outdir}/wds_manifest.csv",
+                    ]
+                    if w.wds_staging_dir:
+                        args.append("--staging-dir=" + w.wds_staging_dir)
+                    if w.wds_s3_max_concurrency != 4:
+                        args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
+                    if self.cleanup_results:
+                        args.append("--delete-local")
+                    hooks.append({
+                        "command": "python {repo_dir}/scripts/append_wds.py",
+                        "args": args,
+                    })
+                    log.debug("Auto hook: append_wds (databricks) model=%s dest=%s", model, dest)
+
             if w.type != "tcga":
                 continue
 
@@ -327,10 +362,10 @@ class Config:
                     if self.cleanup_results:
                         args.append("--delete-local")
                     hooks.append({
-                        "command": "python {repo_dir}/scripts/tcga/tcga_append_wds.py",
+                        "command": "python {repo_dir}/scripts/append_wds.py",
                         "args": args,
                     })
-                    log.debug("Auto hook: tcga_append_wds model=%s dest=%s", model, dest)
+                    log.debug("Auto hook: append_wds model=%s dest=%s", model, dest)
 
             if w.databricks_volume_folder or w.databricks_volume_path:
                 args = [
@@ -925,6 +960,11 @@ class DatabricksWatcher(threading.Thread):
         min_file_size_bytes  Skip slides with i.size < this value (default 10 MB).
         poll_interval_seconds  Seconds between polls. Defaults to 86400 (1 day) if
                                not set in config, since the IMPACT tables update infrequently.
+        wds_destinations  Optional {model: s3_or_local_path} dict. When set, a
+                          append_wds.py hook is auto-generated for each model
+                          that routes slides by oncotree_code into per-cancer-type shards.
+        wds_staging_dir   Local staging base dir for s3:// WDS destinations.
+        wds_s3_max_concurrency  Boto3 multipart threads per S3 upload (default 4).
     """
 
     _DEFAULT_POLL_INTERVAL = 86400  # 1 day
@@ -1437,6 +1477,8 @@ class NextflowRunner:
         ]
         if self.cfg.nextflow_config:
             cmd += ["-c", self.cfg.nextflow_config]
+        if self.cfg.nextflow_params_file:
+            cmd += ["-params-file", self.cfg.nextflow_params_file]
         # If this batch includes slides that need GDC download, pass the token
         # file to NF if configured (open-access TCGA data needs no token).
         has_download = any(s.get("needs_download") for s in self.slides)
@@ -1467,6 +1509,10 @@ class NextflowRunner:
 
         run_started_at = time.time()
         exit_code = -1
+        run_env = None
+        if self.cfg.nextflow_version:
+            run_env = dict(os.environ)
+            run_env["NXF_VER"] = self.cfg.nextflow_version
         try:
             with open(log_path, "w") as lf:
                 result = subprocess.run(
@@ -1474,6 +1520,7 @@ class NextflowRunner:
                     stdout=lf,
                     stderr=subprocess.STDOUT,
                     cwd=self.cfg.repo_dir,
+                    env=run_env,
                 )
             exit_code = result.returncode
         except Exception as e:

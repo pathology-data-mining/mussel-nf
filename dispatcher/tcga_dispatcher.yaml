@@ -13,6 +13,8 @@ work_base_dir: /gpfs/cdsi_ess/limr/nf/tcga-dispatch/work
 
 nextflow_profiles: cluster,slurm,conda
 outdir: tcga-results
+#nextflow_config: tcga_nextflow.config
+nextflow_version: "25.10.4"   # pin to avoid breaking changes in 26.x
 
 # Run up to 2 Nextflow jobs simultaneously
 max_concurrent_runs: 3
@@ -65,7 +67,7 @@ watchers:
     # NF caches downloads in params.download.local_dir (default: tcga-slides).
     # gdc_token_file: /path/to/gdc-user-token.txt
 
-    # When set, a tcga_append_wds.py post-batch hook is generated automatically
+    # When set, a append_wds.py post-batch hook is generated automatically
     # after each successful Nextflow run.  Supports s3:// and local paths.
     wds_destinations:
       hoptimus1: s3://reef-tcga-v2-0/wds/hoptimus1

@@ -1701,6 +1701,7 @@ class NextflowRunner:
                 if has_download:
                     file_id = s.get("file_id", "") or ""
                     file_name = s.get("file_name", "") or ""
+                    needs_dl = bool(s.get("needs_download"))
                     # Backfill from gdc:// URI if file_id/file_name are missing
                     if not file_id:
                         sp = s.get("slide_path", "")
@@ -1710,13 +1711,13 @@ class NextflowRunner:
                             if slash > 0:
                                 file_id = rest[:slash]
                                 file_name = rest[slash + 1:]
-                    if not file_id:
+                    if needs_dl and not file_id:
                         log.warning(
                             "Batch %s: slide %s needs_download but has no file_id — skipping",
                             self.batch_id, s.get("slide_id"),
                         )
                         continue
-                    row["needs_download"] = "true" if s.get("needs_download") else "false"
+                    row["needs_download"] = "true" if needs_dl else "false"
                     row["file_id"] = file_id
                     row["file_name"] = file_name
                 writer.writerow(row)

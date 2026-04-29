@@ -24,7 +24,7 @@ process DOWNLOAD_SLIDE {
 
     // Limit concurrent downloads to avoid overwhelming the GDC API.
     // Override with params.download.max_concurrent if needed.
-    maxForks { (params.download?.max_concurrent ?: 16) as int }
+    maxForks params.download.max_concurrent as int
 
     // Cache downloads outside the work directory so they survive -resume and
     // are shared across pipeline runs.  The path mirrors the layout written by

@@ -21,11 +21,11 @@ process TESSELLATE_FEATURIZE_BATCH {
                           // When using slide encoders, the required patch encoder is automatically inferred from params.featurize.slide_to_patch_mapping
 
     output:
-    tuple val(batch_metadata), val(model_type_input), path("pt/*.features.pt"), emit: pt
+    tuple val(batch_metadata), val(model_type_input), path("pt/*.features.pt"), optional: true, emit: pt
     tuple val(batch_metadata), val(model_type_input), path("h5/*.features.h5"), optional: true, emit: h5
     tuple val(batch_metadata), val(model_type), path("pt/*.patch_features.pt"), optional: true, emit: patch_pt
     tuple val(batch_metadata), val(model_type), path("h5/*.patch_features.h5"), optional: true, emit: patch_h5
-    tuple val(batch_metadata), path("tile_h5/*.patch.h5"), emit: tile_h5
+    tuple val(batch_metadata), path("tile_h5/*.patch.h5"), optional: true, emit: tile_h5
 
     script:
     // Determine if this is a slide-level model and infer the patch encoder

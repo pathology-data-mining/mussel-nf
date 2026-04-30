@@ -1638,6 +1638,10 @@ class NextflowRunner:
         if self.cfg.cleanup_work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
             log.info("Batch %s: removed work dir %s", self.batch_id, work_dir)
+            try:
+                os.rmdir(os.path.dirname(work_dir))  # remove empty batch_{id}/ parent
+            except OSError:
+                pass
 
         if not succeeded:
             return
@@ -1956,6 +1960,10 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
                 log.info("Startup cleanup: removing orphaned work dir for finished batch %s: %s",
                          batch["batch_id"], work_dir)
                 shutil.rmtree(work_dir, ignore_errors=True)
+                try:
+                    os.rmdir(os.path.dirname(work_dir))
+                except OSError:
+                    pass
 
     resume_specs = []
     running = state.get_running_batches()

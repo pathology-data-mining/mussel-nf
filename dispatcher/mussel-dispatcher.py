@@ -1299,11 +1299,28 @@ class TcgaWatcher(threading.Thread):
                 if self.state.is_known(db_key):
                     continue
                 # Check if this slide is permanently blacklisted (fail_count >= max_retries),
-                # or already SUCCEEDED via another path (e.g. s3://) — skip in both cases.
+                # or already SUCCEEDED/PENDING/DISPATCHED via another path (e.g. s3:// or
+                # a local path) — skip in both cases to avoid duplicate slide_id in batches.
                 existing = self.state.get_slides_by_id(slide_id)
                 if any(r.get("status") == "SUCCEEDED" for r in existing):
                     log.debug(
                         "TcgaWatcher: skipping %s — already SUCCEEDED via another path", slide_id
+                    )
+                    continue
+                # If already PENDING or DISPATCHED via a non-gdc path, don't add a second
+                # gdc:// entry — it would produce duplicate slide_ids in the batch CSV.
+                if any(
+                    r.get("status") in ("PENDING", "DISPATCHED")
+                    and not r.get("slide_path", "").startswith("gdc://")
+                    for r in existing
+                ):
+                    log.debug(
+                        "TcgaWatcher: skipping gdc:// for %s — already PENDING/DISPATCHED via %s",
+                        slide_id, next(
+                            r["slide_path"] for r in existing
+                            if r.get("status") in ("PENDING", "DISPATCHED")
+                            and not r.get("slide_path", "").startswith("gdc://")
+                        ),
                     )
                     continue
                 max_retries = self._max_slide_retries
@@ -1686,15 +1703,45 @@ class NextflowRunner:
     def _write_csv(self) -> str:
         os.makedirs(self.cfg.dispatch_dir, exist_ok=True)
         csv_path = os.path.join(self.cfg.dispatch_dir, f"batch_{self.batch_id}.csv")
+        # Deduplicate by slide_id: if the same slide_id appears with multiple paths
+        # (e.g. a local/s3 path AND a gdc:// path), keep the non-gdc:// one to avoid
+        # MERGE_SAMPLE_FEATURES input file name collisions.
+        seen_ids: dict[str, dict] = {}
+        for s in self.slides:
+            sid = s.get("slide_id", "")
+            if sid not in seen_ids:
+                seen_ids[sid] = s
+            else:
+                prev = seen_ids[sid]
+                # Prefer the non-gdc:// path (already downloaded local/s3 path)
+                if prev.get("slide_path", "").startswith("gdc://") and \
+                        not s.get("slide_path", "").startswith("gdc://"):
+                    log.warning(
+                        "Batch %s: duplicate slide_id %s — replacing gdc:// path with %s",
+                        self.batch_id, sid, s["slide_path"],
+                    )
+                    seen_ids[sid] = s
+                else:
+                    log.warning(
+                        "Batch %s: duplicate slide_id %s — keeping %s, dropping %s",
+                        self.batch_id, sid,
+                        prev.get("slide_path"), s.get("slide_path"),
+                    )
+        deduped_slides = list(seen_ids.values())
+        if len(deduped_slides) < len(self.slides):
+            log.warning(
+                "Batch %s: removed %d duplicate slide_id(s) before writing CSV",
+                self.batch_id, len(self.slides) - len(deduped_slides),
+            )
         # Include GDC download fields if any slide in the batch needs download.
-        has_download = any(s.get("needs_download") for s in self.slides)
+        has_download = any(s.get("needs_download") for s in deduped_slides)
         fieldnames = ["slide_id", "slide_path", "oncotree_code"]
         if has_download:
             fieldnames += ["needs_download", "file_id", "file_name"]
         with open(csv_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
-            for s in self.slides:
+            for s in deduped_slides:
                 if not s.get("slide_path"):
                     log.warning("Skipping slide %s with empty slide_path", s.get("slide_id"))
                     continue

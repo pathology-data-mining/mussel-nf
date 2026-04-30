@@ -158,7 +158,8 @@ class WatcherConfig:
     scripts_dir: str = ""  # path to scripts/tcga/; defaults to {repo_dir}/scripts/tcga
     # Per-model WDS destinations: {model_type: s3_or_local_path}.
     # A append_wds.py hook is auto-generated for each entry.
-    # Example: {ctranspath: s3://bucket/wds/ctranspath, uni2h: s3://bucket/wds/uni2h}
+    # Example: {ctranspath: s3://bucket/wds, uni2h: s3://bucket/wds}
+    # Note: append_wds.py appends /{model_type}/ automatically; do NOT include the model in the path.
     wds_destinations: dict = field(default_factory=dict)
     wds_staging_dir: str = ""  # local staging base for s3:// destinations; each model uses {staging}/{model}/
     wds_s3_max_concurrency: int = 4  # boto3 multipart threads per S3 upload/download (reduce to limit ECS load)

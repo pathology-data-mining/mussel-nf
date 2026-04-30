@@ -70,10 +70,12 @@ watchers:
 
     # When set, a append_wds.py post-batch hook is generated automatically
     # after each successful Nextflow run.  Supports s3:// and local paths.
+    # The destination is the base path; append_wds.py appends /{model_type}/
+    # automatically, so do NOT include the model name here.
     wds_destinations:
-      hoptimus1: s3://reef-tcga-v2-0/wds/hoptimus1
-      titan_slide: s3://reef-tcga-v2-0/wds/titan_slide
-      # uni2h: s3://your-bucket/wds/uni2h
+      hoptimus1: s3://reef-tcga-v2-0/wds
+      titan_slide: s3://reef-tcga-v2-0/wds
+      # uni2h: s3://your-bucket/wds
     wds_staging_dir: tcga-results/wds-staging   # local staging base for S3 uploads; each model uses {staging}/{model}/
 
     # When set, a tcga_sync_databricks.py post-batch hook is generated automatically.

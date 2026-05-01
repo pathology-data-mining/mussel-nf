@@ -98,6 +98,28 @@ def _load_coords(h5_path: Path) -> np.ndarray | None:
         return None
 
 
+def _load_slide_meta(h5_path: Path) -> tuple[np.ndarray | None, float | None]:
+    """Load coords array and native_mpp from a tile-coords HDF5 file.
+
+    Returns ``(coords, native_mpp)`` where either may be ``None`` on error.
+    The ``native_mpp`` is the slide's actual scanner resolution in µm/pixel,
+    stored in ``h5["coords"].attrs["native_mpp"]`` by Mussel.
+    """
+    try:
+        with h5py.File(h5_path, "r") as f:
+            coords = f["coords"][:].astype(np.int64)
+            attrs = dict(f["coords"].attrs)
+        if coords.ndim == 1:
+            coords = coords.reshape(1, -1)
+        native_mpp = attrs.get("native_mpp")
+        if native_mpp is not None:
+            native_mpp = float(native_mpp)
+        return coords, native_mpp
+    except Exception as exc:
+        log.warning("Could not read slide meta from %s: %s", h5_path, exc)
+        return None, None
+
+
 # ---------------------------------------------------------------------------
 # S3 helpers
 # ---------------------------------------------------------------------------
@@ -396,8 +418,9 @@ def append_wds(
 
         h5_path_for_slide: Path | None = h5_lookup.get(slide_id)
         coords: np.ndarray | None = None
+        native_mpp: float | None = None
         if h5_path_for_slide is not None:
-            coords = _load_coords(h5_path_for_slide)
+            coords, native_mpp = _load_slide_meta(h5_path_for_slide)
 
         if project_id not in writers:
             writers[project_id] = _ShardWriter(
@@ -414,6 +437,7 @@ def append_wds(
         index[slide_id] = {
             "project_id": project_id,
             "shard_file": f"{project_id}/{shard_name}",
+            "native_mpp": native_mpp,
         }
         n_appended += 1
         if delete_local:

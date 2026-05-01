@@ -32,6 +32,7 @@ STATUS_COLUMNS = [
     "model",
     "status",           # pending | done | failed
     "failure_reason",   # non-empty when status == "failed"
+    "native_mpp",       # slide scanner resolution µm/px; null when not recorded
     "wds_path",
     "wds_index_path",
     "last_updated",
@@ -147,6 +148,34 @@ def _load_dispatcher_failures(db_path: str | None) -> dict[str, str]:
         return {}
 
 
+def _load_slide_mpp(mpp_path: str | None) -> dict[str, float]:
+    """Load slide native MPP from a CSV → {slide_id: native_mpp}.
+
+    The CSV must have columns ``slide_id`` and ``native_mpp``.  Rows with
+    blank or non-positive MPP values are skipped.  This is populated by
+    ``append_wds.py`` (which reads native_mpp from h5 attrs before cleanup).
+    """
+    if not mpp_path:
+        return {}
+    p = Path(mpp_path)
+    if not p.exists():
+        log.warning("Slide MPP file not found: %s", mpp_path)
+        return {}
+    df = pd.read_csv(p, dtype=str).fillna("")
+    mapping: dict[str, float] = {}
+    for _, row in df.iterrows():
+        sid = row.get("slide_id", "")
+        mpp_str = row.get("native_mpp", "")
+        try:
+            mpp_val = float(mpp_str)
+            if mpp_val > 0 and sid:
+                mapping[sid] = mpp_val
+        except (ValueError, TypeError):
+            pass
+    log.info("Loaded native_mpp for %d slides from %s", len(mapping), mpp_path)
+    return mapping
+
+
 def _load_wds_manifest(manifest_path: str | None) -> dict[tuple[str, str], str]:
     """Load WDS manifest CSV → {(slide_id, model): wds_path}."""
     if not manifest_path:
@@ -170,6 +199,7 @@ def build_status(
     wds_manifest: dict[tuple[str, str], str] | None = None,
     wds_bases: dict[str, str] | None = None,
     failed_slides: dict[str, str] | None = None,
+    slide_mpp: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """Scan results_dir and WDS manifest for completed outputs.
 
@@ -177,6 +207,9 @@ def build_status(
                    wds_index_path = {base}/{model}/wds_index.json.
     failed_slides: optional {slide_id: error_msg} from the dispatcher DB;
                    slides in this map are marked 'failed' unless already 'done'.
+    slide_mpp:     optional {slide_id: native_mpp} mapping from the slide MPP
+                   CSV (populated by append_wds.py from h5 attrs); null when
+                   the h5 was not available or had no MPP metadata.
     """
     now = pd.Timestamp.now().isoformat()
     records = []
@@ -218,6 +251,8 @@ def build_status(
                 out_wds_path = ""
                 failure_reason = ""
 
+            native_mpp = (slide_mpp or {}).get(slide_id)
+
             records.append({
                 "file_id": row["file_id"],
                 "slide_id": slide_id,
@@ -226,6 +261,7 @@ def build_status(
                 "model": model,
                 "status": status,
                 "failure_reason": failure_reason,
+                "native_mpp": native_mpp,
                 "wds_path": out_wds_path,
                 "wds_index_path": wds_index_path,
                 "last_updated": now,

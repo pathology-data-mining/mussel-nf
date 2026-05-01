@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 STATUS_COLUMNS = [
     "slide_id", "file_id", "file_name",
     "project_id", "slide_type", "file_size",
-    "model", "status", "failure_reason", "native_mpp", "wds_path", "wds_index_path", "last_updated",
+    "model", "status", "failure_reason", "native_mpp", "mpp_is_fallback", "wds_path", "wds_index_path", "last_updated",
 ]
 
 
@@ -87,6 +87,15 @@ def build_export(status_df: pd.DataFrame, inventory_df: pd.DataFrame) -> pd.Data
         if col in result.columns:
             result = result.copy()
             result[col] = pd.to_numeric(result[col].replace("", None), errors="coerce")
+
+    # Cast boolean columns: empty strings / None → pd.NA so parquet writes boolean.
+    for col in ("mpp_is_fallback",):
+        if col in result.columns:
+            result = result.copy()
+            result[col] = result[col].map(
+                lambda v: True if v is True or str(v).lower() == "true"
+                else (False if v is False or str(v).lower() == "false" else pd.NA)
+            ).astype("boolean")
 
     return result
 

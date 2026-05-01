@@ -33,6 +33,7 @@ STATUS_COLUMNS = [
     "status",           # pending | done | failed
     "failure_reason",   # non-empty when status == "failed"
     "native_mpp",       # slide scanner resolution µm/px; null when not recorded
+    "mpp_is_fallback",  # True when Mussel used 0.5 default (no MPP in slide header)
     "wds_path",
     "wds_index_path",
     "last_updated",
@@ -148,12 +149,13 @@ def _load_dispatcher_failures(db_path: str | None) -> dict[str, str]:
         return {}
 
 
-def _load_slide_mpp(mpp_path: str | None) -> dict[str, float]:
-    """Load slide native MPP from a CSV → {slide_id: native_mpp}.
+def _load_slide_mpp(mpp_path: str | None) -> dict[str, tuple[float | None, bool | None]]:
+    """Load slide MPP metadata from a CSV → {slide_id: (native_mpp, mpp_is_fallback)}.
 
-    The CSV must have columns ``slide_id`` and ``native_mpp``.  Rows with
-    blank or non-positive MPP values are skipped.  This is populated by
-    ``append_wds.py`` (which reads native_mpp from h5 attrs before cleanup).
+    The CSV must have columns ``slide_id`` and ``native_mpp`` and optionally
+    ``source``.  ``mpp_is_fallback`` is True when the source ends in ``_no_mpp``
+    (slide file was found but its TIFF header had no MPP tag — Mussel used 0.5
+    default).  Rows with a blank slide_id are skipped.
     """
     if not mpp_path:
         return {}
@@ -162,17 +164,23 @@ def _load_slide_mpp(mpp_path: str | None) -> dict[str, float]:
         log.warning("Slide MPP file not found: %s", mpp_path)
         return {}
     df = pd.read_csv(p, dtype=str).fillna("")
-    mapping: dict[str, float] = {}
+    mapping: dict[str, tuple[float | None, bool | None]] = {}
     for _, row in df.iterrows():
         sid = row.get("slide_id", "")
+        if not sid:
+            continue
         mpp_str = row.get("native_mpp", "")
+        source = row.get("source", "")
         try:
-            mpp_val = float(mpp_str)
-            if mpp_val > 0 and sid:
-                mapping[sid] = mpp_val
+            mpp_val: float | None = float(mpp_str) if mpp_str and float(mpp_str) > 0 else None
         except (ValueError, TypeError):
-            pass
-    log.info("Loaded native_mpp for %d slides from %s", len(mapping), mpp_path)
+            mpp_val = None
+        # mpp_is_fallback: True when SVS header had no MPP tag (source ends in _no_mpp),
+        # False when a real value was read, None when slide wasn't in the MPP CSV at all.
+        mpp_is_fallback: bool | None = True if source.endswith("_no_mpp") else (False if source else None)
+        mapping[sid] = (mpp_val, mpp_is_fallback)
+    n = sum(1 for v, _ in mapping.values() if v is not None)
+    log.info("Loaded native_mpp for %d slides from %s", n, mpp_path)
     return mapping
 
 
@@ -207,9 +215,9 @@ def build_status(
                    wds_index_path = {base}/{model}/wds_index.json.
     failed_slides: optional {slide_id: error_msg} from the dispatcher DB;
                    slides in this map are marked 'failed' unless already 'done'.
-    slide_mpp:     optional {slide_id: native_mpp} mapping from the slide MPP
-                   CSV (populated by append_wds.py from h5 attrs); null when
-                   the h5 was not available or had no MPP metadata.
+    slide_mpp:     optional {slide_id: (native_mpp, mpp_is_fallback)} mapping from
+                   the slide MPP CSV (tcga_slide_mpp.csv); null when the CSV was
+                   not provided or the slide has no entry.
     """
     now = pd.Timestamp.now().isoformat()
     records = []
@@ -251,7 +259,7 @@ def build_status(
                 out_wds_path = ""
                 failure_reason = ""
 
-            native_mpp = (slide_mpp or {}).get(slide_id)
+            native_mpp, mpp_is_fallback = (slide_mpp or {}).get(slide_id, (None, None))
 
             records.append({
                 "file_id": row["file_id"],
@@ -262,6 +270,7 @@ def build_status(
                 "status": status,
                 "failure_reason": failure_reason,
                 "native_mpp": native_mpp,
+                "mpp_is_fallback": mpp_is_fallback,
                 "wds_path": out_wds_path,
                 "wds_index_path": wds_index_path,
                 "last_updated": now,

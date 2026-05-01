@@ -90,6 +90,8 @@ export DATABRICKS_HOST=https://<workspace>.azuredatabricks.net
 export DATABRICKS_TOKEN=<personal-access-token>
 ```
 
+Alternatively, the script reads credentials from `~/.databrickscfg` (the standard Databricks CLI config file) if the environment variables are not set. The `[DEFAULT]` profile is used.
+
 ### 5. Verify
 
 After the next successful batch, check the table in Databricks SQL:

@@ -93,6 +93,24 @@ def trigger_job(job_id: str, host: str, token: str, params: dict | None = None) 
     return run_id
 
 
+def _load_databrickscfg(host: str, token: str) -> tuple[str, str]:
+    """Fill missing host/token from ~/.databrickscfg [DEFAULT] section."""
+    cfg_path = Path.home() / ".databrickscfg"
+    if not cfg_path.exists():
+        return host, token
+    import configparser
+    cfg = configparser.ConfigParser()
+    cfg.read(cfg_path)
+    section = "DEFAULT"
+    if not host:
+        host = cfg.get(section, "host", fallback="")
+    if not token:
+        token = cfg.get(section, "token", fallback="")
+    if host or token:
+        log.debug("Loaded Databricks credentials from %s", cfg_path)
+    return host, token
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -134,9 +152,11 @@ def main(argv: list[str] | None = None) -> int:
     host = args.databricks_host or os.environ.get("DATABRICKS_HOST", "")
     token = args.token or os.environ.get("DATABRICKS_TOKEN", "")
     if not host or not token:
+        host, token = _load_databrickscfg(host, token)
+    if not host or not token:
         log.error(
-            "Databricks credentials required: set DATABRICKS_HOST / DATABRICKS_TOKEN "
-            "or use --databricks-host / --token"
+            "Databricks credentials required: set DATABRICKS_HOST / DATABRICKS_TOKEN, "
+            "use --databricks-host / --token, or configure ~/.databrickscfg"
         )
         return 1
 

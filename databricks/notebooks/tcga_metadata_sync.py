@@ -119,8 +119,10 @@ source_df.createOrReplaceTempView("_tcga_metadata_source")
 # ---------------------------------------------------------------------------
 # MERGE INTO target
 # Match on composite key (file_id, model).
-# When matched:   update all columns
-# When not matched: insert new row
+# When matched:            update all columns
+# When not matched:        insert new row
+# When not matched by src: delete (removes rows no longer in the export,
+#                          e.g. non-DX slides filtered out of a later run)
 # ---------------------------------------------------------------------------
 
 merge_sql = f"""
@@ -132,6 +134,8 @@ WHEN MATCHED THEN
     UPDATE SET *
 WHEN NOT MATCHED THEN
     INSERT *
+WHEN NOT MATCHED BY SOURCE THEN
+    DELETE
 """
 
 spark.sql(merge_sql)  # noqa: F821

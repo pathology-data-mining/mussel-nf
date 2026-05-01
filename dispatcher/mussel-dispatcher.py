@@ -1212,7 +1212,7 @@ class TcgaWatcher(threading.Thread):
             log.error("TcgaWatcher: inventory sync failed — skipping this poll")
             return
 
-        # 2. Update per-slide status from results directory
+        # 2. Update per-slide status from results directory + WDS manifest
         status_args = [
             "--inventory", self.cfg.inventory_csv,
             "--results-dir", self._outdir,
@@ -1220,6 +1220,9 @@ class TcgaWatcher(threading.Thread):
         ]
         if self.cfg.models:
             status_args += ["--model-types", ",".join(self.cfg.models)]
+        wds_manifest_path = os.path.join(self._outdir, "wds_manifest.csv")
+        if os.path.exists(wds_manifest_path):
+            status_args += ["--wds-manifest", wds_manifest_path]
         rc = self._run_script("tcga_update_status.py", status_args)
         if rc != 0:
             log.error("TcgaWatcher: status update failed — skipping this poll")

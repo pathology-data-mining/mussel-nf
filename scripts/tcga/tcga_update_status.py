@@ -55,44 +55,84 @@ def _slide_id_from_filename(file_name: str) -> str:
 
 
 def _find_pt_files(results_dir: Path, model: str) -> dict[str, Path]:
-    """Return {slide_id: pt_path} for all .features.pt files under a model's pt dir."""
-    pt_dir = results_dir / "features" / model / "pt"
-    if not pt_dir.exists():
+    """Return {slide_id: pt_path} for all .features.pt files for a model.
+
+    The pipeline publishes flat to features/<model>/*.features.pt.
+    Also checks the legacy features/<model>/pt/ subdirectory layout.
+    """
+    model_dir = results_dir / "features" / model
+    if not model_dir.exists():
         return {}
-    return {
-        pt_file.name.replace(".features.pt", ""): pt_file
-        for pt_file in pt_dir.rglob("*.features.pt")
-    }
+    result = {}
+    # Flat layout (current): features/<model>/*.features.pt
+    for pt_file in model_dir.glob("*.features.pt"):
+        result[pt_file.name.replace(".features.pt", "")] = pt_file
+    # Legacy layout: features/<model>/pt/*.features.pt
+    pt_subdir = model_dir / "pt"
+    if pt_subdir.exists():
+        for pt_file in pt_subdir.rglob("*.features.pt"):
+            result[pt_file.name.replace(".features.pt", "")] = pt_file
+    return result
 
 
 def _find_h5_files(results_dir: Path, model: str) -> dict[str, Path]:
-    """Return {slide_id: h5_path} for all .patch.h5 files under a model's h5 dir."""
-    h5_dir = results_dir / "features" / model / "h5"
-    if not h5_dir.exists():
+    """Return {slide_id: h5_path} for all slide-level .h5 files for a model.
+
+    The pipeline publishes flat to features/<model>/*.features.h5.
+    Also checks the legacy features/<model>/h5/ subdirectory layout (*.patch.h5).
+    """
+    model_dir = results_dir / "features" / model
+    if not model_dir.exists():
         return {}
-    return {
-        h5_file.name.replace(".patch.h5", ""): h5_file
-        for h5_file in h5_dir.rglob("*.patch.h5")
-    }
+    result = {}
+    # Flat layout (current): features/<model>/*.features.h5
+    for h5_file in model_dir.glob("*.features.h5"):
+        result[h5_file.name.replace(".features.h5", "")] = h5_file
+    # Legacy layout: features/<model>/h5/*.patch.h5
+    h5_subdir = model_dir / "h5"
+    if h5_subdir.exists():
+        for h5_file in h5_subdir.rglob("*.patch.h5"):
+            result[h5_file.name.replace(".patch.h5", "")] = h5_file
+    return result
 
 
 def _discover_models(results_dir: Path) -> list[str]:
-    """Auto-discover model types by scanning results/features/*/pt/ directories."""
+    """Auto-discover model types by scanning results/features/*/ directories."""
     features_dir = results_dir / "features"
     if not features_dir.exists():
         return []
     return sorted(
         d.name for d in features_dir.iterdir()
-        if d.is_dir() and (d / "pt").exists()
+        if d.is_dir() and (
+            any(d.glob("*.features.pt"))        # flat layout
+            or (d / "pt").exists()              # legacy layout
+        )
     )
+
+
+def _load_wds_manifest(manifest_path: str | None) -> dict[tuple[str, str], str]:
+    """Load WDS manifest CSV → {(slide_id, model): wds_path}."""
+    if not manifest_path:
+        return {}
+    p = Path(manifest_path)
+    if not p.exists():
+        log.warning("WDS manifest not found: %s", manifest_path)
+        return {}
+    df = pd.read_csv(p, dtype=str).fillna("")
+    mapping = {}
+    for _, row in df.iterrows():
+        mapping[(row["slide_id"], row["model"])] = row.get("wds_path", "")
+    log.info("Loaded WDS manifest: %d entries from %s", len(mapping), manifest_path)
+    return mapping
 
 
 def build_status(
     inventory_df: pd.DataFrame,
     results_dir: Path,
     model_types: list[str],
+    wds_manifest: dict[tuple[str, str], str] | None = None,
 ) -> pd.DataFrame:
-    """Scan results_dir for completed outputs and return a status DataFrame."""
+    """Scan results_dir and WDS manifest for completed outputs."""
     now = pd.Timestamp.now().isoformat()
     records = []
 
@@ -103,17 +143,34 @@ def build_status(
 
         for _, row in inventory_df.iterrows():
             slide_id = _slide_id_from_filename(row["file_name"])
-            pt_path = pt_map.get(slide_id)
-            h5_path = h5_map.get(slide_id)
+            pt_path_local = pt_map.get(slide_id)
+            h5_path_local = h5_map.get(slide_id)
+            wds_path = (wds_manifest or {}).get((slide_id, model), "")
+
+            if pt_path_local is not None:
+                # Local file present (not yet cleaned up) — use it.
+                status = "done"
+                pt_path = str(pt_path_local)
+                h5_path = str(h5_path_local) if h5_path_local else ""
+            elif wds_path:
+                # In WDS on S3 — mark done with S3 path.
+                status = "done"
+                pt_path = wds_path
+                h5_path = wds_path
+            else:
+                status = "pending"
+                pt_path = ""
+                h5_path = ""
+
             records.append({
                 "file_id": row["file_id"],
                 "slide_id": slide_id,
                 "project_id": row.get("project_id", ""),
                 "slide_type": row.get("slide_type", ""),
                 "model": model,
-                "status": "done" if pt_path is not None else "pending",
-                "pt_path": str(pt_path) if pt_path else "",
-                "h5_path": str(h5_path) if h5_path else "",
+                "status": status,
+                "pt_path": pt_path,
+                "h5_path": h5_path,
                 "last_updated": now,
             })
 
@@ -148,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
                              "Defaults to auto-discovery from results/features/*/pt/ dirs.")
     parser.add_argument("--output", default="tcga_status.csv",
                         help="Output CSV path (default: tcga_status.csv)")
+    parser.add_argument("--wds-manifest", default=None,
+                        help="Path to wds_manifest.csv (slide_id,model,wds_path). "
+                             "Slides in the manifest are marked 'done' with the S3 WDS "
+                             "shard path, even if local .pt files have been cleaned up.")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
@@ -160,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Loaded %d slides from %s", len(inventory_df), args.inventory)
 
     results_dir = Path(args.results_dir)
+    wds_manifest = _load_wds_manifest(args.wds_manifest)
 
     if args.model_types:
         model_types = [m.strip() for m in args.model_types.split(",") if m.strip()]
@@ -169,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
             log.info("Auto-discovered models: %s", ", ".join(model_types))
         else:
             log.warning("No completed model outputs found in %s — status will show all as pending", results_dir)
-    status_df = build_status(inventory_df, Path(args.results_dir), model_types)
+    status_df = build_status(inventory_df, Path(args.results_dir), model_types, wds_manifest=wds_manifest)
     print_summary(status_df)
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

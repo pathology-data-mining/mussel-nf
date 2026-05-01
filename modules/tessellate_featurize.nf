@@ -93,6 +93,13 @@ process TESSELLATE_FEATURIZE_BATCH {
     // This is the batch size passed to the slide encoder model.
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
+    // SLIDE PATCH LIMIT: Subsample patches before slide-level aggregation if a slide
+    // exceeds this count. Prevents CUDA OOM for TITAN_SLIDE (O(N²) alibi attention).
+    // Default null = no limit. Recommended: 4096 for V100 GPUs, 8192 for A100.
+    slide_max_patches_str = (params.featurize.slide_max_patches != null)
+        ? "max_slide_patches=${params.featurize.slide_max_patches}"
+        : ""
+
     // Resolve per-model batch size override, falling back to global default
     batch_size = (params.featurize.model_batch_sizes && params.featurize.model_batch_sizes[model_type.toUpperCase()])
         ? params.featurize.model_batch_sizes[model_type.toUpperCase()]
@@ -133,6 +140,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
         batch_size=${batch_size} \
         slide_batch_size=${slide_batch_size} \
+        ${slide_max_patches_str} \
         ${slide_model_str} \
         ${aggregation_str} \
         ${prefilter_model_str} \

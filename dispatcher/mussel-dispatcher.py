@@ -1873,7 +1873,12 @@ class BatchScheduler:
             from botocore.config import Config as BotocoreConfig
         except ImportError:
             return None
-        s3_cfg = BotocoreConfig(max_pool_connections=self._S3_CHECK_WORKERS)
+        s3_cfg = BotocoreConfig(
+            max_pool_connections=self._S3_CHECK_WORKERS,
+            connect_timeout=10,
+            read_timeout=10,
+            retries={"max_attempts": 1},
+        )
         for w in self.cfg.watchers:
             kwargs: dict = {"config": s3_cfg}
             if w.s3_access_key and w.s3_secret_key:

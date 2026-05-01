@@ -282,6 +282,14 @@
                     "default": 8,
                     "description": "Number of slides to process together in a batch (controls both Type 2 and Type 3 batching)"
                 },
+                "slide_max_patches": {
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "description": "Maximum number of patches passed to slide-level encoders (e.g. gigapath_slide, titan_slide) per slide. Null keeps all patches. Useful to cap memory usage and prevent OOM for very large slides."
+                },
                 "max_tiles_per_sample": {
                     "type": [
                         "integer",

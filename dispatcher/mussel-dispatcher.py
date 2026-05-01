@@ -1220,6 +1220,8 @@ class TcgaWatcher(threading.Thread):
         ]
         if self.cfg.models:
             status_args += ["--model-types", ",".join(self.cfg.models)]
+        if self.cfg.slide_type and self.cfg.slide_type.lower() != "all":
+            status_args += ["--slide-type", self.cfg.slide_type]
         wds_manifest_path = os.path.join(self._outdir, "wds_manifest.csv")
         if os.path.exists(wds_manifest_path):
             status_args += ["--wds-manifest", wds_manifest_path]

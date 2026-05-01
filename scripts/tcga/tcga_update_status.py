@@ -198,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--inventory", default="tcga_inventory.csv",
                         help="Path to tcga_inventory.csv")
+    parser.add_argument("--slide-type", default=None,
+                        help="Filter inventory by slide_type prefix (e.g. 'DX' matches DX1, DX2, …). "
+                             "Defaults to no filter.")
     parser.add_argument("--results-dir", required=True,
                         help="Local nextflow results directory (contains features/<model>/pt/)")
     parser.add_argument("--model-types", default=None,
@@ -219,6 +222,11 @@ def main(argv: list[str] | None = None) -> int:
 
     inventory_df = pd.read_csv(args.inventory, dtype=str).fillna("")
     log.info("Loaded %d slides from %s", len(inventory_df), args.inventory)
+
+    if args.slide_type and "slide_type" in inventory_df.columns:
+        before = len(inventory_df)
+        inventory_df = inventory_df[inventory_df["slide_type"].str.startswith(args.slide_type, na=False)]
+        log.info("Filtered to slide_type '%s*': %d → %d slides", args.slide_type, before, len(inventory_df))
 
     results_dir = Path(args.results_dir)
     wds_manifest = _load_wds_manifest(args.wds_manifest)

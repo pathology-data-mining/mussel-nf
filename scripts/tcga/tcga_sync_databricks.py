@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 STATUS_COLUMNS = [
     "slide_id", "file_id", "file_name",
     "project_id", "slide_type", "file_size",
-    "model", "status", "failure_reason", "wds_path", "wds_index_path", "last_updated",
+    "model", "status", "failure_reason", "native_mpp", "wds_path", "wds_index_path", "last_updated",
 ]
 
 
@@ -78,7 +78,17 @@ def build_export(status_df: pd.DataFrame, inventory_df: pd.DataFrame) -> pd.Data
     # Put STATUS_COLUMNS first, then any extra inventory columns.
     leading = [c for c in STATUS_COLUMNS if c in merged.columns]
     extra = [c for c in merged.columns if c not in leading]
-    return merged[leading + extra]
+    result = merged[leading + extra]
+
+    # Cast numeric columns: empty strings → NaN so parquet writes correct type.
+    for col in ("native_mpp", "file_size", "age_at_index",
+                "percent_tumor_cells", "percent_stromal_cells",
+                "percent_necrosis", "percent_normal_cells"):
+        if col in result.columns:
+            result = result.copy()
+            result[col] = pd.to_numeric(result[col].replace("", None), errors="coerce")
+
+    return result
 
 
 def upload_parquet(local_path: Path, volume_path: str, host: str, token: str) -> None:

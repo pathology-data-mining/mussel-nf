@@ -1253,6 +1253,9 @@ class TcgaWatcher(threading.Thread):
                 log.warning("TcgaWatcher: could not export failed slides from DB: %s", exc)
         if os.path.exists(failed_csv):
             status_args += ["--dispatcher-db", failed_csv]
+        slide_mpp_csv = os.path.join(os.path.dirname(__file__), "tcga_slide_mpp.csv")
+        if os.path.exists(slide_mpp_csv):
+            status_args += ["--slide-mpp", slide_mpp_csv]
         rc = self._run_script("tcga_update_status.py", status_args)
         if rc != 0:
             log.error("TcgaWatcher: status update failed — skipping this poll")

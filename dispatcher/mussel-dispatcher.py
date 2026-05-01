@@ -1225,6 +1225,11 @@ class TcgaWatcher(threading.Thread):
         wds_manifest_path = os.path.join(self._outdir, "wds_manifest.csv")
         if os.path.exists(wds_manifest_path):
             status_args += ["--wds-manifest", wds_manifest_path]
+        if self.cfg.wds_destinations:
+            wds_base_parts = ",".join(
+                f"{model}={dest}" for model, dest in self.cfg.wds_destinations.items()
+            )
+            status_args += ["--wds-base", wds_base_parts]
         rc = self._run_script("tcga_update_status.py", status_args)
         if rc != 0:
             log.error("TcgaWatcher: status update failed — skipping this poll")

@@ -31,8 +31,8 @@ STATUS_COLUMNS = [
     "slide_type",
     "model",
     "status",       # pending | done
-    "pt_path",
-    "h5_path",
+    "wds_path",
+    "wds_index_path",
     "last_updated",
 ]
 
@@ -131,8 +131,13 @@ def build_status(
     results_dir: Path,
     model_types: list[str],
     wds_manifest: dict[tuple[str, str], str] | None = None,
+    wds_bases: dict[str, str] | None = None,
 ) -> pd.DataFrame:
-    """Scan results_dir and WDS manifest for completed outputs."""
+    """Scan results_dir and WDS manifest for completed outputs.
+
+    wds_bases: optional {model: s3://base/wds} mapping used to derive
+               wds_index_path = {base}/{model}/wds_index.json.
+    """
     now = pd.Timestamp.now().isoformat()
     records = []
 
@@ -140,6 +145,12 @@ def build_status(
         pt_map = _find_pt_files(results_dir, model)
         h5_map = _find_h5_files(results_dir, model)
         log.info("Model %-20s  %d .pt files,  %d .h5 files", model, len(pt_map), len(h5_map))
+
+        # Build wds_index_path for this model if base is known.
+        wds_index_path = ""
+        if wds_bases and model in wds_bases:
+            base = wds_bases[model].rstrip("/")
+            wds_index_path = f"{base}/{model}/wds_index.json"
 
         for _, row in inventory_df.iterrows():
             slide_id = _slide_id_from_filename(row["file_name"])
@@ -150,17 +161,14 @@ def build_status(
             if pt_path_local is not None:
                 # Local file present (not yet cleaned up) — use it.
                 status = "done"
-                pt_path = str(pt_path_local)
-                h5_path = str(h5_path_local) if h5_path_local else ""
+                out_wds_path = str(pt_path_local)
             elif wds_path:
-                # In WDS on S3 — mark done with S3 path.
+                # In WDS on S3 — mark done with S3 shard path.
                 status = "done"
-                pt_path = wds_path
-                h5_path = wds_path
+                out_wds_path = wds_path
             else:
                 status = "pending"
-                pt_path = ""
-                h5_path = ""
+                out_wds_path = ""
 
             records.append({
                 "file_id": row["file_id"],
@@ -169,8 +177,8 @@ def build_status(
                 "slide_type": row.get("slide_type", ""),
                 "model": model,
                 "status": status,
-                "pt_path": pt_path,
-                "h5_path": h5_path,
+                "wds_path": out_wds_path,
+                "wds_index_path": wds_index_path,
                 "last_updated": now,
             })
 
@@ -212,6 +220,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Path to wds_manifest.csv (slide_id,model,wds_path). "
                              "Slides in the manifest are marked 'done' with the S3 WDS "
                              "shard path, even if local .pt files have been cleaned up.")
+    parser.add_argument("--wds-base", default=None,
+                        help="Comma-separated model=s3://base pairs for wds_index_path column. "
+                             "Example: 'hoptimus1=s3://reef-tcga-v2-0/wds,titan_slide=s3://reef-tcga-v2-0/wds'")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
@@ -231,6 +242,13 @@ def main(argv: list[str] | None = None) -> int:
     results_dir = Path(args.results_dir)
     wds_manifest = _load_wds_manifest(args.wds_manifest)
 
+    wds_bases: dict[str, str] = {}
+    if args.wds_base:
+        for part in args.wds_base.split(","):
+            if "=" in part:
+                model_key, base = part.split("=", 1)
+                wds_bases[model_key.strip()] = base.strip()
+
     if args.model_types:
         model_types = [m.strip() for m in args.model_types.split(",") if m.strip()]
     else:
@@ -239,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
             log.info("Auto-discovered models: %s", ", ".join(model_types))
         else:
             log.warning("No completed model outputs found in %s — status will show all as pending", results_dir)
-    status_df = build_status(inventory_df, Path(args.results_dir), model_types, wds_manifest=wds_manifest)
+    status_df = build_status(inventory_df, Path(args.results_dir), model_types,
+                             wds_manifest=wds_manifest, wds_bases=wds_bases or None)
     print_summary(status_df)
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

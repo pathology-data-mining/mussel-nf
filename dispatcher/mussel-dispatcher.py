@@ -1230,6 +1230,29 @@ class TcgaWatcher(threading.Thread):
                 f"{model}={dest}" for model, dest in self.cfg.wds_destinations.items()
             )
             status_args += ["--wds-base", wds_base_parts]
+        # Export FAILED slides from dispatcher DB to a CSV the status script can read.
+        # (Direct sqlite3 import may fail in some conda environments due to libstdc++ version.)
+        failed_csv = os.path.join(os.path.dirname(__file__), "tcga_failed_slides.csv")
+        dispatcher_db = os.path.join(os.path.dirname(__file__), "state", "dispatcher.db")
+        if os.path.exists(dispatcher_db):
+            try:
+                import sqlite3 as _sqlite3
+                conn = _sqlite3.connect(f"file:{dispatcher_db}?mode=ro", uri=True)
+                rows = conn.execute(
+                    "SELECT slide_id, error_msg FROM slides WHERE status='FAILED'"
+                ).fetchall()
+                conn.close()
+                import csv as _csv
+                with open(failed_csv, "w", newline="") as fh:
+                    w = _csv.writer(fh)
+                    w.writerow(["slide_id", "failure_reason"])
+                    for sid, msg in rows:
+                        w.writerow([sid, msg or "Failed after max retries"])
+                log.info("TcgaWatcher: exported %d FAILED slides to %s", len(rows), failed_csv)
+            except Exception as exc:
+                log.warning("TcgaWatcher: could not export failed slides from DB: %s", exc)
+        if os.path.exists(failed_csv):
+            status_args += ["--dispatcher-db", failed_csv]
         rc = self._run_script("tcga_update_status.py", status_args)
         if rc != 0:
             log.error("TcgaWatcher: status update failed — skipping this poll")

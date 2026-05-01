@@ -106,6 +106,19 @@ WHERE 1 = 0
 spark.sql(create_sql)  # noqa: F821
 print(f"Table ensured  : {target_table}")
 
+# ---------------------------------------------------------------------------
+# Schema evolution: add any columns present in the source but missing from
+# the target Delta table.  This handles iterative schema additions (e.g. a
+# new 'failure_reason' column) without requiring a full DROP + recreate.
+# ---------------------------------------------------------------------------
+
+target_cols = set(spark.table(target_table).columns)  # noqa: F821
+for field in source_df.schema:
+    if field.name not in target_cols:
+        dtype = field.dataType.simpleString()
+        spark.sql(f"ALTER TABLE {target_table} ADD COLUMN IF NOT EXISTS `{field.name}` {dtype}")  # noqa: F821
+        print(f"Added column   : {field.name} ({dtype})")
+
 # COMMAND ----------
 
 # ---------------------------------------------------------------------------

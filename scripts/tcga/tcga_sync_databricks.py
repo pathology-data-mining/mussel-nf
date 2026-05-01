@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 STATUS_COLUMNS = [
     "slide_id", "file_id", "file_name",
     "project_id", "slide_type", "file_size",
-    "model", "status", "wds_path", "wds_index_path", "last_updated",
+    "model", "status", "failure_reason", "wds_path", "wds_index_path", "last_updated",
 ]
 
 

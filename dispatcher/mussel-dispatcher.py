@@ -1597,6 +1597,7 @@ class NextflowRunner:
             log.info("Batch %s completed successfully.", self.batch_id)
             self._collect_manifest(run_started_at)
             self._run_post_batch_hooks(csv_path)
+            self._verify_wds_coverage(csv_path)
             self._cleanup(csv_path, log_path, work_dir, succeeded=True)
         else:
             log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
@@ -1647,6 +1648,68 @@ class NextflowRunner:
                     log.info("Post-batch hook succeeded")
             except Exception as exc:
                 log.error("Post-batch hook raised: %s", exc)
+
+    def _verify_wds_coverage(self, batch_csv: str) -> None:
+        """After append_wds hooks, verify all batch slides appear in WDS for every
+        configured model. Slides missing from any model are reset to PENDING so they
+        get retried — append_wds.py will skip already-indexed slides on the next run."""
+        import csv as _csv
+        from collections import defaultdict
+
+        # Collect required models from TcgaWatcher wds_destinations configs
+        required_models: set[str] = set()
+        for w in self.cfg.watchers:
+            if hasattr(w, "wds_destinations") and w.wds_destinations:
+                required_models.update(w.wds_destinations.keys())
+        if not required_models:
+            return
+
+        manifest_path = os.path.join(self.cfg.outdir, "wds_manifest.csv")
+        if not os.path.exists(manifest_path):
+            log.debug("_verify_wds_coverage: manifest not found at %s, skipping", manifest_path)
+            return
+
+        # Read current WDS coverage per model
+        wds_by_model: dict[str, set[str]] = defaultdict(set)
+        with open(manifest_path) as f:
+            for row in _csv.DictReader(f):
+                wds_by_model[row["model"]].add(row["slide_id"])
+
+        # Read batch slide IDs
+        batch_ids: set[str] = set()
+        with open(batch_csv) as f:
+            for row in _csv.DictReader(f):
+                batch_ids.add(row["slide_id"])
+
+        # Slides missing from at least one required model
+        incomplete: set[str] = set()
+        for slide_id in batch_ids:
+            for model in required_models:
+                if slide_id not in wds_by_model.get(model, set()):
+                    incomplete.add(slide_id)
+                    break
+
+        if not incomplete:
+            log.info("Batch %s: WDS coverage verified — all %d slide(s) present for all models.",
+                     self.batch_id, len(batch_ids))
+            return
+
+        log.warning(
+            "Batch %s: %d/%d slide(s) missing from WDS for ≥1 model — resetting to PENDING: %s%s",
+            self.batch_id, len(incomplete), len(batch_ids),
+            ", ".join(sorted(incomplete)[:5]),
+            " …" if len(incomplete) > 5 else "",
+        )
+        conn = self.state._conn()
+        conn.executemany(
+            "UPDATE slides SET status='PENDING', fail_count=fail_count+1, "
+            "batch_id=NULL, dispatched_at=NULL "
+            "WHERE slide_id=? AND status='SUCCEEDED'",
+            [(sid,) for sid in incomplete],
+        )
+        conn.commit()
+        log.info("Batch %s: reset %d incomplete slide(s) to PENDING (will retry).",
+                 self.batch_id, len(incomplete))
 
     def _cleanup(self, csv_path: str, log_path: str, work_dir: str, *, succeeded: bool = True):
         """Post-batch cleanup. Work dir is removed on both success and failure when enabled.

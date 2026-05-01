@@ -98,12 +98,12 @@ def _load_coords(h5_path: Path) -> np.ndarray | None:
         return None
 
 
-def _load_slide_meta(h5_path: Path) -> tuple[np.ndarray | None, float | None]:
-    """Load coords array and native_mpp from a tile-coords HDF5 file.
+def _load_slide_meta(h5_path: Path) -> tuple[np.ndarray | None, float | None, bool | None]:
+    """Load coords array and MPP metadata from a tile-coords HDF5 file.
 
-    Returns ``(coords, native_mpp)`` where either may be ``None`` on error.
-    The ``native_mpp`` is the slide's actual scanner resolution in µm/pixel,
-    stored in ``h5["coords"].attrs["native_mpp"]`` by Mussel.
+    Returns ``(coords, native_mpp, mpp_is_fallback)`` where any may be ``None``
+    on error.  ``mpp_is_fallback`` is ``True`` when Mussel used the 0.5 µm/px
+    default because no MPP metadata was found in the slide.
     """
     try:
         with h5py.File(h5_path, "r") as f:
@@ -114,10 +114,13 @@ def _load_slide_meta(h5_path: Path) -> tuple[np.ndarray | None, float | None]:
         native_mpp = attrs.get("native_mpp")
         if native_mpp is not None:
             native_mpp = float(native_mpp)
-        return coords, native_mpp
+        mpp_is_fallback = attrs.get("mpp_is_fallback")
+        if mpp_is_fallback is not None:
+            mpp_is_fallback = bool(mpp_is_fallback)
+        return coords, native_mpp, mpp_is_fallback
     except Exception as exc:
         log.warning("Could not read slide meta from %s: %s", h5_path, exc)
-        return None, None
+        return None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -419,8 +422,9 @@ def append_wds(
         h5_path_for_slide: Path | None = h5_lookup.get(slide_id)
         coords: np.ndarray | None = None
         native_mpp: float | None = None
+        mpp_is_fallback: bool | None = None
         if h5_path_for_slide is not None:
-            coords, native_mpp = _load_slide_meta(h5_path_for_slide)
+            coords, native_mpp, mpp_is_fallback = _load_slide_meta(h5_path_for_slide)
 
         if project_id not in writers:
             writers[project_id] = _ShardWriter(
@@ -438,6 +442,7 @@ def append_wds(
             "project_id": project_id,
             "shard_file": f"{project_id}/{shard_name}",
             "native_mpp": native_mpp,
+            "mpp_is_fallback": mpp_is_fallback,
         }
         n_appended += 1
         if delete_local:

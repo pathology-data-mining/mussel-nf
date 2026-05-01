@@ -201,6 +201,8 @@ process TESSELLATE_FEATURIZE_BATCH {
             with h5py.File(f"h5/{sid}.patch_features.h5", "w") as f:
                 f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
         with h5py.File(f"tile_h5/{sid}.patch.h5", "w") as f:
-            f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+            ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+            ds.attrs["native_mpp"] = 0.5
+            ds.attrs["mpp_is_fallback"] = False
     """
 }

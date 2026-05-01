@@ -3,7 +3,7 @@ include { LINEAR_PROBE } from './linear_probe'
 
 include { FEATURIZE_BATCH; FEATURIZE_BATCH as FILTER_FEATURIZE } from './featurize'
 
-include { TESSELLATE; FILTER_TILES } from './tessellation'
+include { TESSELLATE; FILTER_TILES; EMIT_MPP_META } from './tessellation'
 
 include { TESSELLATE_FEATURIZE_BATCH } from './tessellate_featurize'
 
@@ -17,6 +17,7 @@ workflow EXTRACT_FEATURES {
 
     main:
         ch_patches = TESSELLATE(ch_samples)
+        EMIT_MPP_META(ch_patches.h5)
 
         if (params.tiling.filter_tiles) {
             // Batch slides for filtering feature extraction
@@ -193,6 +194,8 @@ workflow EXTRACT_FEATURES_ONE_STEP {
                     tuple(meta, patch_h5_file)
                 }
             }
+
+        EMIT_MPP_META(ch_patches_out)
 
     emit:
         patches_h5 = ch_patches_out

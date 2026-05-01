@@ -70,7 +70,39 @@ process TESSELLATE {
     #!/usr/bin/env python3
     import h5py, numpy as np
     with h5py.File("${meta.slide_id}.patch.h5", "w") as f:
-        f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+        ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+        ds.attrs["native_mpp"] = 0.5
+        ds.attrs["mpp_is_fallback"] = False
+    """
+}
+
+process EMIT_MPP_META {
+    label "localTask"
+
+    input:
+    tuple val(meta), path(tile_h5)
+
+    output:
+    tuple val(meta), val("mpp_is_fallback"), env('MPP_IS_FALLBACK'), topic: slide_meta
+
+    script:
+    """
+    export MPP_IS_FALLBACK=\$(python3 - <<'PYEOF'
+import h5py, sys
+try:
+    with h5py.File("${tile_h5}", "r") as f:
+        flag = f["coords"].attrs.get("mpp_is_fallback", None)
+    print("true" if flag else "false")
+except Exception as e:
+    print("unknown", file=sys.stderr)
+    print("unknown")
+PYEOF
+)
+    """
+
+    stub:
+    """
+    export MPP_IS_FALLBACK=false
     """
 }
 

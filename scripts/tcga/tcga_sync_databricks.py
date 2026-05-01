@@ -37,7 +37,10 @@ import requests
 
 log = logging.getLogger(__name__)
 
-EXPORT_COLUMNS = [
+# Columns emitted first (from status), followed by all remaining inventory columns.
+# Any inventory column not already in status is appended automatically so the
+# export always carries the full clinical metadata.
+STATUS_COLUMNS = [
     "slide_id", "file_id", "file_name",
     "project_id", "slide_type", "file_size",
     "model", "status", "pt_path", "h5_path", "last_updated",
@@ -45,28 +48,37 @@ EXPORT_COLUMNS = [
 
 
 def build_export(status_df: pd.DataFrame, inventory_df: pd.DataFrame) -> pd.DataFrame:
-    """Join status and inventory into a flat export DataFrame."""
-    inv_cols = ["file_id", "file_name", "file_size"]
-    # Add project_id / slide_type from inventory only if missing in status
-    for col in ("project_id", "slide_type"):
-        if col not in status_df.columns or status_df[col].eq("").all():
-            inv_cols.append(col)
+    """Join status and inventory into a flat export DataFrame.
+
+    All inventory columns are included; status columns take precedence for
+    any overlapping fields (project_id, slide_type).
+    """
+    # Bring all inventory columns into the merge; status columns win on conflict.
+    all_inv_cols = list(inventory_df.columns)
 
     merged = status_df.merge(
-        inventory_df[list(dict.fromkeys(["file_id"] + inv_cols))],
+        inventory_df,
         on="file_id",
         how="left",
         suffixes=("", "_inv"),
     )
 
+    # For columns present in both: fill blanks in status column from inventory.
     for col in ("project_id", "slide_type"):
         inv_col = f"{col}_inv"
         if inv_col in merged.columns:
-            merged[col] = merged[col].fillna(merged[inv_col]).replace("", None)
-            merged[col] = merged[col].fillna(merged[inv_col])
+            merged[col] = merged[col].replace("", None).fillna(merged[inv_col])
             merged = merged.drop(columns=[inv_col])
 
-    return merged.reindex(columns=[c for c in EXPORT_COLUMNS if c in merged.columns])
+    # Drop any other _inv suffix duplicates (inventory columns already in status).
+    dup_cols = [c for c in merged.columns if c.endswith("_inv")]
+    if dup_cols:
+        merged = merged.drop(columns=dup_cols)
+
+    # Put STATUS_COLUMNS first, then any extra inventory columns.
+    leading = [c for c in STATUS_COLUMNS if c in merged.columns]
+    extra = [c for c in merged.columns if c not in leading]
+    return merged[leading + extra]
 
 
 def upload_parquet(local_path: Path, volume_path: str, host: str, token: str) -> None:

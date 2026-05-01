@@ -13,19 +13,7 @@
         },
         "source": "WORKSPACE"
       },
-      "new_cluster": {
-        "spark_version": "15.4.x-scala2.12",
-        "node_type_id": "Standard_DS3_v2",
-        "num_workers": 0,
-        "spark_conf": {
-          "spark.master": "local[*, 4]",
-          "spark.databricks.cluster.profile": "singleNode"
-        },
-        "custom_tags": {
-          "ResourceClass": "SingleNode"
-        },
-        "data_security_mode": "SINGLE_USER"
-      },
+      "existing_cluster_id": "0814-135550-h9i18c28",
       "timeout_seconds": 1800,
       "max_retries": 2,
       "min_retry_interval_millis": 60000

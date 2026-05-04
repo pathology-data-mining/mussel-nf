@@ -165,6 +165,8 @@ class WatcherConfig:
     wds_s3_max_concurrency: int = 4  # boto3 multipart threads per S3 upload/download (reduce to limit ECS load)
     secrets_env_file: str = ""  # path to a shell env file (KEY=value) with S3/ECS credentials; values are
                                 # loaded into s3_access_key / s3_secret_key if not already set in the config
+    nextflow_secrets: list = field(default_factory=list)  # list of Nextflow secret names to load as S3 creds
+                                # e.g. ['ECS_ACCESS_KEY', 'ECS_SECRET_KEY'] — resolved via `nextflow secrets get`
     # When set, a tcga_sync_databricks.py hook is generated automatically.
     # Credentials come from DATABRICKS_HOST / DATABRICKS_TOKEN env vars.
     databricks_volume_folder: str = ""  # UC volume folder; files uploaded as tcga_inventory_<ts>.parquet
@@ -284,6 +286,8 @@ class Config:
         for w in cfg.watchers:
             if w.secrets_env_file and os.path.isfile(w.secrets_env_file):
                 _load_secrets_env(w.secrets_env_file, w)
+            if w.nextflow_secrets:
+                _load_nf_secrets(w.nextflow_secrets, w)
 
         # Auto-detect model_types from nextflow.config for watchers that didn't
         # specify them explicitly.
@@ -422,6 +426,47 @@ def _load_secrets_env(path: str, watcher: "WatcherConfig") -> None:
         log.debug("Loaded secrets_env_file: %s", path)
     except OSError as exc:
         log.warning("Could not read secrets_env_file %s: %s", path, exc)
+
+
+def _load_nf_secrets(secret_names: list[str], watcher: "WatcherConfig") -> None:
+    """Resolve Nextflow secrets by name and populate watcher S3 credentials.
+
+    Runs ``nextflow secrets get <name>`` for each entry in *secret_names*.
+    Recognises ECS_ACCESS_KEY / ECS_SECRET_KEY and the standard
+    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY variants.
+
+    Only sets a credential if it is not already populated (env-file or
+    inline config take precedence).
+    """
+    import subprocess
+
+    key_map = {
+        "ECS_ACCESS_KEY":      "s3_access_key",
+        "AWS_ACCESS_KEY_ID":   "s3_access_key",
+        "ECS_SECRET_KEY":      "s3_secret_key",
+        "AWS_SECRET_ACCESS_KEY": "s3_secret_key",
+    }
+    for name in secret_names:
+        attr = key_map.get(name)
+        if not attr:
+            log.debug("nextflow_secrets: unknown key %s (not ECS/AWS cred), skipping", name)
+            continue
+        if getattr(watcher, attr):
+            continue  # already set
+        try:
+            result = subprocess.run(
+                ["nextflow", "secrets", "get", name],
+                capture_output=True, text=True, timeout=15,
+            )
+            value = result.stdout.strip()
+            if result.returncode != 0 or not value:
+                log.warning("nextflow secrets get %s failed: %s", name,
+                            result.stderr.strip() or "empty output")
+                continue
+            setattr(watcher, attr, value)
+            log.debug("Loaded %s from Nextflow secrets → %s", name, attr)
+        except Exception as exc:
+            log.warning("Could not load Nextflow secret %s: %s", name, exc)
 
 
 def _read_nf_model_types(repo_dir: str) -> list[str]:

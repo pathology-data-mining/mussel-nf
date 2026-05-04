@@ -52,6 +52,9 @@ watchers:
     # s3_secret_key: ...   # or set ECS_SECRET_KEY env var
     # secrets_env_file: /path/to/secrets.env  # shell env file with ECS_ACCESS_KEY / ECS_SECRET_KEY
     secrets_env_file: /gpfs/mskmind_ess/limr/repos/Mussel-3/secrets.env
+    nextflow_secrets:         # fallback: load from `nextflow secrets get` if not set above
+      - ECS_ACCESS_KEY
+      - ECS_SECRET_KEY
 
     # Optional: restrict to a single project or slide/sample type
     # project: TCGA-BRCA

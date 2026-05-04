@@ -530,11 +530,17 @@ def _build_handler(cfg: Config):
     def _api_wds():
         import glob as _glob
 
-        # SUCCEEDED count from DB (same across all models)
+        # SUCCEEDED + DISPATCHED count from DB — denominator for WDS % coverage.
+        # DISPATCHED slides are in-flight and will become SUCCEEDED once the batch
+        # completes, so including them gives a more accurate "expected total" denominator.
         with _db() as conn:
             db_succeeded = conn.execute(
                 "SELECT COUNT(*) FROM slides WHERE status='SUCCEEDED'"
             ).fetchone()[0]
+            db_dispatched = conn.execute(
+                "SELECT COUNT(*) FROM slides WHERE status='DISPATCHED'"
+            ).fetchone()[0]
+        db_total_expected = db_succeeded + db_dispatched
 
         # WDS manifest counts + per-shard distribution
         wds_counts: dict = {}
@@ -605,7 +611,7 @@ def _build_handler(cfg: Config):
                 }
             models[m] = {
                 "slides": wds_slides,
-                "gap": max(0, db_succeeded - wds_slides),
+                "gap": max(0, db_total_expected - wds_slides),
                 "shards": s3_stats.get(m, {}).get("shards", 0),
                 "orphan_shards": s3_stats.get(m, {}).get("orphan_shards", 0),
                 "manifest_shards": manifest_shards,
@@ -613,7 +619,9 @@ def _build_handler(cfg: Config):
                 "local_pt": local_pt.get(m, 0),
                 "error": s3_stats.get(m, {}).get("error"),
             }
-        return {"models": models, "total": sum(wds_counts.values()), "db_succeeded": db_succeeded}
+        return {"models": models, "total": sum(wds_counts.values()),
+                "db_succeeded": db_succeeded, "db_dispatched": db_dispatched,
+                "db_total_expected": db_total_expected}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # suppress default access log spam
@@ -768,7 +776,7 @@ _HTML = """<!DOCTYPE html>
       <div class="stat"><div class="val" id="s-pending" style="color:#a5b4fc">—</div><div class="lbl">Pending</div></div>
       <div class="stat"><div class="val" id="s-dispatched" style="color:#38bdf8">—</div><div class="lbl">Dispatched</div></div>
       <div class="stat" title="Slides with pt/h5 features generated (Nextflow succeeded). Does not include WDS upload status."><div class="val" id="s-pct">—</div><div class="lbl">% Features Extracted</div></div>
-      <div class="stat" title="Slides confirmed written to WDS shards and uploaded to S3, as a percentage of all SUCCEEDED slides."><div class="val" id="s-wds-pct" style="color:#38bdf8">—</div><div class="lbl">% in WDS</div></div>
+      <div class="stat" title="Slides confirmed written to WDS shards and uploaded to S3, as a percentage of all SUCCEEDED+DISPATCHED slides (total expected)."><div class="val" id="s-wds-pct" style="color:#38bdf8">—</div><div class="lbl">% in WDS</div></div>
       <div class="stat"><div class="val" id="s-running">—</div><div class="lbl">Running Batches</div></div>
       <div class="stat"><div class="val" id="s-blacklisted" style="color:#fb923c">—</div><div class="lbl">Blacklisted</div></div>
     </div>
@@ -1068,16 +1076,19 @@ async function loadWds() {
     const data = await apiFetch('/api/wds');
     const models = data.models || {};
     const keys = Object.keys(models);
+    // Use db_total_expected (SUCCEEDED + DISPATCHED) as denominator so in-flight
+    // slides are accounted for and the % doesn't show 100% when a batch is running.
+    const dbExpected = data.db_total_expected || data.db_succeeded || 0;
     const dbSucceeded = data.db_succeeded || 0;
 
     // Update summary grid % in WDS stat
     const totalWds = keys.reduce((a, m) => a + (models[m].slides || 0), 0);
     const wdsPctEl = document.getElementById('s-wds-pct');
-    if (wdsPctEl && dbSucceeded > 0) {
+    if (wdsPctEl && dbExpected > 0) {
       // Use minimum across models with actual slides (weakest link = true completion)
       const activeKeys = keys.filter(m => (models[m].slides || 0) > 0);
       const minWds = activeKeys.length ? Math.min(...activeKeys.map(m => models[m].slides)) : 0;
-      const pct = Math.round(minWds / dbSucceeded * 100);
+      const pct = Math.round(minWds / dbExpected * 100);
       wdsPctEl.textContent = Math.min(100, pct) + '%';
     }
 

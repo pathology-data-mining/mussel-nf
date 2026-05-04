@@ -81,7 +81,7 @@ def build_export(status_df: pd.DataFrame, inventory_df: pd.DataFrame) -> pd.Data
     result = merged[leading + extra]
 
     # Cast numeric columns: empty strings → NaN so parquet writes correct type.
-    for col in ("native_mpp", "file_size", "age_at_index",
+    for col in ("native_mpp", "tiling_mpp", "file_size", "age_at_index",
                 "percent_tumor_cells", "percent_stromal_cells",
                 "percent_necrosis", "percent_normal_cells"):
         if col in result.columns:

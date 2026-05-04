@@ -26,3 +26,6 @@ dispatcher/__pycache__
 class_mapping.yaml
 filter_workflow.yaml
 *_params.yaml
+dispatcher/__pycache__
+dispatcher/mussel_dispatcher/**/__pycache__
+dispatcher/tests/__pycache__

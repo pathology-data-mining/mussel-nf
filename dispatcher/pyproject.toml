@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mussel-dispatcher"
+version = "0.1.0"
+description = "Streaming slide dispatcher for mussel-nf"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml",
+    "boto3",
+]
+
+[project.scripts]
+mussel-dispatcher = "mussel_dispatcher.__main__:main"
+mussel-dashboard  = "mussel_dispatcher.dashboard.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mussel_dispatcher*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

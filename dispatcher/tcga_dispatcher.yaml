@@ -22,7 +22,7 @@ max_concurrent_runs: 3
 
 # Dispatch when 50 slides have accumulated, or after 10 minutes
 batch_size: 500
-min_batch_size: 38
+min_batch_size: 1
 max_wait_seconds: 600
 
 retry_failed: true
@@ -87,6 +87,7 @@ watchers:
     databricks_volume_folder: /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
     databricks_table: cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
     # databricks_job_id: "12345"   # set to the job ID from: databricks jobs create --json @databricks/jobs/tcga_metadata_sync_job.json
+    databricks_job_id: "256343305142135"
 
 # Any explicit post_batch_hooks run after the auto-generated ones above.
 # post_batch_hooks: []

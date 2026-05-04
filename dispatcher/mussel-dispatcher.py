@@ -1600,6 +1600,7 @@ class NextflowRunner:
                     stderr=subprocess.STDOUT,
                     cwd=self.cfg.repo_dir,
                     env=run_env,
+                    start_new_session=True,
                 )
             exit_code = result.returncode
         except Exception as e:

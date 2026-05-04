@@ -24,6 +24,8 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
+_FALLBACK_MPP = 0.5  # Mussel default when slide header has no MPP tag
+
 STATUS_COLUMNS = [
     "file_id",
     "slide_id",
@@ -34,8 +36,8 @@ STATUS_COLUMNS = [
     "failure_reason",   # non-empty when status == "failed"
     "native_mpp",       # slide scanner resolution µm/px; null when not recorded
     "mpp_is_fallback",  # True when Mussel used 0.5 default (no MPP in slide header)
+    "tiling_mpp",       # MPP actually used for feature extraction: native_mpp or 0.5 fallback
     "wds_path",
-    "wds_index_path",
     "last_updated",
 ]
 
@@ -205,14 +207,12 @@ def build_status(
     results_dir: Path,
     model_types: list[str],
     wds_manifest: dict[tuple[str, str], str] | None = None,
-    wds_bases: dict[str, str] | None = None,
+    wds_bases: dict[str, str] | None = None,  # kept for backwards compat, no longer used
     failed_slides: dict[str, str] | None = None,
     slide_mpp: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """Scan results_dir and WDS manifest for completed outputs.
 
-    wds_bases:     optional {model: s3://base/wds} mapping used to derive
-                   wds_index_path = {base}/{model}/wds_index.json.
     failed_slides: optional {slide_id: error_msg} from the dispatcher DB;
                    slides in this map are marked 'failed' unless already 'done'.
     slide_mpp:     optional {slide_id: (native_mpp, mpp_is_fallback)} mapping from
@@ -226,12 +226,6 @@ def build_status(
         pt_map = _find_pt_files(results_dir, model)
         h5_map = _find_h5_files(results_dir, model)
         log.info("Model %-20s  %d .pt files,  %d .h5 files", model, len(pt_map), len(h5_map))
-
-        # Build wds_index_path for this model if base is known.
-        wds_index_path = ""
-        if wds_bases and model in wds_bases:
-            base = wds_bases[model].rstrip("/")
-            wds_index_path = f"{base}/{model}/wds_index.json"
 
         for _, row in inventory_df.iterrows():
             slide_id = _slide_id_from_filename(row["file_name"])
@@ -260,6 +254,12 @@ def build_status(
                 failure_reason = ""
 
             native_mpp, mpp_is_fallback = (slide_mpp or {}).get(slide_id, (None, None))
+            if mpp_is_fallback is True:
+                tiling_mpp = _FALLBACK_MPP
+            elif native_mpp is not None:
+                tiling_mpp = native_mpp
+            else:
+                tiling_mpp = None
 
             records.append({
                 "file_id": row["file_id"],
@@ -271,8 +271,8 @@ def build_status(
                 "failure_reason": failure_reason,
                 "native_mpp": native_mpp,
                 "mpp_is_fallback": mpp_is_fallback,
+                "tiling_mpp": tiling_mpp,
                 "wds_path": out_wds_path,
-                "wds_index_path": wds_index_path,
                 "last_updated": now,
             })
 
@@ -316,8 +316,8 @@ def main(argv: list[str] | None = None) -> int:
                              "Slides in the manifest are marked 'done' with the S3 WDS "
                              "shard path, even if local .pt files have been cleaned up.")
     parser.add_argument("--wds-base", default=None,
-                        help="Comma-separated model=s3://base pairs for wds_index_path column. "
-                             "Example: 'hoptimus1=s3://reef-tcga-v2-0/wds,titan_slide=s3://reef-tcga-v2-0/wds'")
+                        help="[Deprecated — no longer used.] Previously used to derive "
+                             "wds_index_path. Has no effect; kept for backwards compatibility.")
     parser.add_argument("--dispatcher-db", default=None,
                         help="Path to the dispatcher SQLite DB (dispatcher.db). "
                              "Slides with status=FAILED in the DB are marked 'failed' in output, "
@@ -344,13 +344,6 @@ def main(argv: list[str] | None = None) -> int:
     results_dir = Path(args.results_dir)
     wds_manifest = _load_wds_manifest(args.wds_manifest)
 
-    wds_bases: dict[str, str] = {}
-    if args.wds_base:
-        for part in args.wds_base.split(","):
-            if "=" in part:
-                model_key, base = part.split("=", 1)
-                wds_bases[model_key.strip()] = base.strip()
-
     if args.model_types:
         model_types = [m.strip() for m in args.model_types.split(",") if m.strip()]
     else:
@@ -363,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     failed_slides = _load_dispatcher_failures(args.dispatcher_db)
     slide_mpp = _load_slide_mpp(args.slide_mpp)
     status_df = build_status(inventory_df, Path(args.results_dir), model_types,
-                             wds_manifest=wds_manifest, wds_bases=wds_bases or None,
+                             wds_manifest=wds_manifest,
                              failed_slides=failed_slides or None,
                              slide_mpp=slide_mpp or None)
     print_summary(status_df)

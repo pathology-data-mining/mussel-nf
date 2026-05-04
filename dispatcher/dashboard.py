@@ -333,12 +333,14 @@ def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
             s3 = boto3.client("s3", **client_kwargs)
             paginator = s3.get_paginator("list_objects_v2")
             shards = objects = orphan_shards = 0
-            # Double-model path prefix: happens when wds_dest previously included the
-            # model name (e.g. s3://.../wds/hoptimus1), causing shards to be written
-            # at wds/{model}/{model}/{project}/. These are orphans — slides will be
-            # re-dispatched and written at the correct wds/{model}/{project}/ paths.
-            orphan_prefix = f"{prefix}/{model}/"
-            for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
+            # Valid shards are at   {prefix}/{model}/{project}/shard.tar
+            # Orphan shards are at  {prefix}/{model}/{model}/{project}/shard.tar
+            # (double-model bug: wds_dest used to include the model name, causing the
+            # writer to append it again).  The listing prefix is {prefix}/{model}/ so
+            # we only need to check for the extra model segment to detect orphans.
+            model_prefix = f"{prefix}/{model}/"
+            orphan_prefix = f"{prefix}/{model}/{model}/"
+            for page in paginator.paginate(Bucket=bucket, Prefix=model_prefix):
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
                     objects += 1
@@ -354,6 +356,9 @@ def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
             results[model] = {"shards": shards, "objects": objects,
                                "orphan_shards": orphan_shards}
         except (BotoCoreError, ClientError, Exception) as exc:
+            entry = {"shards": 0, "objects": 0, "orphan_shards": 0,
+                     "error": str(exc)[:120], "ts": now}
+            _s3_cache[model] = entry
             results[model] = {"shards": 0, "objects": 0, "error": str(exc)[:120]}
 
     threads = [

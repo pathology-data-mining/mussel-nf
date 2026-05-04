@@ -1398,7 +1398,7 @@ class TcgaWatcher(threading.Thread):
 # Manifest collection
 # ---------------------------------------------------------------------------
 
-MANIFEST_HEADER = ["slide_id", "workflow_id", "key", "value"]
+MANIFEST_HEADER = ["slide_id", "sample_id", "workflow_id", "key", "value"]
 
 
 def collect_manifests(outdir: str, combined_path: str) -> int:
@@ -1409,7 +1409,7 @@ def collect_manifests(outdir: str, combined_path: str) -> int:
 
     Each per-run manifest has no header and contains rows of the form::
 
-        slide_id,workflow_id,key,value
+        slide_id,sample_id,workflow_id,key,value
 
     The combined file is written with a header row.  Deduplication is by
     ``(slide_id, key)``; when duplicates exist the row from the *newest*
@@ -1431,12 +1431,13 @@ def collect_manifests(outdir: str, combined_path: str) -> int:
                 for parts in reader:
                     if not parts:
                         continue
-                    if len(parts) != 4:
+                    if len(parts) != 5:
                         log.warning("collect_manifests: skipping malformed line in %s: %r", mf, parts)
                         continue
-                    slide_id, workflow_id, key, value = parts
+                    slide_id, sample_id, workflow_id, key, value = parts
                     rows[(slide_id, key)] = {
                         "slide_id": slide_id,
+                        "sample_id": sample_id,
                         "workflow_id": workflow_id,
                         "key": key,
                         "value": value,

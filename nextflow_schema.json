@@ -333,6 +333,41 @@
                     "additionalProperties": {
                         "type": "string"
                     }
+                },
+                "save_features_to_h5": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Save patch-level features to HDF5 (.h5) in addition to .pt slide tensors."
+                },
+                "slide_to_patch_mapping": {
+                    "type": "object",
+                    "description": "Maps slide-level encoder names to the required patch encoder.",
+                    "properties": {
+                        "gigapath_slide": {
+                            "type": "string",
+                            "default": "gigapath"
+                        },
+                        "titan_slide": {
+                            "type": "string",
+                            "default": "conch1_5"
+                        },
+                        "prism_slide": {
+                            "type": "string",
+                            "default": "virchow"
+                        },
+                        "feather_slide": {
+                            "type": "string",
+                            "default": "conch1_5"
+                        },
+                        "chief_slide": {
+                            "type": "string",
+                            "default": "ctranspath"
+                        },
+                        "madeleine_slide": {
+                            "type": "string",
+                            "default": "clip"
+                        }
+                    }
                 }
             }
         },
@@ -422,6 +457,16 @@
                     "type": "integer",
                     "default": 1,
                     "description": "Annotation value treated as the positive class. Default 1 for class-mapped 0/1 annotations; set to 2 for raw (unmapped) BMP annotation values."
+                },
+                "random_state": {
+                    "type": "integer",
+                    "default": 42,
+                    "description": "Random seed for linear probe cross-validation."
+                },
+                "multiclass": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable multiclass mode (>=3 classes) for linear probe benchmarking."
                 }
             }
         },
@@ -478,6 +523,21 @@
                     "default": 8,
                     "minimum": 1,
                     "description": "Number of parallel connections per gdc-client download invocation."
+                },
+                "gdc_client_bin": {
+                    "type": "string",
+                    "default": "gdc-client",
+                    "description": "Path or name of the gdc-client binary."
+                },
+                "max_concurrent": {
+                    "type": "integer",
+                    "default": 16,
+                    "description": "Max parallel DOWNLOAD_SLIDE tasks per batch (maxForks)."
+                },
+                "jitter_seconds": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": "Random sleep 0-N seconds before gdc-client to stagger API calls."
                 }
             }
         }

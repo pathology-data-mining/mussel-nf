@@ -332,16 +332,27 @@ def _s3_stats(watcher: WatcherConfig, wds_prefix: str) -> dict[str, dict]:
         try:
             s3 = boto3.client("s3", **client_kwargs)
             paginator = s3.get_paginator("list_objects_v2")
-            shards = objects = 0
+            shards = objects = orphan_shards = 0
+            # Double-model path prefix: happens when wds_dest previously included the
+            # model name (e.g. s3://.../wds/hoptimus1), causing shards to be written
+            # at wds/{model}/{model}/{project}/. These are orphans — slides will be
+            # re-dispatched and written at the correct wds/{model}/{project}/ paths.
+            orphan_prefix = f"{prefix}/{model}/"
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
-                    if key.endswith(".tar"):
-                        shards += 1
                     objects += 1
-            entry = {"shards": shards, "objects": objects, "ts": now}
+                    if not key.endswith(".tar"):
+                        continue
+                    if key.startswith(orphan_prefix):
+                        orphan_shards += 1
+                    else:
+                        shards += 1
+            entry = {"shards": shards, "objects": objects,
+                     "orphan_shards": orphan_shards, "ts": now}
             _s3_cache[model] = entry
-            results[model] = {"shards": shards, "objects": objects}
+            results[model] = {"shards": shards, "objects": objects,
+                               "orphan_shards": orphan_shards}
         except (BotoCoreError, ClientError, Exception) as exc:
             results[model] = {"shards": 0, "objects": 0, "error": str(exc)[:120]}
 
@@ -564,6 +575,7 @@ def _build_handler(cfg: Config):
             cached = {m: _s3_cache[m] for m in _s3_cache}
             if cached:
                 s3_stats = {m: {"shards": v.get("shards", 0), "objects": v.get("objects", 0),
+                                "orphan_shards": v.get("orphan_shards", 0),
                                 "error": v.get("error")} for m, v in cached.items()}
             oldest = min((v.get("ts", 0) for v in _s3_cache.values()), default=0)
             if now - oldest > _S3_CACHE_TTL:
@@ -595,6 +607,7 @@ def _build_handler(cfg: Config):
                 "slides": wds_slides,
                 "gap": max(0, db_succeeded - wds_slides),
                 "shards": s3_stats.get(m, {}).get("shards", 0),
+                "orphan_shards": s3_stats.get(m, {}).get("orphan_shards", 0),
                 "manifest_shards": manifest_shards,
                 "shard_stats": shard_stats,
                 "local_pt": local_pt.get(m, 0),
@@ -1075,7 +1088,8 @@ async function loadWds() {
         <th style="padding:4px 6px">Model</th>
         <th style="padding:4px 6px;text-align:right">WDS Slides</th>
         <th style="padding:4px 6px;text-align:right" title="SUCCEEDED in DB minus WDS-indexed slides">Gap</th>
-        <th style="padding:4px 6px;text-align:right" title="Shards on S3 (from listing) / shards in manifest">S3 / Manifest Shards</th>
+        <th style="padding:4px 6px;text-align:right" title="Valid S3 shards / manifest shards (excludes orphan shards at old double-model paths)">S3 / Manifest Shards</th>
+        <th style="padding:4px 6px;text-align:right" title="Orphan shards at old double-model paths (being re-dispatched)">Orphans</th>
         <th style="padding:4px 6px;text-align:right" title="Average · min–max slides per shard (from manifest)">Slides/Shard</th>
         <th style="padding:4px 6px;text-align:right" title="Features .pt files still on local disk (pending cleanup)">Local .pt</th>
       </tr></thead><tbody>`;
@@ -1086,12 +1100,16 @@ async function loadWds() {
       const gap = mv.gap || 0;
       const ns = mv.shards || 0;
       const ms = mv.manifest_shards || 0;
+      const orphans = mv.orphan_shards || 0;
       const ss = mv.shard_stats || {};
       const localPt = mv.local_pt || 0;
       const gapColor = gap === 0 ? '#4ade80' : gap < 100 ? '#fcd34d' : '#f87171';
       const shardStr = mv.error
         ? `<span style="color:#f87171" title="${mv.error}">err</span> / ${ms}`
         : `<span style="color:#38bdf8">${ns}</span> / ${ms}`;
+      const orphanStr = orphans > 0
+        ? `<span style="color:#fcd34d" title="Old shards at wrong S3 path; slides are being re-dispatched">${orphans}</span>`
+        : `<span style="color:#4ade80">0</span>`;
       const slidesPerShard = ss.avg != null
         ? `<span style="color:#c4b5fd">${ss.avg}</span> <span style="color:#64748b;font-size:0.7rem">(${ss.min}–${ss.max})</span>`
         : '—';
@@ -1101,6 +1119,7 @@ async function loadWds() {
         <td style="padding:4px 6px;text-align:right;color:#4ade80">${n}</td>
         <td style="padding:4px 6px;text-align:right;color:${gapColor}">${gap > 0 ? '+'+gap : '0'}</td>
         <td style="padding:4px 6px;text-align:right">${shardStr}</td>
+        <td style="padding:4px 6px;text-align:right">${orphanStr}</td>
         <td style="padding:4px 6px;text-align:right">${slidesPerShard}</td>
         <td style="padding:4px 6px;text-align:right;color:${localColor}">${localPt}</td>
       </tr>`;
@@ -1109,7 +1128,7 @@ async function loadWds() {
     const footer = dbSucceeded
       ? `<tr style="border-top:1px solid #334155;color:#94a3b8">
           <td style="padding:4px 6px" colspan="2">SUCCEEDED in DB: <b style="color:#fff">${dbSucceeded}</b></td>
-          <td colspan="4" style="padding:4px 6px;font-size:0.7rem;color:#64748b">Gap = SUCCEEDED − WDS indexed</td>
+          <td colspan="5" style="padding:4px 6px;font-size:0.7rem;color:#64748b">Gap = SUCCEEDED − WDS indexed</td>
         </tr>` : '';
 
     el.innerHTML = header + rows.join('') + footer + '</tbody></table>';

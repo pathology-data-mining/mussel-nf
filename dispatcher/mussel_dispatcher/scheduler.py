@@ -312,6 +312,13 @@ def main():
         print(f"Combined manifest written to {combined_path} ({n} rows)")
         sys.exit(0)
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        stream=sys.stderr,
+    )
+
     cfg = Config.load(sys.argv[1])
     log.info("Configuration loaded from %s", sys.argv[1])
 

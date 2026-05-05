@@ -150,6 +150,19 @@ class TestStateStore:
         ).fetchone()
         assert row["fail_count"] == 3
 
+    def test_mark_slides_complete_fast_fail_resets_to_pending(self, store):
+        """charge_fail_count=False resets DISPATCHED slides to PENDING (infra failure)."""
+        store.add_slide("/slides/a.svs", "a")
+        store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        store.mark_slides_complete("batch-001", succeeded=False, charge_fail_count=False)
+        row = store._conn().execute(
+            "SELECT status, fail_count, batch_id FROM slides WHERE slide_path=?",
+            ("/slides/a.svs",),
+        ).fetchone()
+        assert row["status"] == "PENDING"
+        assert row["fail_count"] == 0  # retry slot not charged
+        assert row["batch_id"] is None
+
     def test_blacklist_slide_existing(self, store):
         """blacklist_slide marks an existing slide as permanently FAILED."""
         store.add_slide("/slides/bad.svs", "bad-slide")

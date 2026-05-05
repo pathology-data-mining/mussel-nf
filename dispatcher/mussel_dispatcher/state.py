@@ -129,22 +129,34 @@ class StateStore:
         self._conn().commit()
 
     def mark_slides_complete(self, batch_id: str, succeeded: bool,
-                             per_slide_status: dict | None = None):
-        """Mark all slides in a batch as SUCCEEDED or FAILED."""
+                             per_slide_status: dict | None = None,
+                             charge_fail_count: bool = True):
+        """Mark all slides in a batch as SUCCEEDED or FAILED.
+
+        When charge_fail_count=False (fast infra failure), slides are reset to
+        PENDING instead of FAILED so they don't burn a retry slot.
+        """
         conn = self._conn()
+        now = datetime.now(timezone.utc).isoformat()
         if per_slide_status:
             for slide_path, ok in per_slide_status.items():
                 status = "SUCCEEDED" if ok else "FAILED"
                 conn.execute(
                     "UPDATE slides SET status=?, completed_at=? WHERE slide_path=? AND batch_id=?",
-                    (status, datetime.now(timezone.utc).isoformat(), slide_path, batch_id),
+                    (status, now, slide_path, batch_id),
                 )
+        elif not succeeded and not charge_fail_count:
+            # Infra/config failure — reset to PENDING without charging fail_count
+            conn.execute(
+                "UPDATE slides SET status='PENDING', batch_id=NULL WHERE batch_id=? AND status='DISPATCHED'",
+                (batch_id,),
+            )
         else:
             status = "SUCCEEDED" if succeeded else "FAILED"
             conn.execute(
                 """UPDATE slides SET status=?, completed_at=?
                    WHERE batch_id=? AND status='DISPATCHED'""",
-                (status, datetime.now(timezone.utc).isoformat(), batch_id),
+                (status, now, batch_id),
             )
             if not succeeded:
                 conn.execute(

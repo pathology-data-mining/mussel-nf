@@ -7,6 +7,8 @@ include { TESSELLATE; FILTER_TILES; EMIT_MPP_META } from './tessellation'
 
 include { TESSELLATE_FEATURIZE_BATCH } from './tessellate_featurize'
 
+include { CONVERT_FEATURES_PRECISION } from './convert_precision'
+
 include { WDS_SHARD } from './wds'
 include { MERGE_SAMPLE_FEATURES } from './sample_merge'
 
@@ -234,7 +236,26 @@ workflow MUSSEL {
         MERGE_SAMPLE_FEATURES(ch_sample_feat_h5)
         // ─────────────────────────────────────────────────────────────────────────
 
-        LINEAR_PROBE(ch_annotations, ch_extract_feat.h5)
+        // ── Precision benchmarking ────────────────────────────────────────────
+        // When benchmark_precisions is set, cast float32 features to each listed
+        // precision for side-by-side linear probe comparison (no GPU needed).
+        if (params.featurize.benchmark_precisions) {
+            ch_benchmark_precisions = Channel.fromList(params.featurize.benchmark_precisions)
+            CONVERT_FEATURES_PRECISION(
+                ch_extract_feat.h5.combine(ch_benchmark_precisions)
+                    .filter { meta, model_type, h5, target_precision ->
+                        // Skip if target equals the source precision (no-op conversion)
+                        def source_precision = (params.featurize.model_precision_overrides && params.featurize.model_precision_overrides[model_type])
+                            ? params.featurize.model_precision_overrides[model_type]
+                            : (params.featurize.embedding_precision ?: 'float32')
+                        target_precision != source_precision
+                    }
+            )
+            LINEAR_PROBE(ch_annotations, ch_extract_feat.h5.mix(CONVERT_FEATURES_PRECISION.out.h5))
+        } else {
+            LINEAR_PROBE(ch_annotations, ch_extract_feat.h5)
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         ch_features = ch_extract_feat.pt.branch {
             meta, model_type, features ->

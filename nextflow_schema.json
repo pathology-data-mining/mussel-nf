@@ -339,6 +339,24 @@
                     "default": true,
                     "description": "Save patch-level features to HDF5 (.h5) in addition to .pt slide tensors."
                 },
+                "embedding_precision": {
+                    "type": "string",
+                    "default": "float32",
+                    "enum": ["float32", "float16", "bfloat16"],
+                    "description": "Numeric dtype used when saving extracted feature embeddings. 'float32' preserves full precision; 'float16'/'bfloat16' halve storage size. Note: multi-slide sample aggregation (MERGE_SAMPLE_FEATURES) with non-float32 precision is currently unsupported."
+                },
+                "model_precision_overrides": {
+                    "type": "object",
+                    "description": "Per-model embedding precision overrides. Takes precedence over embedding_precision. Keys are model type names (e.g. 'optimus'), values are 'float32', 'float16', or 'bfloat16'."
+                },
+                "benchmark_precisions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["float16", "bfloat16"]
+                    },
+                    "description": "Precision variants to generate for linear probe benchmarking. A CPU-only conversion step casts existing float32 features to each listed precision and feeds all variants into the linear probe workflow. Designed for use with embedding_precision='float32'."
+                },
                 "slide_to_patch_mapping": {
                     "type": "object",
                     "description": "Maps slide-level encoder names to the required patch encoder.",

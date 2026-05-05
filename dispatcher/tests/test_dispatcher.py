@@ -26,8 +26,18 @@ from mussel_dispatcher import (
     DatabricksWatcher,
     recover_in_flight,
 )
-from mussel_dispatcher.runner import collect_manifests
-from mussel_dispatcher.config import _read_nf_model_types
+from mussel_dispatcher.runner import (
+    collect_manifests,
+    _parse_run_name_from_log,
+    _lookup_session_id_in_history,
+    _extract_nf_session_id_from_log,
+)
+from mussel_dispatcher.config import (
+    _read_nf_model_types,
+    _load_secrets_env,
+    _load_nf_secrets,
+)
+from mussel_dispatcher.scheduler import BatchScheduler, RunManager
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1613,3 +1623,586 @@ class TestDatabricksWatcher:
         assert cfg.source_filter == ["ECS2"]
         assert cfg.additional_where == "m.IS_HNE = 1"
 
+
+# ===========================================================================
+# _load_secrets_env
+# ===========================================================================
+
+class TestLoadSecretsEnv:
+    def test_loads_ecs_access_key(self, tmp_path):
+        env_file = tmp_path / "creds.env"
+        env_file.write_text("ECS_ACCESS_KEY=myaccesskey\nECS_SECRET_KEY=mysecretkey\n")
+        w = WatcherConfig(type="local")
+        _load_secrets_env(str(env_file), w)
+        assert w.s3_access_key == "myaccesskey"
+        assert w.s3_secret_key == "mysecretkey"
+
+    def test_loads_aws_key_names(self, tmp_path):
+        env_file = tmp_path / "creds.env"
+        env_file.write_text("AWS_ACCESS_KEY_ID=awskey\nAWS_SECRET_ACCESS_KEY=awssecret\n")
+        w = WatcherConfig(type="local")
+        _load_secrets_env(str(env_file), w)
+        assert w.s3_access_key == "awskey"
+        assert w.s3_secret_key == "awssecret"
+
+    def test_strips_export_prefix_and_quotes(self, tmp_path):
+        env_file = tmp_path / "creds.env"
+        env_file.write_text('export ECS_ACCESS_KEY="quoted_key"\nexport ECS_SECRET_KEY=\'singlequote\'\n')
+        w = WatcherConfig(type="local")
+        _load_secrets_env(str(env_file), w)
+        assert w.s3_access_key == "quoted_key"
+        assert w.s3_secret_key == "singlequote"
+
+    def test_skips_comments_and_blank_lines(self, tmp_path):
+        env_file = tmp_path / "creds.env"
+        env_file.write_text("# comment\n\nECS_ACCESS_KEY=realkey\n")
+        w = WatcherConfig(type="local")
+        _load_secrets_env(str(env_file), w)
+        assert w.s3_access_key == "realkey"
+
+    def test_does_not_overwrite_existing_value(self, tmp_path):
+        env_file = tmp_path / "creds.env"
+        env_file.write_text("ECS_ACCESS_KEY=newkey\n")
+        w = WatcherConfig(type="local", s3_access_key="existingkey")
+        _load_secrets_env(str(env_file), w)
+        assert w.s3_access_key == "existingkey"  # not overwritten
+
+    def test_missing_file_logs_warning_and_does_not_raise(self, tmp_path):
+        w = WatcherConfig(type="local")
+        _load_secrets_env(str(tmp_path / "nonexistent.env"), w)  # must not raise
+        assert w.s3_access_key == ""
+
+
+# ===========================================================================
+# _load_nf_secrets
+# ===========================================================================
+
+class TestLoadNfSecrets:
+    def test_loads_known_secret(self):
+        import unittest.mock as mock
+        w = WatcherConfig(type="local")
+        fake_result = mock.Mock(returncode=0, stdout="secretvalue\n", stderr="")
+        with mock.patch("subprocess.run", return_value=fake_result) as m:
+            _load_nf_secrets(["ECS_ACCESS_KEY"], w)
+        assert w.s3_access_key == "secretvalue"
+        m.assert_called_once_with(
+            ["nextflow", "secrets", "get", "ECS_ACCESS_KEY"],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def test_skips_unknown_key(self):
+        import unittest.mock as mock
+        w = WatcherConfig(type="local")
+        with mock.patch("subprocess.run") as m:
+            _load_nf_secrets(["UNKNOWN_KEY"], w)
+        m.assert_not_called()
+
+    def test_does_not_overwrite_existing_value(self):
+        import unittest.mock as mock
+        w = WatcherConfig(type="local", s3_access_key="existing")
+        with mock.patch("subprocess.run") as m:
+            _load_nf_secrets(["ECS_ACCESS_KEY"], w)
+        m.assert_not_called()
+
+    def test_handles_subprocess_failure_gracefully(self):
+        import unittest.mock as mock
+        w = WatcherConfig(type="local")
+        fake_result = mock.Mock(returncode=1, stdout="", stderr="not found")
+        with mock.patch("subprocess.run", return_value=fake_result):
+            _load_nf_secrets(["ECS_ACCESS_KEY"], w)  # must not raise
+        assert w.s3_access_key == ""
+
+    def test_handles_subprocess_exception_gracefully(self):
+        import unittest.mock as mock
+        w = WatcherConfig(type="local")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("nextflow not found")):
+            _load_nf_secrets(["ECS_ACCESS_KEY"], w)  # must not raise
+        assert w.s3_access_key == ""
+
+
+# ===========================================================================
+# NF session ID extraction
+# ===========================================================================
+
+class TestNfSessionIdExtraction:
+    def test_parse_run_name_from_log(self, tmp_path):
+        log = tmp_path / "batch.log"
+        log.write_text(
+            "N E X T F L O W  ~  version 23.10.1\n"
+            "Launching `main.nf` [desperate_meucci] ...\n"
+            "runName                 : desperate_meucci\n"
+            "some other line\n"
+        )
+        assert _parse_run_name_from_log(str(log)) == "desperate_meucci"
+
+    def test_parse_run_name_missing_returns_none(self, tmp_path):
+        log = tmp_path / "batch.log"
+        log.write_text("no run name here\n")
+        assert _parse_run_name_from_log(str(log)) is None
+
+    def test_parse_run_name_missing_file_returns_none(self, tmp_path):
+        assert _parse_run_name_from_log(str(tmp_path / "nonexistent.log")) is None
+
+    def test_lookup_session_id_in_history(self, tmp_path):
+        nf_dir = tmp_path / ".nextflow"
+        nf_dir.mkdir()
+        (nf_dir / "history").write_text(
+            "2024-01-01\t12:00:00\t1m\tdesperate_meucci\tOK\t"
+            "4d7b3c2a-1234-5678-abcd-ef0123456789\tnextflow run main.nf\n"
+        )
+        result = _lookup_session_id_in_history(str(tmp_path), "desperate_meucci")
+        assert result == "4d7b3c2a-1234-5678-abcd-ef0123456789"
+
+    def test_lookup_session_id_wrong_run_name_returns_none(self, tmp_path):
+        nf_dir = tmp_path / ".nextflow"
+        nf_dir.mkdir()
+        (nf_dir / "history").write_text(
+            "2024-01-01\t12:00:00\t1m\tother_run\tOK\t"
+            "4d7b3c2a-1234-5678-abcd-ef0123456789\tnextflow run main.nf\n"
+        )
+        assert _lookup_session_id_in_history(str(tmp_path), "desperate_meucci") is None
+
+    def test_lookup_session_id_missing_history_returns_none(self, tmp_path):
+        assert _lookup_session_id_in_history(str(tmp_path), "any_run") is None
+
+    def test_extract_nf_session_id_from_log_full_pipeline(self, tmp_path):
+        log = tmp_path / "batch.log"
+        log.write_text("runName                 : brave_newton\n")
+        nf_dir = tmp_path / ".nextflow"
+        nf_dir.mkdir()
+        (nf_dir / "history").write_text(
+            "2024-01-01\t12:00:00\t5m\tbrave_newton\tOK\t"
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\tnextflow run main.nf\n"
+        )
+        result = _extract_nf_session_id_from_log(str(log), str(tmp_path))
+        assert result == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+# ===========================================================================
+# _verify_wds_coverage
+# ===========================================================================
+
+class TestVerifyWdsCoverage:
+    def _make_runner(self, tmp_path, wds_destinations):
+        watcher = WatcherConfig(type="tcga", wds_destinations=wds_destinations)
+        cfg = make_config(
+            repo_dir=str(tmp_path),
+            outdir=str(tmp_path / "results"),
+            work_base_dir=str(tmp_path / "work"),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            watchers=[watcher],
+        )
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+        state = StateStore(str(tmp_path / "state" / "test.db"))
+        runner = NextflowRunner(cfg, "batch-001", [], state)
+        return runner, state
+
+    def _write_batch_csv(self, tmp_path, slide_ids):
+        batch_csv = tmp_path / "batches" / "batch.csv"
+        batch_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(batch_csv, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["slide_id", "slide_path"])
+            for sid in slide_ids:
+                w.writerow([sid, f"/slides/{sid}.svs"])
+        return str(batch_csv)
+
+    def _write_wds_manifest(self, tmp_path, entries):
+        """entries: list of (slide_id, model)"""
+        manifest = tmp_path / "results" / "wds_manifest.csv"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        with open(manifest, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["slide_id", "model"])
+            for sid, model in entries:
+                w.writerow([sid, model])
+        return str(manifest)
+
+    def test_all_covered_no_reset(self, tmp_path):
+        runner, state = self._make_runner(tmp_path, {"hoptimus1": "s3://bucket/wds/"})
+        for sid in ["A", "B"]:
+            state.add_slide(f"/slides/{sid}.svs", sid)
+            state.mark_dispatched([f"/slides/{sid}.svs"], "batch-001")
+            state.mark_slides_complete("batch-001", succeeded=True)
+        batch_csv = self._write_batch_csv(tmp_path, ["A", "B"])
+        self._write_wds_manifest(tmp_path, [("A", "hoptimus1"), ("B", "hoptimus1")])
+        runner._verify_wds_coverage(batch_csv)
+        for sid in ["A", "B"]:
+            row = state._conn().execute(
+                "SELECT status FROM slides WHERE slide_id=?", (sid,)
+            ).fetchone()
+            assert row["status"] == "SUCCEEDED"
+
+    def test_missing_slide_reset_to_pending(self, tmp_path):
+        runner, state = self._make_runner(tmp_path, {"hoptimus1": "s3://bucket/wds/"})
+        for sid in ["A", "B"]:
+            state.add_slide(f"/slides/{sid}.svs", sid)
+            state.mark_dispatched([f"/slides/{sid}.svs"], "batch-001")
+        state.mark_slides_complete("batch-001", succeeded=True)
+        batch_csv = self._write_batch_csv(tmp_path, ["A", "B"])
+        # Only A is in WDS — B is missing
+        self._write_wds_manifest(tmp_path, [("A", "hoptimus1")])
+        runner._verify_wds_coverage(batch_csv)
+        row_b = state._conn().execute(
+            "SELECT status, fail_count FROM slides WHERE slide_id=?", ("B",)
+        ).fetchone()
+        assert row_b["status"] == "PENDING"
+        assert row_b["fail_count"] == 1
+
+    def test_no_wds_destinations_skips_check(self, tmp_path):
+        runner, state = self._make_runner(tmp_path, {})
+        batch_csv = self._write_batch_csv(tmp_path, ["A"])
+        runner._verify_wds_coverage(batch_csv)  # must not raise
+
+    def test_missing_manifest_skips_check(self, tmp_path):
+        runner, state = self._make_runner(tmp_path, {"hoptimus1": "s3://bucket/wds/"})
+        batch_csv = self._write_batch_csv(tmp_path, ["A"])
+        # No wds_manifest.csv written
+        runner._verify_wds_coverage(batch_csv)  # must not raise
+
+
+# ===========================================================================
+# S3Watcher._scan / _in_progress_keys
+# ===========================================================================
+
+class TestS3WatcherScan:
+    def _make_watcher(self, tmp_path):
+        import unittest.mock as mock
+        pending = []
+        state = StateStore(str(tmp_path / "state.db"))
+        watcher_cfg = WatcherConfig(
+            type="s3",
+            bucket="my-bucket",
+            prefix="slides/",
+            min_file_size_bytes=1000,
+        )
+        from mussel_dispatcher.watchers import S3Watcher
+        w = S3Watcher.__new__(S3Watcher)
+        w.cfg = watcher_cfg
+        w.state = state
+        w.pending = pending
+        w.stop_event = threading.Event()
+        w._s3 = None
+        w.exts = {".svs", ".tiff", ".tif", ".ndpi", ".scn"}
+        return w, pending, state
+
+    def test_scan_enqueues_new_slide(self, tmp_path):
+        import unittest.mock as mock
+        w, pending, state = self._make_watcher(tmp_path)
+        mock_s3 = mock.MagicMock()
+        mock_s3.get_paginator.return_value.paginate.return_value = [{
+            "Contents": [{"Key": "slides/TCGA-AB.svs", "Size": 5000}]
+        }]
+        # No multipart uploads
+        mock_s3.get_paginator.return_value.paginate.side_effect = None
+        # Provide separate paginators for list_objects_v2 and list_multipart_uploads
+        def paginate_dispatch(op, **_kwargs):
+            if op == "list_objects_v2":
+                return iter([{"Contents": [{"Key": "slides/TCGA-AB.svs", "Size": 5000}]}])
+            return iter([{}])
+        mock_s3.get_paginator.return_value.paginate = paginate_dispatch
+        mock_s3.get_paginator.side_effect = lambda op: mock.MagicMock(paginate=lambda **kw: paginate_dispatch(op, **kw))
+        with mock.patch.object(w, "_get_s3", return_value=mock_s3):
+            w._scan()
+        assert len(pending) == 1
+        assert pending[0]["slide_path"] == "s3://my-bucket/slides/TCGA-AB.svs"
+        assert state.is_known("s3://my-bucket/slides/TCGA-AB.svs")
+
+    def test_scan_skips_known_slides(self, tmp_path):
+        import unittest.mock as mock
+        w, pending, state = self._make_watcher(tmp_path)
+        state.add_slide("s3://my-bucket/slides/TCGA-AB.svs", "TCGA-AB")
+        mock_s3 = mock.MagicMock()
+        def paginate_dispatch(op, **_kw):
+            if op == "list_objects_v2":
+                return iter([{"Contents": [{"Key": "slides/TCGA-AB.svs", "Size": 5000}]}])
+            return iter([{}])
+        mock_s3.get_paginator.side_effect = lambda op: mock.MagicMock(paginate=lambda **kw: paginate_dispatch(op, **kw))
+        with mock.patch.object(w, "_get_s3", return_value=mock_s3):
+            w._scan()
+        assert len(pending) == 0
+
+    def test_scan_skips_small_files(self, tmp_path):
+        import unittest.mock as mock
+        w, pending, state = self._make_watcher(tmp_path)
+        mock_s3 = mock.MagicMock()
+        def paginate_dispatch(op, **_kw):
+            if op == "list_objects_v2":
+                return iter([{"Contents": [{"Key": "slides/tiny.svs", "Size": 500}]}])
+            return iter([{}])
+        mock_s3.get_paginator.side_effect = lambda op: mock.MagicMock(paginate=lambda **kw: paginate_dispatch(op, **kw))
+        with mock.patch.object(w, "_get_s3", return_value=mock_s3):
+            w._scan()
+        assert len(pending) == 0
+
+    def test_scan_skips_wrong_extension(self, tmp_path):
+        import unittest.mock as mock
+        w, pending, state = self._make_watcher(tmp_path)
+        mock_s3 = mock.MagicMock()
+        def paginate_dispatch(op, **_kw):
+            if op == "list_objects_v2":
+                return iter([{"Contents": [{"Key": "slides/report.pdf", "Size": 50000}]}])
+            return iter([{}])
+        mock_s3.get_paginator.side_effect = lambda op: mock.MagicMock(paginate=lambda **kw: paginate_dispatch(op, **kw))
+        with mock.patch.object(w, "_get_s3", return_value=mock_s3):
+            w._scan()
+        assert len(pending) == 0
+
+    def test_scan_skips_in_progress_uploads(self, tmp_path):
+        import unittest.mock as mock
+        w, pending, state = self._make_watcher(tmp_path)
+        mock_s3 = mock.MagicMock()
+        def paginate_dispatch(op, **_kw):
+            if op == "list_objects_v2":
+                return iter([{"Contents": [{"Key": "slides/uploading.svs", "Size": 5000}]}])
+            if op == "list_multipart_uploads":
+                return iter([{"Uploads": [{"Key": "slides/uploading.svs"}]}])
+            return iter([{}])
+        mock_s3.get_paginator.side_effect = lambda op: mock.MagicMock(paginate=lambda **kw: paginate_dispatch(op, **kw))
+        with mock.patch.object(w, "_get_s3", return_value=mock_s3):
+            w._scan()
+        assert len(pending) == 0
+
+
+# ===========================================================================
+# BatchScheduler._validate_s3_batch / _s3_path_exists
+# ===========================================================================
+
+class TestS3PreDispatchValidation:
+    def _make_scheduler(self, tmp_path):
+        (tmp_path / "state").mkdir()
+        cfg = make_config(
+            repo_dir=str(tmp_path),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            work_base_dir=str(tmp_path / "work"),
+            max_slide_retries=3,
+        )
+        state = StateStore(str(tmp_path / "state" / "test.db"))
+        run_manager = MagicMock()
+        scheduler = BatchScheduler(cfg, state, run_manager, threading.Event())
+        return scheduler, state
+
+    def test_s3_path_exists_returns_true_on_success(self, tmp_path):
+        import unittest.mock as mock
+        scheduler, state = self._make_scheduler(tmp_path)
+        mock_s3 = mock.MagicMock()
+        mock_s3.head_object.return_value = {}
+        assert scheduler._s3_path_exists("s3://bucket/slides/a.svs", mock_s3) is True
+
+    def test_s3_path_exists_returns_false_on_404(self, tmp_path):
+        import unittest.mock as mock
+        scheduler, state = self._make_scheduler(tmp_path)
+        mock_s3 = mock.MagicMock()
+        exc = Exception("Not Found")
+        exc.response = {"Error": {"Code": "404"}}
+        mock_s3.head_object.side_effect = exc
+        assert scheduler._s3_path_exists("s3://bucket/slides/missing.svs", mock_s3) is False
+
+    def test_s3_path_exists_returns_true_on_unknown_error(self, tmp_path):
+        """Unknown errors (auth, network) treat slide as present to avoid false blacklisting."""
+        import unittest.mock as mock
+        scheduler, state = self._make_scheduler(tmp_path)
+        mock_s3 = mock.MagicMock()
+        mock_s3.head_object.side_effect = Exception("network timeout")
+        assert scheduler._s3_path_exists("s3://bucket/slides/maybe.svs", mock_s3) is True
+
+    def test_validate_s3_batch_blacklists_missing_slide(self, tmp_path):
+        import unittest.mock as mock
+        scheduler, state = self._make_scheduler(tmp_path)
+        slides = [
+            {"slide_path": "s3://bucket/a.svs", "slide_id": "a"},
+            {"slide_path": "s3://bucket/b.svs", "slide_id": "b"},
+        ]
+        for s in slides:
+            state.add_slide(s["slide_path"], s["slide_id"])
+
+        not_found = Exception("Not Found")
+        not_found.response = {"Error": {"Code": "404"}}
+
+        def head_object(Bucket, Key):
+            if "b.svs" in Key:
+                raise not_found
+            return {}
+
+        mock_s3 = MagicMock()
+        mock_s3.head_object.side_effect = head_object
+        with mock.patch.object(scheduler, "_get_s3_client", return_value=mock_s3):
+            valid, blacklisted = scheduler._validate_s3_batch(slides)
+
+        assert len(valid) == 1
+        assert valid[0]["slide_id"] == "a"
+        assert "b" in blacklisted
+        row = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_id=?", ("b",)
+        ).fetchone()
+        assert row["status"] == "FAILED"
+
+    def test_validate_s3_batch_passes_non_s3_slides(self, tmp_path):
+        import unittest.mock as mock
+        scheduler, state = self._make_scheduler(tmp_path)
+        slides = [{"slide_path": "/local/a.svs", "slide_id": "a"}]
+        with mock.patch.object(scheduler, "_get_s3_client") as m:
+            valid, blacklisted = scheduler._validate_s3_batch(slides)
+        m.assert_not_called()
+        assert valid == slides
+        assert blacklisted == []
+
+    def test_validate_s3_batch_all_missing_returns_empty(self, tmp_path):
+        import unittest.mock as mock
+        scheduler, state = self._make_scheduler(tmp_path)
+        slides = [{"slide_path": "s3://bucket/a.svs", "slide_id": "a"}]
+        state.add_slide("s3://bucket/a.svs", "a")
+        not_found = Exception("Not Found")
+        not_found.response = {"Error": {"Code": "404"}}
+        mock_s3 = MagicMock()
+        mock_s3.head_object.side_effect = not_found
+        with mock.patch.object(scheduler, "_get_s3_client", return_value=mock_s3):
+            valid, blacklisted = scheduler._validate_s3_batch(slides)
+        assert valid == []
+        assert "a" in blacklisted
+
+
+# ===========================================================================
+# E2E: Full dispatcher loop
+# ===========================================================================
+
+class TestE2EDispatcherLoop:
+    """End-to-end tests wiring enqueue → BatchScheduler → NextflowRunner → StateStore."""
+
+    def _make_stack(self, tmp_path):
+        """Build a complete dispatcher stack with real StateStore, mock NF subprocess."""
+        for d in ["batches", "state", "logs", "work", "results"]:
+            (tmp_path / d).mkdir()
+        cfg = make_config(
+            repo_dir=str(tmp_path),
+            outdir=str(tmp_path / "results"),
+            work_base_dir=str(tmp_path / "work"),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            batch_size=3,
+            min_batch_size=1,
+            max_wait_seconds=9999,
+        )
+        state = StateStore(str(tmp_path / "state" / "test.db"))
+        run_manager = RunManager(cfg, state)
+        scheduler = BatchScheduler(cfg, state, run_manager, threading.Event())
+        return cfg, state, scheduler, run_manager
+
+    def test_full_happy_path_slides_succeed(self, tmp_path):
+        import unittest.mock as mock
+        cfg, state, scheduler, run_manager = self._make_stack(tmp_path)
+
+        slides = [
+            {"slide_path": f"/slides/{c}.svs", "slide_id": c}
+            for c in ["A", "B", "C"]
+        ]
+        for s in slides:
+            state.add_slide(s["slide_path"], s["slide_id"])
+            scheduler.enqueue(s)
+
+        fake_proc = mock.Mock(returncode=0)
+        with mock.patch("subprocess.run", return_value=fake_proc), \
+             mock.patch("mussel_dispatcher.runner.time") as mt:
+            mt.time.side_effect = [0.0, 120.0]
+            scheduler._maybe_dispatch(force=True)
+            run_manager.shutdown(wait=True)
+
+        for s in slides:
+            row = state._conn().execute(
+                "SELECT status FROM slides WHERE slide_path=?", (s["slide_path"],)
+            ).fetchone()
+            assert row["status"] == "SUCCEEDED", f"{s['slide_id']} not SUCCEEDED"
+
+    def test_full_failure_then_recovery(self, tmp_path):
+        """Batch fails → slides FAILED → recover_in_flight resets to PENDING → second run succeeds."""
+        import unittest.mock as mock
+        cfg, state, scheduler, run_manager = self._make_stack(tmp_path)
+
+        slide = {"slide_path": "/slides/X.svs", "slide_id": "X"}
+        state.add_slide(slide["slide_path"], slide["slide_id"])
+        scheduler.enqueue(slide)
+
+        # First run: fail (long enough to charge fail_count)
+        fail_proc = mock.Mock(returncode=1)
+        with mock.patch("subprocess.run", return_value=fail_proc), \
+             mock.patch("mussel_dispatcher.runner.time") as mt:
+            mt.time.side_effect = [0.0, 120.0]
+            scheduler._maybe_dispatch(force=True)
+            run_manager.shutdown(wait=True)
+
+        row = state._conn().execute(
+            "SELECT status, fail_count FROM slides WHERE slide_path=?", (slide["slide_path"],)
+        ).fetchone()
+        assert row["status"] == "FAILED"
+        assert row["fail_count"] == 1
+
+        # Recovery resets to PENDING
+        pending2 = deque()
+        recover_in_flight(state, pending2, retry_failed=True, max_slide_retries=3)
+        row2 = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_path=?", (slide["slide_path"],)
+        ).fetchone()
+        assert row2["status"] == "PENDING"
+
+        # Second run: succeed
+        run_manager2 = RunManager(cfg, state)
+        scheduler2 = BatchScheduler(cfg, state, run_manager2, threading.Event())
+        scheduler2.enqueue(slide)
+
+        ok_proc = mock.Mock(returncode=0)
+        with mock.patch("subprocess.run", return_value=ok_proc), \
+             mock.patch("mussel_dispatcher.runner.time") as mt:
+            mt.time.side_effect = [0.0, 120.0]
+            scheduler2._maybe_dispatch(force=True)
+            run_manager2.shutdown(wait=True)
+
+        row3 = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_path=?", (slide["slide_path"],)
+        ).fetchone()
+        assert row3["status"] == "SUCCEEDED"
+
+    def test_s3_predispatch_404_blacklists_and_submits_rest(self, tmp_path):
+        """S3 pre-dispatch check: missing slide blacklisted, rest submitted and succeed."""
+        import unittest.mock as mock
+        cfg, state, scheduler, run_manager = self._make_stack(tmp_path)
+
+        slides = [
+            {"slide_path": "s3://bucket/ok.svs",      "slide_id": "ok"},
+            {"slide_path": "s3://bucket/missing.svs",  "slide_id": "missing"},
+        ]
+        for s in slides:
+            state.add_slide(s["slide_path"], s["slide_id"])
+            scheduler.enqueue(s)
+
+        not_found = Exception("Not Found")
+        not_found.response = {"Error": {"Code": "404"}}
+
+        def head_object(Bucket, Key):
+            if "missing" in Key:
+                raise not_found
+            return {}
+
+        mock_s3 = MagicMock()
+        mock_s3.head_object.side_effect = head_object
+
+        ok_proc = mock.Mock(returncode=0)
+        with mock.patch("subprocess.run", return_value=ok_proc), \
+             mock.patch.object(scheduler, "_get_s3_client", return_value=mock_s3), \
+             mock.patch("mussel_dispatcher.runner.time") as mt:
+            mt.time.side_effect = [0.0, 120.0]
+            scheduler._maybe_dispatch(force=True)
+            run_manager.shutdown(wait=True)
+
+        ok_row = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_id=?", ("ok",)
+        ).fetchone()
+        missing_row = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_id=?", ("missing",)
+        ).fetchone()
+        assert ok_row["status"] == "SUCCEEDED"
+        assert missing_row["status"] == "FAILED"

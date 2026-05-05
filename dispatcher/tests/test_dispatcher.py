@@ -1003,6 +1003,79 @@ class TestTcgaWatcher:
 
 
 # ---------------------------------------------------------------------------
+# NextflowRunner.run() integration tests
+# ---------------------------------------------------------------------------
+
+class TestNextflowRunnerRun:
+    """Integration tests for NextflowRunner.run() — mocks subprocess only."""
+
+    def _make_runner(self, tmp_path, slides=None):
+        (tmp_path / "batches").mkdir()
+        (tmp_path / "state").mkdir()
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "work").mkdir()
+        cfg = make_config(
+            repo_dir=str(tmp_path),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            work_base_dir=str(tmp_path / "work"),
+        )
+        state = StateStore(str(tmp_path / "state" / "test.db"))
+        if slides is None:
+            slides = [{"slide_path": "/slides/a.svs", "slide_id": "a"}]
+        for s in slides:
+            state.add_slide(s["slide_path"], s["slide_id"])
+        runner = NextflowRunner(cfg, "batch-001", slides, state)
+        state.mark_dispatched([s["slide_path"] for s in slides], "batch-001")
+        return runner, state
+
+    def test_run_success_marks_slides_succeeded(self, tmp_path):
+        import unittest.mock as mock
+        runner, state = self._make_runner(tmp_path)
+        fake_proc = mock.Mock(returncode=0)
+        with mock.patch("subprocess.run", return_value=fake_proc):
+            exit_code = runner.run()
+        assert exit_code == 0
+        row = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_path=?", ("/slides/a.svs",)
+        ).fetchone()
+        assert row["status"] == "SUCCEEDED"
+
+    def test_run_failure_marks_slides_failed_and_increments_fail_count(self, tmp_path):
+        import unittest.mock as mock
+        runner, state = self._make_runner(tmp_path)
+        fake_proc = mock.Mock(returncode=1)
+        # Patch time so batch_duration >= 60s (not a fast-fail)
+        with mock.patch("subprocess.run", return_value=fake_proc), \
+             mock.patch("mussel_dispatcher.runner.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 120.0]  # started_at=0, ended_at=120
+            exit_code = runner.run()
+        assert exit_code == 1
+        row = state._conn().execute(
+            "SELECT status, fail_count FROM slides WHERE slide_path=?", ("/slides/a.svs",)
+        ).fetchone()
+        assert row["status"] == "FAILED"
+        assert row["fail_count"] == 1
+
+    def test_run_fast_fail_resets_slides_to_pending(self, tmp_path):
+        """Batch failure in <60s (infra error) resets slides to PENDING without charging fail_count."""
+        import unittest.mock as mock
+        runner, state = self._make_runner(tmp_path)
+        fake_proc = mock.Mock(returncode=1)
+        with mock.patch("subprocess.run", return_value=fake_proc), \
+             mock.patch("mussel_dispatcher.runner.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 5.0]  # 5s — clearly a fast fail
+            exit_code = runner.run()
+        assert exit_code == 1
+        row = state._conn().execute(
+            "SELECT status, fail_count FROM slides WHERE slide_path=?", ("/slides/a.svs",)
+        ).fetchone()
+        assert row["status"] == "PENDING"
+        assert row["fail_count"] == 0  # retry budget not consumed
+
+
+# ---------------------------------------------------------------------------
 # post_batch_hooks tests
 # ---------------------------------------------------------------------------
 

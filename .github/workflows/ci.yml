@@ -200,7 +200,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install h5py numpy pandas webdataset
+          pip install h5py numpy pandas webdataset boto3
 
       - uses: actions/setup-java@v4
         with:

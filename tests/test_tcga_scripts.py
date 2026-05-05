@@ -365,7 +365,9 @@ class TestUpdateStatus:
         status = build_status(inventory, results_dir=tmp_path, model_types=[model])
 
         row = status[status["slide_id"] == "TCGA-BR-A44T-01Z-00-DX1"].iloc[0]
-        assert Path(row["pt_path"]) == pt_file
+        # Local pt files are stored in wds_path until they are pushed to WDS on S3
+        assert row["status"] == "done"
+        assert Path(row["wds_path"]) == pt_file
 
 
 # ---------------------------------------------------------------------------

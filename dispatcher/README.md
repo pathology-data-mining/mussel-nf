@@ -15,12 +15,13 @@ The dispatcher solves the scheduling problem of processing large slide collectio
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        mussel-dispatcher                            │
 │                                                                     │
-│  Watcher(s)              BatchScheduler       RunManager            │
-│  ──────────              ─────────────        ──────────            │
-│  TcgaWatcher ──┐         fires when:          up to N concurrent    │
-│  LocalWatcher ─┼──queue─▶ • N slides ready   NF runs; each run     │
-│  S3Watcher ────┘         • timeout elapsed   calls post_batch_hooks │
-│                                               on success            │
+│  Watcher(s)                  BatchScheduler       RunManager        │
+│  ──────────                  ─────────────        ──────────        │
+│  TcgaWatcher ──────┐         fires when:          up to N concurrent│
+│  DatabricksWatcher─┼──queue─▶ • N slides ready   NF runs; each run │
+│  LocalWatcher ─────┤         • timeout elapsed   calls post_batch  │
+│  S3Watcher ────────┘                              hooks on success  │
+│                                                                     │
 │  StateStore (SQLite) tracks all slides/batches for crash recovery   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -49,6 +50,7 @@ Watchers run in background threads and push slides onto a shared queue.
 | `local` | Directory on disk — polls for new `.svs`/`.tiff` files |
 | `s3` | S3-compatible bucket — polls for new objects by prefix |
 | `tcga` | GDC API — syncs inventory, resolves paths, downloads missing slides |
+| `databricks` | Databricks SQL warehouse — queries IMPACT-matched slide inventory |
 
 Multiple watchers can run simultaneously (e.g., local + tcga).
 
@@ -71,6 +73,17 @@ On every poll cycle (`poll_interval_seconds`, default 3600 s):
 5. **Download missing slides** — if `download_enabled: true`, slides with `needs_download: true` are submitted to a `ThreadPoolExecutor`. Each download runs `gdc-client download` and enqueues the slide as soon as it completes.
 
 **Key throughput property:** downloads for batch N+1 overlap with featurization of batch N, and up to `max_concurrent_runs` Nextflow jobs run simultaneously.
+
+#### DatabricksWatcher (MSK IMPACT slides)
+
+Queries a Databricks SQL warehouse to discover slides from the MSK IMPACT-matched cohort. On every poll cycle (`poll_interval_seconds`, default 86400 s = 1 day, since IMPACT tables update infrequently):
+
+1. **Query warehouse** — executes a SQL join of `impact_matched_slides` and `slide_inventory` to retrieve `(slide_id, slide_path, oncotree_code)` tuples for all slides with a valid S3 path.
+2. **Enqueue new slides** — slides not already in the StateStore are added and pushed to the dispatch queue. Already-known slides are skipped.
+
+Credentials are resolved by the Databricks SDK in priority order:
+1. `DATABRICKS_HOST` + `DATABRICKS_TOKEN` environment variables
+2. `~/.databrickscfg` DEFAULT profile
 
 ### 2. BatchScheduler
 
@@ -152,7 +165,7 @@ The config is a YAML file. See [`tcga_dispatcher.yaml`](tcga_dispatcher.yaml) fo
 
 | Field | Default | Description |
 |---|---|---|
-| `inventory_csv` | required | Path to TCGA inventory CSV (managed by `tcga_sync_inventory.py`) |
+| `inventory_csv` | required | Path to TCGA inventory CSV (managed by `sync_inventory`) |
 | `status_csv` | required | Path to per-slide status CSV |
 | `results_dir` | required | NF `outdir` to scan for completed features |
 | `model` | `ctranspath` | Feature model — used to determine which slides are already done |
@@ -169,11 +182,46 @@ The config is a YAML file. See [`tcga_dispatcher.yaml`](tcga_dispatcher.yaml) fo
 | `download_dir` | `""` | Where `gdc-client` writes files (defaults to `local_slides_dir`) |
 | `download_concurrency` | `4` | Parallel download threads |
 | `gdc_token_file` | `""` | Path to GDC user token for controlled-access data |
-| `scripts_dir` | `""` | Path to `scripts/tcga/`; defaults to `{repo_dir}/scripts/tcga` |
+| `wds_destinations` | `{}` | `{model: s3_or_local_path}` — auto-generates `append_wds` post-batch hook per model |
+| `wds_staging_dir` | `""` | Local staging dir for S3 WDS destinations |
+| `wds_s3_max_concurrency` | `4` | Boto3 multipart upload threads per S3 write |
+| `databricks_volume_folder` | `""` | Databricks volume folder to sync status Parquet to (e.g. `/Volumes/cat/schema/vol/`) |
+| `databricks_volume_path` | `""` | Full Databricks volume path for the Parquet file (alternative to `volume_folder`) |
+| `databricks_table` | `""` | Delta table name to refresh after Parquet sync |
+| `databricks_job_id` | `""` | Databricks job ID to trigger after Parquet sync |
+
+### DatabricksWatcher fields (`type: databricks`)
+
+| Field | Default | Description |
+|---|---|---|
+| `warehouse_id` | required | Databricks SQL warehouse ID to run queries against |
+| `source_filter` | `[]` | List of `slide_inventory.source` values to include (e.g. `['ECS2']`); empty = all |
+| `additional_where` | `""` | Extra SQL `WHERE` clause appended with `AND` |
+| `min_file_size_mb` | `10.0` | Skip slides smaller than this (MB) |
+| `poll_interval_seconds` | `86400` | How often to poll (default 1 day — IMPACT tables update infrequently) |
+| `wds_destinations` | `{}` | `{model: s3_or_local_path}` — auto-generates `append_wds` post-batch hook per model |
+| `wds_staging_dir` | `""` | Local staging dir for S3 WDS destinations |
+| `wds_s3_max_concurrency` | `4` | Boto3 multipart upload threads per S3 write |
+
+**Requires:** `pip install databricks-sdk`
+
+**Example config:**
+
+```yaml
+watchers:
+  - type: databricks
+    warehouse_id: abc123def456
+    source_filter: [ECS2]
+    min_file_size_mb: 50
+    poll_interval_seconds: 86400
+    wds_destinations:
+      hoptimus1: s3://my-bucket/wds/hoptimus1
+    wds_staging_dir: /data/wds-staging
+```
 
 ## Slide Path Resolution
 
-`tcga_prepare_samples.py` resolves each slide in this priority order:
+`mussel_dispatcher.tcga.prepare_samples` resolves each TCGA slide in this priority order:
 
 1. **Local disk** (`local_slides_dir`) — if the `.svs` file exists locally
 2. **S3** (`s3_base`) — if the object exists in the configured bucket

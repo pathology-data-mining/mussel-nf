@@ -46,6 +46,26 @@ The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive 
 
 3. When the execution completes, results will be in `params.outdir` (default: `results/`).
 
+## Continuous Processing (Dispatcher)
+
+For large-scale cohorts (e.g. all TCGA slides, MSK IMPACT), use the **mussel-dispatcher** rather than invoking Nextflow directly. The dispatcher:
+
+- Streams slides from multiple sources (TCGA GDC API, Databricks SQL warehouse, local directories, S3 buckets)
+- Batches slides and dispatches parallel Nextflow runs up to a configurable concurrency limit
+- Tracks all slides and batches in SQLite — safe to kill and restart at any time
+- Runs post-batch hooks to append outputs to [WebDataset](https://github.com/webdataset/webdataset) shards after each batch
+
+```bash
+# Start the dispatcher (streams TCGA slides → Nextflow → WDS shards)
+cd dispatcher/
+python -m mussel_dispatcher tcga_dispatcher.yaml
+
+# Monitor via dashboard
+python -m mussel_dispatcher.dashboard.server tcga_dispatcher.yaml --port 8050
+```
+
+See [`dispatcher/README.md`](dispatcher/README.md) for full configuration reference, watcher types, and deployment notes. For TCGA-specific details (slide types, GDC inventory, path resolution) see [`dispatcher/docs/tcga.md`](dispatcher/docs/tcga.md).
+
 ## Supported Models
 
 **Patch encoders** (`params.featurize.model_types`):

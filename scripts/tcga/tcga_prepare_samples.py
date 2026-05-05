@@ -175,6 +175,12 @@ def _list_s3_files(
         client_kwargs["aws_access_key_id"] = key
         client_kwargs["aws_secret_access_key"] = secret
 
+    from botocore.config import Config
+    client_kwargs["config"] = Config(
+        connect_timeout=10,
+        read_timeout=30,
+        retries={"max_attempts": 3, "mode": "standard"},
+    )
     s3 = boto3.client("s3", **client_kwargs)
 
     existing: set[str] = set()

@@ -161,6 +161,12 @@ def _make_s3_client(endpoint_url: str | None = None,
         kwargs["aws_access_key_id"] = access_key
     if secret_key:
         kwargs["aws_secret_access_key"] = secret_key
+    from botocore.config import Config
+    kwargs["config"] = Config(
+        connect_timeout=10,
+        read_timeout=60,
+        retries={"max_attempts": 3, "mode": "standard"},
+    )
     return boto3.client("s3", **kwargs)
 
 

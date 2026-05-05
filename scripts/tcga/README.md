@@ -100,19 +100,19 @@ slide_type: DX1,DX2  # first two diagnostic slides per sample
 dispatcher/mussel-dispatcher.py        ← primary orchestrator (streaming)
   │
   ├─ TcgaWatcher:
-  │    ├─ tcga_sync_inventory.py       ← GDC API → inventory CSV (cached, TTL 24h)
-  │    ├─ tcga_update_status.py        ← scan results dir → status CSV
-  │    └─ tcga_prepare_samples.py      ← path resolution, S3 check, gdc-client download
+  │    ├─ mussel_dispatcher.tcga.sync_inventory   ← GDC API → inventory CSV (cached, TTL 24h)
+  │    ├─ mussel_dispatcher.tcga.update_status    ← scan results dir → status CSV
+  │    └─ mussel_dispatcher.tcga.prepare_samples  ← path resolution, S3 check, gdc-client download
   │
   ├─ BatchScheduler → nextflow run     ← parallel Nextflow batches (SLURM)
   │
   └─ Post-batch hooks:
-       └─ scripts/append_wds.py        ← append .pt/.h5 → per-group WDS shards (S3)
+       └─ mussel_dispatcher.tcga.append_wds  ← append .pt/.h5 → per-group WDS shards (S3)
 ```
 
 ### Path Resolution
 
-For each pending slide, `tcga_prepare_samples.py` resolves `slide_path`
+For each pending slide, `prepare_samples` resolves `slide_path`
 using this priority chain:
 
 ```
@@ -168,7 +168,7 @@ python dispatcher/mussel-dispatcher.py /data/tcga/tcga_dispatcher.yaml
 
 ## Scripts
 
-### `tcga_sync_inventory.py` — GDC Inventory
+### `sync_inventory` — GDC Inventory
 
 Fetches the full TCGA slide inventory from the GDC API and writes
 `tcga_inventory.csv`. Subsequent calls within `max_age_hours` (default 24h)
@@ -180,7 +180,7 @@ Columns: file_id, file_name, case_submitter_id, project_id,
 ```
 
 ```bash
-python tcga_sync_inventory.py \
+python -m mussel_dispatcher.tcga.sync_inventory \
     --output tcga_inventory.csv \
     [--project TCGA-BRCA]       \  # filter to one project
     [--max-age-hours 24]        \  # cache TTL (0 = always fetch)
@@ -191,7 +191,7 @@ Exit codes: `0` = updated, `2` = no changes (cache still fresh), `1` = error.
 
 ---
 
-### `tcga_update_status.py` — Status Tracking
+### `update_status` — Status Tracking
 
 Scans a nextflow results directory for completed outputs (`.features.pt` and
 `.patch.h5` files) and writes `tcga_status.csv`.
@@ -202,7 +202,7 @@ Columns: file_id, slide_id, project_id, slide_type, model,
 ```
 
 ```bash
-python tcga_update_status.py \
+python -m mussel_dispatcher.tcga.update_status \
     --inventory tcga_inventory.csv \
     --results-dir /data/tcga-results \
     --output tcga_status.csv \
@@ -211,14 +211,14 @@ python tcga_update_status.py \
 
 ---
 
-### `tcga_prepare_samples.py` — Path Resolution
+### `prepare_samples` — Path Resolution
 
 Resolves the filesystem or S3 path for each pending slide and writes a
 nextflow-compatible `samples_to_run.csv`. Also writes a `.meta.csv` sidecar
 with `needs_download` flags used by the dispatcher.
 
 ```bash
-python tcga_prepare_samples.py \
+python -m mussel_dispatcher.tcga.prepare_samples \
     --inventory tcga_inventory.csv \
     --status tcga_status.csv \
     --output samples_to_run.csv \
@@ -236,7 +236,7 @@ Exit codes: `0` = success, `2` = no pending slides, `1` = error.
 
 ---
 
-### `scripts/append_wds.py` — WDS Shard Building
+### `append_wds` — WDS Shard Building
 
 Appends `.features.pt` (and optionally `.patch.h5` coords) to
 [WebDataset](https://webdataset.github.io/webdataset/) tar shards, grouped
@@ -245,14 +245,14 @@ never duplicates entries.
 
 ```bash
 # Via results dir (auto-discovers models), routing by TCGA inventory:
-python scripts/append_wds.py \
+python -m mussel_dispatcher.tcga.append_wds \
     --results-dir /data/tcga-results \
     --inventory tcga_inventory.csv \
     --wds-dest s3://pathology/tcga-features/wds \
     --staging-dir /data/wds-staging
 
 # Explicit model and dirs:
-python scripts/append_wds.py \
+python -m mussel_dispatcher.tcga.append_wds \
     --pt-dir /data/tcga-results/features/ctranspath/pt \
     --h5-dir /data/tcga-results/features/ctranspath/tile_h5 \
     --model-type ctranspath \
@@ -265,13 +265,13 @@ python scripts/append_wds.py \
 
 ---
 
-### `tcga_sync_databricks.py` — Databricks Sync
+### `sync_databricks` — Databricks Sync
 
 Uploads the status CSV as Parquet to a Databricks Unity Catalog volume and
 optionally triggers a Databricks job to refresh a Delta table.
 
 ```bash
-python tcga_sync_databricks.py \
+python -m mussel_dispatcher.tcga.sync_databricks \
     --status tcga_status.csv \
     --inventory tcga_inventory.csv \
     --volume-path /Volumes/catalog/schema/vol/tcga_status.parquet \

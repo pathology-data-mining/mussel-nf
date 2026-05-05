@@ -151,12 +151,12 @@ class TestParseHit:
         return hit
 
     def test_all_columns_present(self):
-        from scripts.tcga.tcga_sync_inventory import _parse_hit, GDC_COLUMNS
+        from mussel_dispatcher.tcga.sync_inventory import _parse_hit, GDC_COLUMNS
         row = _parse_hit(self._make_hit())
         assert set(row.keys()) == set(GDC_COLUMNS)
 
     def test_core_fields(self):
-        from scripts.tcga.tcga_sync_inventory import _parse_hit
+        from mussel_dispatcher.tcga.sync_inventory import _parse_hit
         row = _parse_hit(self._make_hit())
         assert row["file_id"] == "aaaa-0001"
         assert row["project_id"] == "TCGA-BRCA"
@@ -164,7 +164,7 @@ class TestParseHit:
         assert row["file_size"] == 500_000_000
 
     def test_metadata_fields(self):
-        from scripts.tcga.tcga_sync_inventory import _parse_hit
+        from mussel_dispatcher.tcga.sync_inventory import _parse_hit
         row = _parse_hit(self._make_hit())
         assert row["primary_site"] == "Breast"
         assert row["disease_type"] == "Breast Invasive Carcinoma"
@@ -178,7 +178,7 @@ class TestParseHit:
         assert row["percent_stromal_cells"] == 35.0
 
     def test_missing_optional_fields_default_empty(self):
-        from scripts.tcga.tcga_sync_inventory import _parse_hit
+        from mussel_dispatcher.tcga.sync_inventory import _parse_hit
         # Minimal hit — no demographic, diagnoses, samples
         hit = {
             "file_id": "x",
@@ -203,7 +203,7 @@ class TestParseHit:
 def _make_gdc_row(file_id: str, project_id: str = "TCGA-BRCA",
                   updated: str = "2024-01-01T00:00:00") -> dict:
     """Minimal GDC-column row (no temporal columns) for merge tests."""
-    from scripts.tcga.tcga_sync_inventory import GDC_COLUMNS
+    from mussel_dispatcher.tcga.sync_inventory import GDC_COLUMNS
     base = {c: "" for c in GDC_COLUMNS}
     base.update({"file_id": file_id, "project_id": project_id, "updated_datetime": updated})
     return base
@@ -213,15 +213,15 @@ class TestMergeInventory:
     """merge_inventory() correctly tracks new, removed, and re-appearing slides."""
 
     def _old(self, rows: list[dict]) -> pd.DataFrame:
-        from scripts.tcga.tcga_sync_inventory import INVENTORY_COLUMNS
+        from mussel_dispatcher.tcga.sync_inventory import INVENTORY_COLUMNS
         return pd.DataFrame(rows, columns=INVENTORY_COLUMNS).astype(str).fillna("")
 
     def _new(self, rows: list[dict]) -> pd.DataFrame:
-        from scripts.tcga.tcga_sync_inventory import GDC_COLUMNS
+        from mussel_dispatcher.tcga.sync_inventory import GDC_COLUMNS
         return pd.DataFrame(rows, columns=GDC_COLUMNS).astype(str).fillna("")
 
     def test_new_slide_gets_first_seen_date(self):
-        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        from mussel_dispatcher.tcga.sync_inventory import merge_inventory
         old = self._old([{**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": ""}])
         new = self._new([_make_gdc_row("aaa"), _make_gdc_row("bbb")])
         merged, added, _, _ = merge_inventory(old, new, "2024-06-01")
@@ -231,7 +231,7 @@ class TestMergeInventory:
         assert len(added) == 1 and added.iloc[0]["file_id"] == "bbb"
 
     def test_removed_slide_gets_removed_date(self):
-        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        from mussel_dispatcher.tcga.sync_inventory import merge_inventory
         old = self._old([
             {**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": ""},
             {**_make_gdc_row("bbb"), "first_seen_date": "2024-01-01", "removed_date": ""},
@@ -243,7 +243,7 @@ class TestMergeInventory:
         assert len(removed) == 1 and removed.iloc[0]["file_id"] == "bbb"
 
     def test_already_removed_not_double_stamped(self):
-        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        from mussel_dispatcher.tcga.sync_inventory import merge_inventory
         old = self._old([
             {**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": ""},
             {**_make_gdc_row("bbb"), "first_seen_date": "2024-01-01", "removed_date": "2024-03-01"},
@@ -255,7 +255,7 @@ class TestMergeInventory:
         assert len(removed) == 0  # not newly removed this run
 
     def test_reappearing_slide_clears_removed_date(self):
-        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        from mussel_dispatcher.tcga.sync_inventory import merge_inventory
         old = self._old([
             {**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": "2024-03-01"},
         ])
@@ -268,7 +268,7 @@ class TestMergeInventory:
         assert len(removed) == 0
 
     def test_first_seen_date_preserved_on_update(self):
-        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        from mussel_dispatcher.tcga.sync_inventory import merge_inventory
         old = self._old([
             {**_make_gdc_row("aaa", updated="2024-01-01T00:00:00"),
              "first_seen_date": "2023-11-01", "removed_date": ""},
@@ -281,7 +281,7 @@ class TestMergeInventory:
 
     def test_snapshot_query(self):
         """Simulate point-in-time snapshot: first_seen_date <= T AND removed_date empty or > T."""
-        from scripts.tcga.tcga_sync_inventory import merge_inventory
+        from mussel_dispatcher.tcga.sync_inventory import merge_inventory
         old = self._old([
             {**_make_gdc_row("aaa"), "first_seen_date": "2024-01-01", "removed_date": ""},
             {**_make_gdc_row("bbb"), "first_seen_date": "2024-01-01", "removed_date": "2024-04-01"},
@@ -310,7 +310,7 @@ class TestUpdateStatus:
     """build_status() scans a results dir and emits pending/done per slide×model."""
 
     def test_marks_slides_done_when_pt_exists(self, tmp_path):
-        from scripts.tcga.tcga_update_status import build_status
+        from mussel_dispatcher.tcga.update_status import build_status
 
         # Slides 1 & 3 have completed; slides 2 & 4 are pending
         model = "ctranspath"
@@ -328,7 +328,7 @@ class TestUpdateStatus:
         assert set(pending["slide_id"]) == {"TCGA-BR-A44U-01Z-00-DX1", "TCGA-LU-A5YY-01Z-00-DX1"}
 
     def test_all_pending_when_no_results(self, tmp_path):
-        from scripts.tcga.tcga_update_status import build_status
+        from mussel_dispatcher.tcga.update_status import build_status
 
         inventory = make_inventory()
         status = build_status(inventory, results_dir=tmp_path, model_types=["ctranspath"])
@@ -337,7 +337,7 @@ class TestUpdateStatus:
         assert len(status) == len(INVENTORY_ROWS)
 
     def test_multiple_models_independent(self, tmp_path):
-        from scripts.tcga.tcga_update_status import build_status
+        from mussel_dispatcher.tcga.update_status import build_status
 
         for model in ("ctranspath", "uni2h"):
             pt_dir = tmp_path / "features" / model / "pt"
@@ -355,7 +355,7 @@ class TestUpdateStatus:
             assert (sub["status"] == "done").sum() == 1
 
     def test_pt_path_recorded(self, tmp_path):
-        from scripts.tcga.tcga_update_status import build_status
+        from mussel_dispatcher.tcga.update_status import build_status
 
         model = "ctranspath"
         pt_file = tmp_path / "features" / model / "pt" / "TCGA-BR-A44T-01Z-00-DX1.features.pt"
@@ -396,11 +396,11 @@ class TestPrepareSamples:
         return tmp_path
 
     def test_local_path_resolved(self, local_slides_dir):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -421,11 +421,11 @@ class TestPrepareSamples:
         assert local_row["slide_path"] == expected
 
     def test_s3_path_for_available_slides(self, local_slides_dir):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -448,11 +448,11 @@ class TestPrepareSamples:
             assert row["slide_path"] == f"s3://pathology/TCGA/{file_id}/{file_name}"
 
     def test_needs_download_for_missing_slides(self, local_slides_dir):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -468,7 +468,7 @@ class TestPrepareSamples:
         assert row["needs_download"]
 
     def test_skip_done_excludes_completed_slides(self, local_slides_dir):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         inventory = make_inventory()
         status = pd.DataFrame([
@@ -476,7 +476,7 @@ class TestPrepareSamples:
         ])
 
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -493,7 +493,7 @@ class TestPrepareSamples:
 
     def test_partial_download_flagged_as_needs_download(self, tmp_path):
         """A local file whose size doesn't match inventory is re-flagged."""
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         file_id = "aaaa0000-0000-0000-0000-000000000001"
         file_name = "TCGA-BR-A44T-01Z-00-DX1.1A2B3C4D-0000-0000-0000-000000000000.svs"
@@ -503,7 +503,7 @@ class TestPrepareSamples:
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=set(),  # not on S3 either
         ):
             result = prepare_samples(
@@ -518,11 +518,11 @@ class TestPrepareSamples:
         assert row["needs_download"], "partial download should be flagged"
 
     def test_limit_respected(self, local_slides_dir):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         inventory = make_inventory()
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=S3_FILE_IDS,
         ):
             result = prepare_samples(
@@ -537,7 +537,7 @@ class TestPrepareSamples:
         assert len(result) == 2
 
     def test_slide_type_filter(self, local_slides_dir):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         # Add a TS1 slide to inventory
         extra = pd.DataFrame([{
@@ -551,7 +551,7 @@ class TestPrepareSamples:
         inventory = pd.concat([make_inventory(), extra], ignore_index=True).astype(str)
 
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=set(),
         ):
             result = prepare_samples(
@@ -566,7 +566,7 @@ class TestPrepareSamples:
         ), "TS1 slide should be filtered out by DX prefix filter"
 
     def test_sample_type_filter_excludes_normal(self, local_slides_dir):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         extra = pd.DataFrame([{
             "file_id": "ffff0000-0000-0000-0000-000000000006",
@@ -580,7 +580,7 @@ class TestPrepareSamples:
         inventory = pd.concat([make_inventory(), extra], ignore_index=True).fillna("").astype(str)
 
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=set(),
         ):
             result = prepare_samples(
@@ -595,7 +595,7 @@ class TestPrepareSamples:
         ), "Normal tissue slide should be excluded by sample_type filter"
 
     def test_sample_type_filter_tumor_substring(self):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         rows = [
             {"file_id": "a1", "file_name": "TCGA-XX-0001-01Z-00-DX1.A.svs",
@@ -619,7 +619,7 @@ class TestPrepareSamples:
         assert "TCGA-XX-0003-11Z-00-DX1" not in ids, "Normal should be excluded"
 
     def test_sample_type_filter_all_disables_filter(self):
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
 
         rows = [
             {"file_id": "b1", "file_name": "TCGA-YY-0001-01Z-00-DX1.A.svs",
@@ -660,7 +660,7 @@ class TestAppendWds:
         return tmp_path, model, pt_dir, h5_dir
 
     def test_shards_created_per_cancer_type(self, tmp_path, results_dir):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -682,7 +682,7 @@ class TestAppendWds:
         assert luad_shard.exists(), "LUAD shard not created"
 
     def test_index_has_correct_entries(self, tmp_path, results_dir):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -704,7 +704,7 @@ class TestAppendWds:
         assert index["TCGA-LU-A5YX-01Z-00-DX1"]["project_id"] == "TCGA-LUAD"
 
     def test_index_json_persisted(self, tmp_path, results_dir):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -725,7 +725,7 @@ class TestAppendWds:
         assert len(saved) == 3
 
     def test_shard_contains_features_npy(self, tmp_path, results_dir):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -748,7 +748,7 @@ class TestAppendWds:
         assert len(feature_entries) == 2  # 2 BRCA slides
 
     def test_h5_coords_embedded_in_shard(self, tmp_path, results_dir):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -773,7 +773,7 @@ class TestAppendWds:
 
     def test_idempotent_second_run(self, tmp_path, results_dir):
         """Running append_wds twice must not duplicate entries."""
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -801,7 +801,7 @@ class TestDeleteLocal:
     """append_wds() with delete_local=True removes source files after WDS flush."""
 
     def test_delete_local_removes_pt_and_h5(self, tmp_path):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -828,7 +828,7 @@ class TestDeleteLocal:
         assert not h5_file.exists(), ".patch.h5 should be deleted after WDS flush"
 
     def test_delete_local_false_keeps_files(self, tmp_path):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -855,7 +855,7 @@ class TestDeleteLocal:
         assert h5_file.exists(), ".patch.h5 should be kept when delete_local=False"
 
     def test_delete_local_dry_run_keeps_files(self, tmp_path):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -885,7 +885,7 @@ class TestWdsManifest:
 
     def test_manifest_csv_written_with_full_path(self, tmp_path):
         import pandas as pd
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         model = "ctranspath"
         wds_dest = str(tmp_path / "wds")
@@ -915,7 +915,7 @@ class TestWdsManifest:
 
     def test_manifest_csv_appends_across_runs(self, tmp_path):
         import pandas as pd
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         model = "ctranspath"
         wds_dest = str(tmp_path / "wds")
@@ -938,7 +938,7 @@ class TestWdsManifest:
         assert set(df["slide_id"]) == {"TCGA-BR-A44T-01Z-00-DX1", "TCGA-BR-A44U-01Z-00-DX1"}
 
     def test_manifest_csv_not_written_on_dry_run(self, tmp_path):
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -964,9 +964,9 @@ class TestEndToEnd:
     """Drive all three stages in sequence with shared fixtures."""
 
     def test_full_pipeline(self, tmp_path):
-        from scripts.tcga.tcga_update_status import build_status
-        from scripts.tcga.tcga_prepare_samples import prepare_samples
-        from scripts.append_wds import append_wds
+        from mussel_dispatcher.tcga.update_status import build_status
+        from mussel_dispatcher.tcga.prepare_samples import prepare_samples
+        from mussel_dispatcher.tcga.append_wds import append_wds
 
         model = "ctranspath"
         inventory = make_inventory()
@@ -988,7 +988,7 @@ class TestEndToEnd:
         # Slide 2 (BRCA) is on S3; slide 4 (LUAD) needs download
         s3_file_ids = {"bbbb0000-0000-0000-0000-000000000002/TCGA-BR-A44U-01Z-00-DX1.2B3C4D5E-0000-0000-0000-000000000000.svs"}
         with patch(
-            "scripts.tcga.tcga_prepare_samples._list_s3_files",
+            "mussel_dispatcher.tcga.prepare_samples._list_s3_files",
             return_value=s3_file_ids,
         ):
             samples = prepare_samples(

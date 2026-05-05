@@ -176,7 +176,7 @@ class Config:
                         args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
                     if self.cleanup_results:
                         args.append("--delete-local")
-                    hooks.append({"command": "python {repo_dir}/scripts/append_wds.py", "args": args})
+                    hooks.append({"command": "python -m mussel_dispatcher.tcga.append_wds", "args": args})
 
             if w.type != "tcga":
                 continue
@@ -200,7 +200,7 @@ class Config:
                         args.append("--s3-endpoint=" + w.s3_endpoint)
                     if self.cleanup_results:
                         args.append("--delete-local")
-                    hooks.append({"command": "python {repo_dir}/scripts/append_wds.py", "args": args})
+                    hooks.append({"command": "python -m mussel_dispatcher.tcga.append_wds", "args": args})
 
             if w.databricks_volume_folder or w.databricks_volume_path:
                 args = ["--inventory=" + w.inventory_csv, "--status=" + w.status_csv]
@@ -213,7 +213,7 @@ class Config:
                 if w.databricks_job_id:
                     args.append("--job-id=" + w.databricks_job_id)
                 db_hooks.append({
-                    "command": "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py",
+                    "command": "python -m mussel_dispatcher.tcga.sync_databricks",
                     "args": args,
                 })
 

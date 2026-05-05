@@ -23,7 +23,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy pandas pytest webdataset h5py requests
+          pip install numpy pandas pytest webdataset h5py requests boto3
+          pip install -e dispatcher/
 
       - name: Run pytest
         run: pytest tests/ -v --ignore=tests/testdata
@@ -200,7 +201,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install h5py numpy pandas webdataset boto3
+          pip install h5py numpy pandas webdataset
+          pip install -e dispatcher/
 
       - uses: actions/setup-java@v4
         with:

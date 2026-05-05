@@ -34,7 +34,7 @@ nextflow_pipeline {
 
             // Run append_wds against the stub output
             def result = [
-                "python3", "-m", "scripts.append_wds",
+                "python3", "-m", "mussel_dispatcher.tcga.append_wds",
                 "--pt-dir",    "${outputDir}/features/resnet50",
                 "--h5-dir",    "${outputDir}/features/resnet50",
                 "--inventory", invFile.absolutePath,

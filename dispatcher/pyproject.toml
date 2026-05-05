@@ -10,11 +10,23 @@ requires-python = ">=3.10"
 dependencies = [
     "pyyaml",
     "boto3",
+    "pandas",
+    "numpy",
+    "torch",
+    "h5py",
+    "webdataset",
+    "requests",
 ]
 
 [project.scripts]
-mussel-dispatcher = "mussel_dispatcher.__main__:main"
-mussel-dashboard  = "mussel_dispatcher.dashboard.server:main"
+mussel-dispatcher      = "mussel_dispatcher.__main__:main"
+mussel-dashboard       = "mussel_dispatcher.dashboard.server:main"
+mussel-append-wds      = "mussel_dispatcher.tcga.append_wds:main"
+mussel-update-status   = "mussel_dispatcher.tcga.update_status:main"
+mussel-prepare-samples = "mussel_dispatcher.tcga.prepare_samples:main"
+mussel-sync-inventory  = "mussel_dispatcher.tcga.sync_inventory:main"
+mussel-sync-databricks = "mussel_dispatcher.tcga.sync_databricks:main"
+mussel-poll-mpp        = "mussel_dispatcher.tcga.poll_mpp:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

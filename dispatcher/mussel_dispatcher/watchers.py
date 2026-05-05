@@ -395,7 +395,6 @@ class TcgaWatcher(threading.Thread):
         self.state = state
         self.stop_event = stop_event
         self._outdir = outdir
-        self._scripts_dir = cfg.scripts_dir or str(Path(repo_dir) / "scripts" / "tcga")
         self._max_slide_retries = max_slide_retries
         from concurrent.futures import ThreadPoolExecutor
         self._download_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tcga-dl")
@@ -415,8 +414,8 @@ class TcgaWatcher(threading.Thread):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _run_script(self, script: str, args: list) -> int:
-        cmd = [sys.executable, str(Path(self._scripts_dir) / script)] + args
+    def _run_script(self, module: str, args: list) -> int:
+        cmd = [sys.executable, "-m", f"mussel_dispatcher.tcga.{module}"] + args
         log.info("TcgaWatcher: $ %s", " ".join(str(a) for a in cmd))
         env = dict(os.environ)
         if self.cfg.s3_access_key:
@@ -443,7 +442,7 @@ class TcgaWatcher(threading.Thread):
         ]
         if self.cfg.project:
             sync_args += ["--project", self.cfg.project]
-        rc = self._run_script("tcga_sync_inventory.py", sync_args)
+        rc = self._run_script("sync_inventory", sync_args)
         if rc not in (0, 2):
             log.error("TcgaWatcher: inventory sync failed — skipping this poll")
             return
@@ -492,7 +491,7 @@ class TcgaWatcher(threading.Thread):
         slide_mpp_csv = os.path.join(os.path.dirname(__file__), "tcga_slide_mpp.csv")
         if os.path.exists(slide_mpp_csv):
             status_args += ["--slide-mpp", slide_mpp_csv]
-        rc = self._run_script("tcga_update_status.py", status_args)
+        rc = self._run_script("update_status", status_args)
         if rc != 0:
             log.error("TcgaWatcher: status update failed — skipping this poll")
             return
@@ -525,7 +524,7 @@ class TcgaWatcher(threading.Thread):
         if self.cfg.sample_type and self.cfg.sample_type.lower() != "all":
             prepare_args += ["--sample-type", self.cfg.sample_type]
 
-        rc = self._run_script("tcga_prepare_samples.py", prepare_args)
+        rc = self._run_script("prepare_samples", prepare_args)
         if rc == 2:
             log.info("TcgaWatcher: no pending slides this poll")
             return

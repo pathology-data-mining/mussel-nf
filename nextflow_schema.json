@@ -49,7 +49,7 @@
                     "description": "watch this path for sample svs files"
                 },
                 "publish_slide_prefix": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "description": "include first 4 digits of the slide ID in the publish dir",
                     "default": true
                 },
@@ -75,7 +75,7 @@
             "default": "reef"
         },
         "use_one_step_workflow": {
-            "type": "boolean",
+            "type": ["boolean", "string"],
             "description": "Use one-step tessellation and featurization workflow",
             "help_text": "When true, uses TESSELLATE_FEATURIZE_BATCH for combined tessellation and feature extraction. When false, uses separate TESSELLATE and FEATURIZE_BATCH processes.",
             "default": false
@@ -100,7 +100,7 @@
                     "description": "Confidence threshold for the legacy tile classifier (0\u20131). Tiles below this score are discarded."
                 },
                 "filter_tiles": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Enable legacy classifier-based tile filtering. After tessellation, extracts patch features with filter_model_type and applies a .pkl classifier to discard non-tissue tiles."
                 },
@@ -170,12 +170,12 @@
                     "description": "Minimum fraction of a patch that must be tissue to be retained. Default 0.0 (keep all). Requires Mussel v1.2.0+."
                 },
                 "remove_artifacts": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Use GrandQC neural artifact remover to exclude artifact regions from the tissue mask during tessellation. Does not require a separate classifier model. Requires Mussel v1.2.0+."
                 },
                 "remove_penmarks": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Detect and exclude pen mark regions before tessellation. Requires Mussel v1.2.0+."
                 },
@@ -193,17 +193,17 @@
                     "description": "If set, use this value (\u00b5m/px) as the slide's native MPP instead of reading from slide metadata. Use when a slide lacks MPP tags and the metadata-based fallback produces incorrect results."
                 },
                 "save_slide_thumbnail": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "save slide thumbnails"
                 },
                 "save_tile_png": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "save tiles as png"
                 },
                 "stitch_tiles": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "generate stitched tiles"
                 }
@@ -263,7 +263,7 @@
                     }
                 },
                 "use_gpu": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": true,
                     "description": "use the GPU for feature extraction"
                 },
@@ -335,7 +335,7 @@
                     }
                 },
                 "save_features_to_h5": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": true,
                     "description": "Save patch-level features to HDF5 (.h5) in addition to .pt slide tensors."
                 },
@@ -399,7 +399,7 @@
                     "schema": "assets/schema_oncotree_map.json"
                 },
                 "skip_tile_caching": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "description": "skip the tile caching",
                     "default": true
                 }
@@ -464,7 +464,7 @@
                     "description": "Random seed for linear probe cross-validation."
                 },
                 "multiclass": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Enable multiclass mode (>=3 classes) for linear probe benchmarking."
                 }
@@ -476,17 +476,17 @@
             "type": "object",
             "properties": {
                 "enabled": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Enable WebDataset shard output. When true, per-slide .pt (and optionally .h5) feature files are collected and packed into .tar shards after extraction."
                 },
                 "group_by_oncotree": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "When true, produce separate shard sets per oncotree_code from the sample sheet. Requires oncotree_code column in samples_csv. When false, all slides are sharded together under the group 'all'."
                 },
                 "shard_h5": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Extract tile coordinates from .h5 patch-feature files and store as .coords.npy in the shard alongside .features.npy. Note: .h5 files are large."
                 },

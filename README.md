@@ -1,6 +1,6 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.3.2).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel).
 
 ## Requirements
 
@@ -17,7 +17,7 @@ Two environment files are provided depending on which models you need:
 |---|---|---|
 | `mussel_env.yaml` | `torch-gpu` | All models **except** `googlepath`, `gigapath`, `gigapath_slide` |
 | `mussel_env_tf.yaml` | `tensorflow-gpu` | `googlepath` (Google Path Foundation, TensorFlow-based) |
-| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn + torch 2.11) |
+| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn) |
 
 The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive — they cannot be installed together. Use `-profile conda` with the default `mussel_env.yaml` for most workflows, and switch to the appropriate env file when running `googlepath` or `gigapath`.
 
@@ -61,7 +61,7 @@ cd dispatcher/
 python -m mussel_dispatcher tcga_dispatcher.yaml
 
 # Monitor via dashboard
-python -m mussel_dispatcher.dashboard.server tcga_dispatcher.yaml --port 8050
+python -m mussel_dispatcher.dashboard tcga_dispatcher.yaml --port 8050
 ```
 
 See [`dispatcher/README.md`](dispatcher/README.md) for full configuration reference, watcher types, and deployment notes. For TCGA-specific details (slide types, GDC inventory, path resolution) see [`dispatcher/docs/tcga.md`](dispatcher/docs/tcga.md).
@@ -81,7 +81,6 @@ See [`dispatcher/README.md`](dispatcher/README.md) for full configuration refere
 | `feather_slide` | `conch1_5` |
 | `chief_slide` | `ctranspath` |
 | `madeleine_slide` | `clip` |
-| `abmil_slide` | (encoder-agnostic — specify patch encoder separately) |
 
 See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 
@@ -364,12 +363,25 @@ nextflow run main.nf \
 Integration tests use [nf-test](https://www.nf-test.com) and are run via `make`:
 
 ```bash
-make test                  # run all tests
+make test                  # run all tests (requires GPU)
 make test-standard         # one-step workflow
 make test-two-step         # two-step workflow
 make test-wds              # WebDataset flat sharding
 make test-wds-grouped      # WebDataset grouped sharding (by oncotree_code)
 make test-multi-slide      # multi-slide sample aggregation
+```
+
+Stub tests run without a GPU and are used in CI:
+
+```bash
+make test-stub             # one-step stub
+make test-stub-two-step    # two-step stub
+make test-stub-filter      # two-step + tile filtering stub
+make test-stub-wds         # WebDataset stub
+make test-stub-wds-grouped # WebDataset grouped stub
+make test-stub-clip        # CLIP annotation stub
+make test-stub-multi-slide # multi-slide aggregation stub
+make test-stub-all         # all stubs in one pass
 ```
 
 Extra Nextflow profiles (e.g. `conda`, `slurm,cluster`) can be composed:

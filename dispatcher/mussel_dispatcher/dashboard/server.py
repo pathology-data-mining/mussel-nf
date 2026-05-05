@@ -240,7 +240,6 @@ def _build_handler(cfg: Config):
             now = time.time()
             if _s3_cache:
                 cached_s3 = {m: {"shards": v.get("shards", 0), "objects": v.get("objects", 0),
-                                  "orphan_shards": v.get("orphan_shards", 0),
                                   "error": v.get("error")} for m, v in _s3_cache.items()}
             oldest = min((v.get("ts", 0) for v in _s3_cache.values()), default=0)
             if now - oldest > _S3_CACHE_TTL:
@@ -268,7 +267,6 @@ def _build_handler(cfg: Config):
                 "slides": wds_slides,
                 "gap": max(0, db_total_expected - wds_slides),
                 "shards": cached_s3.get(m, {}).get("shards", 0),
-                "orphan_shards": cached_s3.get(m, {}).get("orphan_shards", 0),
                 "manifest_shards": manifest_shards,
                 "shard_stats": shard_stats,
                 "local_pt": local_pt.get(m, 0),

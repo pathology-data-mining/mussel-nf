@@ -307,29 +307,18 @@ def s3_stats(watcher, wds_prefix: str) -> dict[str, dict]:
         try:
             s3 = boto3.client("s3", **client_kwargs)
             paginator = s3.get_paginator("list_objects_v2")
-            shards = objects = orphan_shards = 0
-            # Valid shards:  {prefix}/{model}/{project}/shard.tar
-            # Orphan shards: {prefix}/{model}/{model}/{project}/shard.tar
-            model_prefix  = f"{prefix}/{model}/"
-            orphan_prefix = f"{prefix}/{model}/{model}/"
+            shards = objects = 0
+            model_prefix = f"{prefix}/{model}/"
             for page in paginator.paginate(Bucket=bucket, Prefix=model_prefix):
                 for obj in page.get("Contents", []):
-                    key = obj["Key"]
                     objects += 1
-                    if not key.endswith(".tar"):
-                        continue
-                    if key.startswith(orphan_prefix):
-                        orphan_shards += 1
-                    else:
+                    if obj["Key"].endswith(".tar"):
                         shards += 1
-            entry = {"shards": shards, "objects": objects,
-                     "orphan_shards": orphan_shards, "ts": now}
+            entry = {"shards": shards, "objects": objects, "ts": now}
             _s3_cache[model] = entry
-            results[model] = {"shards": shards, "objects": objects,
-                               "orphan_shards": orphan_shards}
+            results[model] = {"shards": shards, "objects": objects}
         except (BotoCoreError, ClientError, Exception) as exc:
-            entry = {"shards": 0, "objects": 0, "orphan_shards": 0,
-                     "error": str(exc)[:120], "ts": now}
+            entry = {"shards": 0, "objects": 0, "error": str(exc)[:120], "ts": now}
             _s3_cache[model] = entry
             results[model] = {"shards": 0, "objects": 0, "error": str(exc)[:120]}
 

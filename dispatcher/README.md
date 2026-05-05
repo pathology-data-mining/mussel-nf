@@ -52,15 +52,17 @@ Watchers run in background threads and push slides onto a shared queue.
 
 Multiple watchers can run simultaneously (e.g., local + tcga).
 
+> **TCGA deep-dive:** see [docs/tcga.md](docs/tcga.md) for slide types, sample types, script reference, WDS format, and design notes.
+
 #### TcgaWatcher (streaming TCGA processing)
 
 On every poll cycle (`poll_interval_seconds`, default 3600 s):
 
-1. **Sync inventory** — calls `tcga_sync_inventory.py` to fetch the latest GDC file listing. Skips re-fetch if the existing CSV is younger than `gdc_max_age_hours` (default 24 h).
+1. **Sync inventory** — calls `mussel_dispatcher.tcga.sync_inventory` to fetch the latest GDC file listing. Skips re-fetch if the existing CSV is younger than `gdc_max_age_hours` (default 24 h).
 
-2. **Update status** — calls `tcga_update_status.py` to scan the results directory and mark which slides already have features.
+2. **Update status** — calls `mussel_dispatcher.tcga.update_status` to scan the results directory and mark which slides already have features.
 
-3. **Resolve paths** — calls `tcga_prepare_samples.py --skip-done --model <model>`, which writes two files:
+3. **Resolve paths** — calls `mussel_dispatcher.tcga.prepare_samples --skip-done --model <model>`, which writes two files:
    - `*_dispatcher.csv` — sample sheet (`slide_id, slide_path, oncotree_code`)
    - `*_dispatcher.meta.csv` — resolution details including `needs_download` flag
 

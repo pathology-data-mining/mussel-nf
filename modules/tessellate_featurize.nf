@@ -203,10 +203,15 @@ process TESSELLATE_FEATURIZE_BATCH {
         torch.save(torch.zeros(1, n_feat), f"pt/{sid}.features.pt")
         with h5py.File(f"h5/{sid}.features.h5", "w") as f:
             f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
+            if not is_slide_model:
+                ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+                ds.attrs["patch_size"] = 512
         if is_slide_model:
             torch.save(torch.zeros(1, n_feat), f"pt/{sid}.patch_features.pt")
             with h5py.File(f"h5/{sid}.patch_features.h5", "w") as f:
                 f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
+                ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+                ds.attrs["patch_size"] = 512
         with h5py.File(f"tile_h5/{sid}.patch.h5", "w") as f:
             ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
             ds.attrs["native_mpp"] = 0.5

@@ -94,6 +94,16 @@ workflow EXTRACT_FEATURES {
                         tuple(meta, model_type, h5_file)
                     }
                 }
+
+            ch_patch_h5_out = FEATURIZE_BATCH.out.patch_h5
+                .flatMap { batch_meta, model_type, patch_h5_files ->
+                    def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
+                    def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
+                    def sorted_files = files_list.sort { it.name }
+                    [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
+                        tuple(meta, model_type, patch_h5_file)
+                    }
+                }
         } else {
             // Just pass model type strings - processes will look up paths from params
             ch_model_types = Channel.fromList(params.featurize.model_types)
@@ -134,6 +144,16 @@ workflow EXTRACT_FEATURES {
                         tuple(meta, model_type, h5_file)
                     }
                 }
+
+            ch_patch_h5_out = FEATURIZE_BATCH.out.patch_h5
+                .flatMap { batch_meta, model_type, patch_h5_files ->
+                    def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
+                    def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
+                    def sorted_files = files_list.sort { it.name }
+                    [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
+                        tuple(meta, model_type, patch_h5_file)
+                    }
+                }
         }
 
 
@@ -141,6 +161,7 @@ workflow EXTRACT_FEATURES {
         patches_h5 = ch_patches.h5
         pt = ch_pt_out
         h5 = ch_h5_out
+        patch_h5 = ch_patch_h5_out
 }
 
 
@@ -197,12 +218,23 @@ workflow EXTRACT_FEATURES_ONE_STEP {
                 }
             }
 
+        ch_patch_h5_out = TESSELLATE_FEATURIZE_BATCH.out.patch_h5
+            .flatMap { batch_meta, model_type, patch_h5_files ->
+                def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
+                def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
+                def sorted_files = files_list.sort { it.name }
+                [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
+                    tuple(meta, model_type, patch_h5_file)
+                }
+            }
+
         EMIT_MPP_META(ch_patches_out)
 
     emit:
         patches_h5 = ch_patches_out
         pt = ch_pt_out
         h5 = ch_h5_out
+        patch_h5 = ch_patch_h5_out
 }
 
 
@@ -239,10 +271,22 @@ workflow MUSSEL {
         // ── Precision benchmarking ────────────────────────────────────────────
         // When benchmark_precisions is set, cast float32 features to each listed
         // precision for side-by-side linear probe comparison (no GPU needed).
+
+        // Build patch-level h5 channel for linear probe:
+        // - Patch encoders: *.features.h5 already has coords+features
+        // - Slide encoders: *.patch_features.h5 (emitted as patch_h5) has coords+features
+        //   with model_type = patch encoder name (e.g. conch1_5 for titan_slide)
+        ch_lp_h5 = ch_extract_feat.h5
+            .filter { meta, model_type, h5 ->
+                def sm = params.featurize.slide_to_patch_mapping
+                !(sm && sm.containsKey(model_type))
+            }
+            .mix(ch_extract_feat.patch_h5)
+
         if (params.featurize.benchmark_precisions) {
             ch_benchmark_precisions = Channel.fromList(params.featurize.benchmark_precisions)
             CONVERT_FEATURES_PRECISION(
-                ch_extract_feat.h5.combine(ch_benchmark_precisions)
+                ch_lp_h5.combine(ch_benchmark_precisions)
                     .filter { meta, model_type, h5, target_precision ->
                         // Skip if target equals the source precision (no-op conversion)
                         def source_precision = (params.featurize.model_precision_overrides && params.featurize.model_precision_overrides[model_type])
@@ -251,9 +295,9 @@ workflow MUSSEL {
                         target_precision != source_precision
                     }
             )
-            LINEAR_PROBE(ch_annotations, ch_extract_feat.h5.mix(CONVERT_FEATURES_PRECISION.out.h5))
+            LINEAR_PROBE(ch_annotations, ch_lp_h5.mix(CONVERT_FEATURES_PRECISION.out.h5))
         } else {
-            LINEAR_PROBE(ch_annotations, ch_extract_feat.h5)
+            LINEAR_PROBE(ch_annotations, ch_lp_h5)
         }
         // ─────────────────────────────────────────────────────────────────────
 

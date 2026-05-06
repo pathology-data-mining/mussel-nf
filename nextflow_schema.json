@@ -418,7 +418,7 @@
                 },
                 "annotation_class_mapping_yaml": {
                     "type": "string",
-                    "description": "mapping of annotation bmp IDs to class"
+                    "description": "Optional YAML mapping BMP pixel values to remapped class IDs. When omitted, raw non-zero BMP pixel values are used directly as class labels."
                 },
                 "cv": {
                     "type": "integer",

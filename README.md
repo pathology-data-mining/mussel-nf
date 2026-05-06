@@ -162,7 +162,12 @@ automatically when `params.linear_probe.annotations_csv` is set.
 | Parameter | Description |
 |---|---|
 | `params.linear_probe.annotations_csv` | CSV with `slide_id` and `annotation_bmp_path` columns. Each row maps a slide to a BMP mask where pixel values are annotation class IDs. |
-| `params.linear_probe.annotation_class_mapping_yaml` | YAML mapping BMP pixel values (integers) to class names. Without this, the benchmark is skipped. |
+
+#### Optional inputs
+
+| Parameter | Description |
+|---|---|
+| `params.linear_probe.annotation_class_mapping_yaml` | YAML mapping BMP pixel values (integers) to remapped class IDs. When omitted, raw non-zero BMP pixel values are used directly as class labels — sufficient for most multiclass cases where BMP values already represent the desired class IDs. |
 
 #### Annotation CSV format
 
@@ -173,19 +178,28 @@ TCGA-XX-1234-01Z-00-DX1,/path/to/TCGA-XX-1234.bmp
 
 #### Class mapping YAML format
 
-Pixel values in the BMP map to integer class IDs. The YAML remaps those IDs to named classes.
-Background pixels (value 0) are always excluded.
+Use this when you need to remap BMP pixel values (e.g. collapse multiple classes, exclude specific
+values, or create binary labels). Background pixels (value 0) are always excluded regardless.
 
 ```yaml
-# Binary example: tumour vs. stroma
+# Binary example: remap BMP values 1→class 0, 2→class 1
 1: 0   # annotation ID 1 → class 0 (negative / background)
 2: 1   # annotation ID 2 → class 1 (positive / tumour)
 ```
 
-For multiclass, set `params.linear_probe.multiclass = true` and emit ≥ 3 distinct non-zero class IDs:
+For multiclass with identity mapping (BMP values used as-is), omit the YAML and set
+`params.linear_probe.multiclass = true`:
+
+```bash
+nextflow run main.nf ... \
+  --linear_probe.annotations_csv annotations.csv \
+  --linear_probe.multiclass
+```
+
+Or provide an explicit mapping if you need to remap values:
 
 ```yaml
-# Multiclass example
+# Multiclass example with explicit mapping
 1: 1   # tumour
 2: 2   # stroma
 3: 3   # necrosis

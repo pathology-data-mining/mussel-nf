@@ -361,6 +361,7 @@ def append_wds(
     manifest_csv: Path | None = None,
     s3_max_concurrency: int = 4,
     slide_to_project: "dict[str, str] | None" = None,
+    failed_slides: "set[str] | None" = None,
 ) -> dict:
     """Append all .features.pt files in pt_dir to WDS shards.
 
@@ -385,6 +386,19 @@ def append_wds(
     already_indexed = set(index.keys())
     log.info("Loaded index: %d slides already in WDS", len(already_indexed))
 
+    # Remove any stale index entries for slides that are now known failures.
+    if failed_slides:
+        stale = already_indexed & failed_slides
+        if stale:
+            log.warning("Removing %d failed slides from wds_index: %s",
+                        len(stale), ", ".join(sorted(stale)[:10]))
+            for sid in stale:
+                del index[sid]
+            already_indexed -= stale
+            if not dry_run:
+                _save_index(index, wds_dest, model_type, staging_dir, s3_max_concurrency)
+                log.info("Pruned wds_index.json (%d entries remaining)", len(index))
+
     pt_files = sorted(pt_dir.rglob("*.features.pt"))
     log.info("Found %d .pt files in %s", len(pt_files), pt_dir)
 
@@ -404,6 +418,10 @@ def append_wds(
         slide_id = _slide_id_from_pt(pt_path)
 
         if slide_id_filter is not None and slide_id not in slide_id_filter:
+            continue
+
+        if failed_slides and slide_id in failed_slides:
+            log.debug("Skipping failed slide: %s", slide_id)
             continue
 
         if slide_id in already_indexed:
@@ -570,6 +588,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="S3 access key ID. Falls back to ECS_ACCESS_KEY env var.")
     parser.add_argument("--s3-secret-key", default=None,
                         help="S3 secret access key. Falls back to ECS_SECRET_KEY env var.")
+    parser.add_argument("--status-csv", default=None,
+                        help="Path to tcga_status.csv (slide_id, model, status). "
+                             "Slides with status='failed' are skipped and any stale "
+                             "index entries for them are removed.")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
@@ -644,6 +666,24 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     rc = 0
+    # Build failed_slides set from status CSV (per-model, using requested model(s)).
+    failed_slides: set[str] | None = None
+    if args.status_csv and Path(args.status_csv).exists():
+        import pandas as _pd_status
+        try:
+            sdf = _pd_status.read_csv(args.status_csv, dtype=str).fillna("")
+            model_col = "model" if "model" in sdf.columns else None
+            status_col = "status" if "status" in sdf.columns else None
+            if "slide_id" in sdf.columns and status_col:
+                mask = sdf[status_col].str.lower() == "failed"
+                if model_col:
+                    mask = mask & (sdf[model_col].isin(models_to_run))
+                failed_slides = set(sdf.loc[mask, "slide_id"].str.strip())
+                log.info("Status CSV: %d failed slide(s) will be excluded from WDS",
+                         len(failed_slides))
+        except Exception as exc:
+            log.warning("Could not read --status-csv %s: %s", args.status_csv, exc)
+
     for model in models_to_run:
         if args.pt_dir:
             pt_dir = Path(args.pt_dir)
@@ -671,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
                 manifest_csv=Path(args.manifest_csv) if args.manifest_csv else None,
                 s3_max_concurrency=args.s3_max_concurrency,
                 slide_to_project=slide_to_project,
+                failed_slides=failed_slides,
             )
         except Exception as exc:
             log.error("Failed to append WDS for model %s: %s", model, exc)

@@ -191,6 +191,7 @@ class Config:
                         "--model-type=" + model,
                         "--slide-ids-csv={batch_csv}",
                         "--manifest-csv={outdir}/wds_manifest.csv",
+                        "--status-csv=" + w.status_csv,
                     ]
                     if w.wds_staging_dir:
                         args.append("--staging-dir=" + w.wds_staging_dir)

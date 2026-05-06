@@ -84,25 +84,32 @@ process EMIT_MPP_META {
 
     output:
     tuple val(meta), val("mpp_is_fallback"), env('MPP_IS_FALLBACK'), topic: slide_meta
+    tuple val(meta), val("native_mpp"),      env('NATIVE_MPP'),      topic: slide_meta
 
     script:
     """
-    export MPP_IS_FALLBACK=\$(python3 - <<'PYEOF'
+    python3 - > mpp_meta.env <<'PYEOF'
 import h5py, sys
 try:
     with h5py.File("${tile_h5}", "r") as f:
-        flag = f["coords"].attrs.get("mpp_is_fallback", None)
-    print("true" if flag else "false")
+        attrs = f["coords"].attrs
+        flag  = attrs.get("mpp_is_fallback", None)
+        mpp   = attrs.get("native_mpp", None)
+    print(f"MPP_IS_FALLBACK={'true' if flag else 'false'}")
+    print(f"NATIVE_MPP={mpp if mpp is not None else 'unknown'}")
 except Exception as e:
-    print("unknown", file=sys.stderr)
-    print("unknown")
+    print("MPP_IS_FALLBACK=unknown")
+    print("NATIVE_MPP=unknown")
 PYEOF
-)
+    source mpp_meta.env
+    export MPP_IS_FALLBACK
+    export NATIVE_MPP
     """
 
     stub:
     """
     export MPP_IS_FALLBACK=false
+    export NATIVE_MPP=0.5
     """
 }
 

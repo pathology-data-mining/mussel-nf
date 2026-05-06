@@ -30,7 +30,7 @@ process STACK_ANNOTATION_FEATURES {
     publishDir path: { "${params.outdir}/annotation_features/${model_type}/" }, mode: "${params.publish_mode}"
 
     input:
-    tuple val(model_type), path(annotation_features)
+    tuple val(model_type), path(annotation_features, stageAs: '?/*')
 
     output:
     tuple val(model_type), path("annotation_features.parquet")
@@ -38,10 +38,12 @@ process STACK_ANNOTATION_FEATURES {
     script:
     """
     #!/usr/bin/env python3
-    import pandas as pd
-    files = "${annotation_features}".split()
-    dfs = [pd.read_parquet(file) for file in files]
+    import glob, pandas as pd
+    files = sorted(glob.glob("*/*.annotation_features.parquet"))
+    dfs = [pd.read_parquet(f) for f in files]
     df = pd.concat(dfs, ignore_index=True)
+    # Deduplicate in case the same slide appears more than once (e.g. from --resume)
+    df = df.drop_duplicates()
     df.to_parquet("annotation_features.parquet")
     """
 

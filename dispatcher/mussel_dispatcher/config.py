@@ -48,6 +48,7 @@ class WatcherConfig:
     download_dir: str = ""          # local directory for downloaded slides (required if download_enabled)
     scripts_dir: str = ""
     wds_destinations: dict = field(default_factory=dict)
+    wds_patch_encoders: dict = field(default_factory=dict)  # slide_model → patch_encoder_model
     wds_staging_dir: str = ""
     wds_s3_max_concurrency: int = 4
     secrets_env_file: str = ""
@@ -176,6 +177,9 @@ class Config:
                         args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
                     if self.cleanup_results:
                         args.append("--delete-local")
+                        patch_enc = w.wds_patch_encoders.get(model)
+                        if patch_enc:
+                            args.append("--also-delete-pt-dirs={outdir}/features/" + patch_enc)
                     hooks.append({"command": "python -m mussel_dispatcher.tcga.append_wds", "args": args})
 
             if w.type != "tcga":
@@ -201,6 +205,9 @@ class Config:
                         args.append("--s3-endpoint=" + w.s3_endpoint)
                     if self.cleanup_results:
                         args.append("--delete-local")
+                        patch_enc = w.wds_patch_encoders.get(model)
+                        if patch_enc:
+                            args.append("--also-delete-pt-dirs={outdir}/features/" + patch_enc)
                     hooks.append({"command": "python -m mussel_dispatcher.tcga.append_wds", "args": args})
 
             if w.databricks_volume_folder or w.databricks_volume_path:

@@ -362,6 +362,7 @@ def append_wds(
     s3_max_concurrency: int = 4,
     slide_to_project: "dict[str, str] | None" = None,
     failed_slides: "set[str] | None" = None,
+    also_delete_pt_dirs: "list[Path] | None" = None,
 ) -> dict:
     """Append all .features.pt files in pt_dir to WDS shards.
 
@@ -374,6 +375,9 @@ def append_wds(
     slide_to_project: pre-built slide_id → routing key (e.g. oncotree_code) dict.
       When provided, inventory_df is not used for routing. Useful when the
       routing key is already present in the batch CSV (e.g. Databricks watcher).
+    also_delete_pt_dirs: when delete_local is True, also delete any files
+      matching {slide_id}.* from these additional directories (e.g. patch encoder
+      .pt files that are no longer needed after the slide encoder is in WDS).
     Returns the updated index dict.
     """
     # Build slide_id → project_id lookup: prefer explicit dict, fall back to inventory_df
@@ -496,6 +500,22 @@ def append_wds(
             n_deleted += 1
         log.info("Deleted %d local source file pair(s) (pt + features.h5 + patch.h5)", n_deleted)
 
+    # Delete companion files from additional directories (e.g. patch encoder .pt files
+    # whose features have been consumed by a slide encoder now safely in WDS).
+    if delete_local and not dry_run and appended_locals and also_delete_pt_dirs:
+        processed_ids = {_slide_id_from_pt(pt) for pt, _ in appended_locals}
+        n_extra_deleted = 0
+        for extra_dir in also_delete_pt_dirs:
+            extra_dir = Path(extra_dir)
+            if not extra_dir.exists():
+                continue
+            for slide_id in processed_ids:
+                for f in extra_dir.glob(f"{slide_id}.*"):
+                    f.unlink(missing_ok=True)
+                    n_extra_deleted += 1
+        if n_extra_deleted:
+            log.info("Deleted %d extra file(s) from also-delete-pt-dirs", n_extra_deleted)
+
     # Write / append WDS manifest CSV: slide_id, model, wds_path (full S3 or local path)
     if manifest_csv is not None and not dry_run and n_appended > 0:
         manifest_csv = Path(manifest_csv)
@@ -577,6 +597,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="Delete local .pt and .patch.h5 source files after they are "
                              "successfully flushed to WDS (including S3 upload). "
                              "Has no effect with --dry-run.")
+    parser.add_argument("--also-delete-pt-dirs", default=None,
+                        help="Comma-separated list of additional directories from which to "
+                             "delete all files matching {slide_id}.* when --delete-local is "
+                             "active. Use to clean up patch encoder .pt files (e.g. conch1_5) "
+                             "after their slide encoder (e.g. titan_slide) is written to WDS.")
     parser.add_argument("--s3-max-concurrency", type=int, default=4,
                         help="Maximum number of parallel boto3 transfer threads per S3 "
                              "upload/download (default: 4). Reduce to limit ECS endpoint load "
@@ -712,6 +737,8 @@ def main(argv: list[str] | None = None) -> int:
                 s3_max_concurrency=args.s3_max_concurrency,
                 slide_to_project=slide_to_project,
                 failed_slides=failed_slides,
+                also_delete_pt_dirs=[Path(d) for d in args.also_delete_pt_dirs.split(",")]
+                    if args.also_delete_pt_dirs else None,
             )
         except Exception as exc:
             log.error("Failed to append WDS for model %s: %s", model, exc)

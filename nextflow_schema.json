@@ -503,7 +503,7 @@
                     "description": "Binary label column in labels_parquet (integer 0/1)."
                 },
                 "split_col": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "default": null,
                     "description": "Optional column containing pre-defined 'train'/'val'/'test' split labels. When null, a random slide-level split is used."
                 },

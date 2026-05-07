@@ -365,14 +365,14 @@ process SUMMARIZE_LINEAR_PROBE {
         base_f1  = base_data["test"]["tile_f1"]["mean"]
         delta_auc = "" if is_base else f"({auc - base_auc:+.4f})"
         delta_f1  = "" if is_base else f"({f1  - base_f1:+.4f})"
-        rows_html += f"""
+        rows_html += f'''
         <tr>
           <td><strong>{m}</strong></td>
           <td><span style="background:{badge_color};color:white;padding:2px 6px;border-radius:3px;font-size:0.8em">{prec}</span></td>
           <td>{_fmt(auc, astd)} <small style="color:#6b7280">{delta_auc}</small></td>
           <td>{_fmt(f1,  fstd)} <small style="color:#6b7280">{delta_f1}</small></td>
           <td>{_fmt(acc)}</td><td>{_fmt(wauc)}</td><td>{C}</td>
-        </tr>"""
+        </tr>'''
 
     class_cols_list = [c for c in (list(clf_dfs.values())[0].columns if clf_dfs else []) if c not in meta_cols_set]
     class_html = ""
@@ -391,16 +391,16 @@ process SUMMARIZE_LINEAR_PROBE {
         def _color(v):
             if isinstance(v, float) and _math.isnan(v): return ""
             return "color:#16a34a" if abs(v) < 0.001 else ("color:#d97706" if abs(v) < 0.01 else "color:#dc2626")
-        delta_rows_html += f"""<tr>
+        delta_rows_html += f'''<tr>
           <td>{row["base_model"]}</td><td>{row["precision"]}</td>
           <td style="{_color(d_auc)}">{_fmt(d_auc)}</td>
           <td style="{_color(d_f1)}">{_fmt(d_f1)}</td>
-        </tr>\\n"""
+        </tr>\\n'''
 
     summary_b64  = _img_b64("summary.png")
     heatmap_b64  = _img_b64("per_class_heatmap.png")
 
-    html = f"""<!DOCTYPE html>
+    html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -510,7 +510,7 @@ For hoptimus1 at scale (10k tiles × 1536 dims/slide), this is ~30 MB vs ~60 MB 
 </div>
 </div>
 
-</body></html>"""
+</body></html>'''
 
     pathlib.Path("report.html").write_text(html)
     print("HTML report written: report.html")

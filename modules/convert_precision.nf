@@ -36,12 +36,15 @@ process CONVERT_FEATURES_PRECISION {
 
         if target == "float16":
             features = features.astype(np.float16)
+            dst.create_dataset("features", data=features)
         elif target == "bfloat16":
-            features = features.astype(ml_dtypes.bfloat16)
+            # h5py does not support bfloat16 natively; store raw bytes as |V2 opaque void.
+            # The reader (mussel._numpy_to_torch) detects dtype.kind=="V", itemsize==2 and
+            # reinterprets as bfloat16.
+            features_bf16 = features.astype(ml_dtypes.bfloat16)
+            dst.create_dataset("features", data=features_bf16.view(np.uint16), dtype=np.dtype("|V2"))
         else:
-            pass  # keep float32
-
-        dst.create_dataset("features", data=features)
+            dst.create_dataset("features", data=features)
 
         # Copy root-level attributes, overriding embedding_precision
         for attr_key, attr_val in src.attrs.items():

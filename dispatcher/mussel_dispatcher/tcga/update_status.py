@@ -209,7 +209,7 @@ def build_status(
     wds_manifest: dict[tuple[str, str], str] | None = None,
     wds_bases: dict[str, str] | None = None,  # kept for backwards compat, no longer used
     failed_slides: dict[str, str] | None = None,
-    slide_mpp: dict[str, float] | None = None,
+    slide_mpp: dict[str, tuple[float, bool]] | None = None,
 ) -> pd.DataFrame:
     """Scan results_dir and WDS manifest for completed outputs.
 

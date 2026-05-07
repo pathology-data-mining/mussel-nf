@@ -2484,7 +2484,10 @@ class TestTowerShim:
         shim = self.shim
         shim.register_workflow("wf1", "b1", "dispatcher_b1")
         prog = shim.get_progress("b1")
-        assert prog is None or prog == {}  # no updates yet → task_counts empty
+        # After register only, task_counts is empty but state dict is returned
+        assert prog is not None
+        assert prog["batch_id"] == "b1"
+        assert prog["task_counts"] == {}
 
     def test_update_progress(self):
         shim = self.shim
@@ -2492,10 +2495,11 @@ class TestTowerShim:
         shim.update_progress("dispatcher_b2", {"succeeded": 5, "failed": 1, "cached": 2, "running": 3, "pending": 0})
         prog = shim.get_progress("b2")
         assert prog is not None
-        assert prog["succeeded"] == 5
-        assert prog["failed"] == 1
-        assert prog["cached"] == 2
-        assert prog["running"] == 3
+        tc = prog["task_counts"]
+        assert tc["succeeded"] == 5
+        assert tc["failed"] == 1
+        assert tc["cached"] == 2
+        assert tc["running"] == 3
 
     def test_mark_complete(self):
         shim = self.shim
@@ -2505,7 +2509,7 @@ class TestTowerShim:
         state = shim.get_state("b3")
         assert state["complete"] is True
         prog = shim.get_progress("b3")
-        assert prog["succeeded"] == 10
+        assert prog["task_counts"]["succeeded"] == 10
 
     def test_get_progress_unknown_batch(self):
         prog = self.shim.get_progress("nonexistent")
@@ -2675,8 +2679,8 @@ class TestTowerShimServerRoutes:
         )
         assert h._response_code == 200
         prog = shim.get_progress("test88")
-        assert prog["succeeded"] == 3
-        assert prog["running"] == 2
+        assert prog["task_counts"]["succeeded"] == 3
+        assert prog["task_counts"]["running"] == 2
 
     def test_trace_complete_route(self, tmp_path):
         import json

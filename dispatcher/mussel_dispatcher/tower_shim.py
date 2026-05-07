@@ -8,24 +8,25 @@ for each running batch without parsing log files.
 
 Tower protocol (endpoints the dispatcher server must handle):
 
-    GET  /user-info                     ← auth check; return stub user
-    POST /trace/create                  ← workflow start; return {workflowId}
-    PUT  /trace/{workflowId}/begin      ← workflow running
-    PUT  /trace/{workflowId}/progress   ← periodic task counts + per-task data
-    PUT  /trace/{workflowId}/heartbeat  ← keepalive with progress
-    PUT  /trace/{workflowId}/complete   ← workflow finished
+    GET  /user-info                     <- auth check; return stub user
+    POST /trace/create                  <- workflow start; return {workflowId}
+    PUT  /trace/{workflowId}/begin      <- workflow running
+    PUT  /trace/{workflowId}/progress   <- periodic task counts + per-task data
+    PUT  /trace/{workflowId}/heartbeat  <- keepalive with progress
+    PUT  /trace/{workflowId}/complete   <- workflow finished
 
-The workflowId returned by ``/trace/create`` is set to the batch_id parsed
-from the NF run name (``dispatcher_{batch_id}``), making the mapping
-transparent without any separate lookup.
+The ``progress`` object in each payload:
+    succeeded, failed, ignored, cached, pending, submitted, running,
+    retries, aborted, loadCpus, loadMemory, peakCpus, peakMemory,
+    peakRunning, processes (list of per-process ProgressRecord)
 
-The ``progress`` object in each heartbeat/progress payload has these int
-fields (all derived from ``WorkflowStats`` in the NF core):
+Each element of ``processes``:
+    process, pending, submitted, running, succeeded, failed, cached, ...
 
-    succeeded, failed, ignored, cached,
-    pending, submitted, running, retries, aborted
+Each task in ``tasks[]`` (/trace/progress only):
+    taskId, status, hash, name, process, tag, exit, start, complete, ...
 
-Thread safety: all mutations go through a single ``threading.Lock``.
+Thread safety: all mutations go through a single threading.Lock.
 """
 from __future__ import annotations
 
@@ -33,48 +34,95 @@ import threading
 import time
 from typing import Optional
 
-
 # ---------------------------------------------------------------------------
-# In-memory state
-# ---------------------------------------------------------------------------
-
 _lock = threading.Lock()
+_workflows: dict[str, "WorkflowState"] = {}
 
-# workflowId → WorkflowState dict
-_workflows: dict[str, dict] = {}
+_MAX_AGE_SECONDS = 3600
+_STALE_SECONDS   = 5 * 60
 
-# Maximum age (seconds) before a completed workflow is eligible for eviction.
-_MAX_AGE_SECONDS = 3600  # keep 1 hour of history
+
+def _task_counts_from_progress(p: dict) -> dict:
+    return {
+        "succeeded": p.get("succeeded", 0),
+        "failed":    p.get("failed", 0),
+        "cached":    p.get("cached", 0),
+        "running":   p.get("running", 0),
+        "pending":   p.get("pending", 0),
+        "submitted": p.get("submitted", 0),
+        "aborted":   p.get("aborted", 0),
+    }
 
 
 class WorkflowState:
-    """Holds the latest known state for one NF workflow (= one dispatcher batch)."""
-
     __slots__ = (
         "workflow_id", "batch_id", "run_name",
-        "progress", "task_counts", "complete",
+        "task_counts", "processes", "resources",
+        "failures", "complete",
         "started_at", "updated_at",
     )
 
     def __init__(self, workflow_id: str, batch_id: str, run_name: str):
-        self.workflow_id = workflow_id
-        self.batch_id = batch_id
-        self.run_name = run_name
-        self.progress: dict = {}        # latest WorkflowProgress from NF
-        self.task_counts: dict = {}     # computed from progress
-        self.complete = False
-        self.started_at = time.time()
+        self.workflow_id  = workflow_id
+        self.batch_id     = batch_id
+        self.run_name     = run_name
+        self.task_counts: dict       = {}
+        self.processes:   list[dict] = []   # per-process ProgressRecord list
+        self.resources:   dict       = {}   # loadCpus, loadMemory, peakMemory, …
+        self.failures:    list[dict] = []   # accumulated failed tasks (max 50)
+        self.complete     = False
+        self.started_at   = time.time()
+        self.updated_at   = time.time()
+
+    def _ingest(self, progress: dict, tasks: list[dict] | None = None) -> None:
+        """Update state from a progress payload.  Must be called under _lock."""
+        self.task_counts = _task_counts_from_progress(progress)
+        self.processes   = progress.get("processes") or []
+        self.resources   = {
+            k: progress[k]
+            for k in ("loadCpus", "loadMemory", "peakCpus", "peakMemory", "peakRunning")
+            if progress.get(k) is not None
+        }
+        if tasks:
+            seen = {f["taskId"] for f in self.failures if "taskId" in f}
+            for t in tasks:
+                if (t.get("status") or "").upper() == "FAILED" and t.get("taskId") not in seen:
+                    self.failures.append({
+                        "taskId":  t.get("taskId"),
+                        "process": t.get("process", ""),
+                        "name":    t.get("name", ""),
+                        "tag":     t.get("tag"),
+                        "exit":    t.get("exit"),
+                        "hash":    t.get("hash"),
+                    })
+            if len(self.failures) > 50:
+                self.failures = self.failures[-50:]
         self.updated_at = time.time()
 
+    def is_stalled(self) -> bool:
+        return not self.complete and (time.time() - self.updated_at) > _STALE_SECONDS
+
     def as_dict(self) -> dict:
+        done  = self.task_counts.get("succeeded", 0) + self.task_counts.get("cached", 0)
+        total = done + sum(
+            self.task_counts.get(k, 0)
+            for k in ("failed", "running", "pending", "submitted")
+        )
         return {
-            "workflow_id": self.workflow_id,
-            "batch_id": self.batch_id,
-            "run_name": self.run_name,
-            "progress": self.progress,
-            "complete": self.complete,
-            "started_at": self.started_at,
-            "updated_at": self.updated_at,
+            "workflow_id":  self.workflow_id,
+            "batch_id":     self.batch_id,
+            "run_name":     self.run_name,
+            "task_counts":  self.task_counts,
+            "processes":    self.processes,
+            "resources":    self.resources,
+            "failures":     self.failures,
+            "complete":     self.complete,
+            "stalled":      self.is_stalled(),
+            "done":         done,
+            "total":        total,
+            "pct":          round(done / total * 100) if total else 0,
+            "started_at":   self.started_at,
+            "updated_at":   self.updated_at,
         }
 
 
@@ -83,83 +131,48 @@ class WorkflowState:
 # ---------------------------------------------------------------------------
 
 def register_workflow(workflow_id: str, batch_id: str, run_name: str) -> None:
-    """Called when /trace/create is received.  Creates a new WorkflowState."""
     with _lock:
         _workflows[workflow_id] = WorkflowState(workflow_id, batch_id, run_name)
 
 
-def update_progress(workflow_id: str, progress: dict) -> None:
-    """Called on /trace/progress and /trace/heartbeat.
-
-    ``progress`` is the ``progress`` sub-object from the NF payload, e.g.:
-        {"succeeded": 5, "failed": 0, "cached": 2, "running": 3, ...}
-    """
+def update_progress(workflow_id: str, progress: dict,
+                    tasks: list[dict] | None = None) -> None:
     with _lock:
         state = _workflows.get(workflow_id)
         if state is None:
             return
-        state.progress = progress
-        state.updated_at = time.time()
-        # Pre-compute friendly task count dict for the dashboard.
-        state.task_counts = {
-            "succeeded": progress.get("succeeded", 0),
-            "failed":    progress.get("failed", 0),
-            "cached":    progress.get("cached", 0),
-            "running":   progress.get("running", 0),
-            "pending":   progress.get("pending", 0),
-            "submitted": progress.get("submitted", 0),
-            "aborted":   progress.get("aborted", 0),
-        }
+        state._ingest(progress, tasks)
 
 
 def mark_complete(workflow_id: str, progress: dict | None = None) -> None:
-    """Called on /trace/complete.  Optionally records final progress."""
     with _lock:
         state = _workflows.get(workflow_id)
         if state is None:
             return
         state.complete = True
-        state.updated_at = time.time()
         if progress:
-            state.progress = progress
-            state.task_counts = {
-                "succeeded": progress.get("succeeded", 0),
-                "failed":    progress.get("failed", 0),
-                "cached":    progress.get("cached", 0),
-                "running":   progress.get("running", 0),
-                "pending":   progress.get("pending", 0),
-                "submitted": progress.get("submitted", 0),
-                "aborted":   progress.get("aborted", 0),
-            }
+            state._ingest(progress)
+        else:
+            state.updated_at = time.time()
 
 
 def get_progress(batch_id: str) -> Optional[dict]:
-    """Return the latest task count dict for a batch, or None if not known."""
-    with _lock:
-        state = _by_batch_id(batch_id)
-        if state is None:
-            return None
-        return dict(state.task_counts) if state.task_counts else None
-
-
-def get_state(batch_id: str) -> Optional[dict]:
-    """Return the full WorkflowState dict for a batch, or None."""
+    """Return full state dict for a batch, or None if not known via Tower."""
     with _lock:
         state = _by_batch_id(batch_id)
         return state.as_dict() if state else None
 
 
+def get_state(batch_id: str) -> Optional[dict]:
+    return get_progress(batch_id)
+
+
 def get_all_states() -> list[dict]:
-    """Return a snapshot of all tracked workflow states (for debugging)."""
     with _lock:
         return [s.as_dict() for s in _workflows.values()]
 
 
 def evict_old(max_age_seconds: float = _MAX_AGE_SECONDS) -> int:
-    """Remove completed workflows older than *max_age_seconds*.
-
-    Returns the number of entries removed.
-    """
     cutoff = time.time() - max_age_seconds
     with _lock:
         to_remove = [
@@ -172,22 +185,16 @@ def evict_old(max_age_seconds: float = _MAX_AGE_SECONDS) -> int:
 
 
 def workflow_id_for_batch(batch_id: str) -> str:
-    """Canonical workflowId for a given batch_id (mirrors what /trace/create returns)."""
     return f"dispatcher_{batch_id}"
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _by_batch_id(batch_id: str) -> Optional[WorkflowState]:
-    """Return the WorkflowState for *batch_id* (must be called under lock)."""
-    # Primary lookup: workflowId = dispatcher_{batch_id}
     canonical = workflow_id_for_batch(batch_id)
     state = _workflows.get(canonical)
     if state:
         return state
-    # Fallback: linear scan in case of custom workflowId
     for s in _workflows.values():
         if s.batch_id == batch_id:
             return s
@@ -195,31 +202,19 @@ def _by_batch_id(batch_id: str) -> Optional[WorkflowState]:
 
 
 # ---------------------------------------------------------------------------
-# HTTP stub responses (used by server.py)
+# HTTP stub responses
 # ---------------------------------------------------------------------------
 
 def user_info_response() -> dict:
-    """Stub /user-info response that satisfies NF's auth check."""
     return {
         "user": {
-            "id": 1,
-            "userName": "dispatcher",
+            "id": 1, "userName": "dispatcher",
             "email": "dispatcher@localhost",
-            "firstName": "Mussel",
-            "lastName": "Dispatcher",
-            "avatar": None,
-            "organization": None,
-            "description": None,
+            "firstName": "Mussel", "lastName": "Dispatcher",
+            "avatar": None, "organization": None, "description": None,
         }
     }
 
 
 def trace_create_response(workflow_id: str) -> dict:
-    """Response to POST /trace/create — NF uses the returned workflowId for all
-    subsequent calls."""
-    return {
-        "workflowId": workflow_id,
-        "watchUrl": None,
-        "message": None,
-        "metadata": None,
-    }
+    return {"workflowId": workflow_id, "watchUrl": None, "message": None, "metadata": None}

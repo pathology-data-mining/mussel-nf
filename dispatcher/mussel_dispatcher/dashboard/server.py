@@ -92,20 +92,10 @@ def _build_handler(cfg: Config):
         in_flight_total = 0
         for rb in running_rows:
             slide_count = rb["slide_count"] or 0
-            # Prefer Tower shim real-time progress; fall back to log parsing.
-            tower_prog = _tower_shim.get_progress(rb["batch_id"])
-            if tower_prog:
-                done = tower_prog.get("succeeded", 0) + tower_prog.get("cached", 0)
-                total_tasks = done + tower_prog.get("failed", 0) + tower_prog.get("running", 0) + tower_prog.get("pending", 0)
-                if total_tasks > 0:
-                    in_flight_done += slide_count * done / total_tasks
-                    in_flight_total += slide_count
-            else:
-                log_info = parse_nf_log(rb["log_path"]) if rb["log_path"] else {}
-                np = log_info.get("progress")
-                if np and np["total"] > 0:
-                    in_flight_done += slide_count * np["done"] / np["total"]
-                    in_flight_total += slide_count
+            tower = _tower_shim.get_progress(rb["batch_id"])
+            if tower and tower.get("total", 0) > 0:
+                in_flight_done  += slide_count * tower["done"]  / tower["total"]
+                in_flight_total += slide_count
         if total:
             effective_done = succeeded + in_flight_done
             pct = round(effective_done / total * 100, 1)
@@ -146,46 +136,24 @@ def _build_handler(cfg: Config):
                         duration = int((t1 - t0).total_seconds())
                 except Exception:
                     pass
-            log_info = parse_nf_log(r["log_path"]) if r["log_path"] else {}
             slurm_batch = jobs_by_batch.get(r["batch_id"], {})
-            # Prefer Tower shim for real-time progress when the batch is RUNNING.
-            tower_prog = _tower_shim.get_progress(r["batch_id"]) if r["status"] == "RUNNING" else None
-            if tower_prog is not None:
-                nf_progress = {
-                    "succeeded": tower_prog.get("succeeded", 0),
-                    "failed":    tower_prog.get("failed", 0),
-                    "cached":    tower_prog.get("cached", 0),
-                    "running":   tower_prog.get("running", 0),
-                    "pending":   tower_prog.get("pending", 0),
-                }
-                done = nf_progress["succeeded"] + nf_progress["cached"]
-                total_tasks = done + nf_progress["failed"] + nf_progress["running"] + nf_progress["pending"]
-                nf_progress["pct"] = round(done / total_tasks * 100) if total_tasks else 0
-                nf_progress["done"] = done
-                nf_progress["total"] = total_tasks
-            else:
-                nf_progress = log_info.get("progress") if r["status"] == "RUNNING" else None
+            # Tower shim is the sole source of live progress data.
+            tower = _tower_shim.get_progress(r["batch_id"])
             result.append({
-                "batch_id": r["batch_id"],
-                "status": r["status"],
-                "slide_count": r["slide_count"],
+                "batch_id":      r["batch_id"],
+                "status":        r["status"],
+                "slide_count":   r["slide_count"],
                 "dispatched_at": start,
-                "completed_at": end,
-                "duration_s": duration,
+                "completed_at":  end,
+                "duration_s":    duration,
                 "nextflow_exit": r["nextflow_exit"],
-                "has_log": bool(r["log_path"] and os.path.exists(r["log_path"])),
-                "nf_progress": nf_progress,
-                "tower_active": tower_prog is not None,
-                "slurm_jobs": log_info.get("slurm_jobs"),
+                "has_log":       bool(r["log_path"] and os.path.exists(r["log_path"])),
+                # Tower live data (None when Tower not active for this batch)
+                "tower":         tower,
+                # SLURM data still useful for node/queue visibility
                 "slurm_running": slurm_batch.get("running"),
                 "slurm_pending": slurm_batch.get("pending"),
-                "slurm_nodes": slurm_batch.get("nodes", []),
-                "warn_count": log_info.get("warn_count", 0),
-                "last_warn": log_info.get("last_warn"),
-                "error_count": log_info.get("error_count", 0),
-                "first_error": log_info.get("first_error"),
-                "killed": log_info.get("killed"),
-                "failures": log_info.get("failures", []),
+                "slurm_nodes":   slurm_batch.get("nodes", []),
             })
         return result
 
@@ -399,7 +367,8 @@ def _build_handler(cfg: Config):
                     body = self._read_body()
                     progress = body.get("progress") or {}
                     if action in ("progress", "heartbeat"):
-                        _tower_shim.update_progress(workflow_id, progress)
+                        tasks = body.get("tasks") or []
+                        _tower_shim.update_progress(workflow_id, progress, tasks)
                         self._send_json({})
                     elif action == "complete":
                         _tower_shim.mark_complete(workflow_id, progress)

@@ -3,7 +3,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mussel Dispatcher Dashboard</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦪</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9AA;</text></svg>">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
@@ -31,23 +31,48 @@
   .badge-succeeded { background:#14532d; color:#4ade80; }
   .badge-failed    { background:#450a0a; color:#f87171; }
   .badge-pending   { background:#312e81; color:#a5b4fc; }
-  .log-block { background: #0f172a; border-radius: 6px; padding: 10px 12px;
-               font-family: monospace; font-size: 0.72rem; line-height: 1.5;
-               max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
-               color: #94a3b8; margin-bottom: 8px; }
-  .log-header { font-size: 0.75rem; color: #e2e8f0; margin-bottom: 4px; font-weight: 600; }
-  .progress-bar-wrap { background: #334155; border-radius: 999px; height: 8px; margin-top: 4px; }
-  .progress-bar { background: #22c55e; border-radius: 999px; height: 8px; transition: width .5s; }
-  .wds-row { display: flex; justify-content: space-between; padding: 4px 0;
-             border-bottom: 1px solid #334155; font-size: 0.8rem; }
-  .wds-row:last-child { border-bottom: none; }
+  .badge-stalled   { background:#451a03; color:#fb923c; }
+  .pbar-wrap { background: #0f172a; border-radius: 999px; height: 6px; margin-top: 3px; min-width: 80px; }
+  .pbar      { border-radius: 999px; height: 6px; transition: width .5s; }
+  .pbar-green  { background: #22c55e; }
+  .pbar-blue   { background: #38bdf8; }
+  .pbar-orange { background: #fb923c; }
+  .pbar-wrap-main { background: #334155; border-radius: 999px; height: 8px; margin-top: 4px; }
+  .pbar-main { background: #22c55e; border-radius: 999px; height: 8px; transition: width .5s; }
   .no-data { color: #475569; font-size: 0.8rem; }
-  details summary { cursor: pointer; padding: 4px 0; color: #94a3b8; font-size: 0.8rem; }
-  details summary:hover { color: #e2e8f0; }
-  details[open] summary { color: #38bdf8; }
-  .btn-refresh { background: #334155; border: none; color: #94a3b8; padding: 4px 12px;
-                border-radius: 4px; cursor: pointer; font-size: 0.75rem; }
-  .btn-refresh:hover { background: #475569; color: #e2e8f0; }
+  .btn-sm { background: #334155; border: none; color: #94a3b8; padding: 3px 10px;
+            border-radius: 4px; cursor: pointer; font-size: 0.72rem; }
+  .btn-sm:hover { background: #475569; color: #e2e8f0; }
+  /* Running batch cards */
+  .batch-card { background: #0f172a; border: 1px solid #334155; border-radius: 8px;
+                padding: 14px 16px; margin-bottom: 12px; }
+  .batch-card.stalled { border-color: rgba(251,146,60,.27); }
+  .batch-card-header { display: flex; justify-content: space-between; align-items: flex-start;
+                       margin-bottom: 10px; }
+  .batch-title { font-family: monospace; font-size: 0.85rem; font-weight: 600; }
+  .batch-meta  { font-size: 0.7rem; color: #64748b; margin-top: 2px; }
+  .process-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; margin-top: 8px; }
+  .process-item { background: #1e293b; border-radius: 6px; padding: 6px 10px; }
+  .process-name { font-size: 0.7rem; color: #94a3b8; font-family: monospace; margin-bottom: 3px;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .process-counts { font-size: 0.75rem; display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.68rem; font-weight: 600; }
+  .chip-green  { background: rgba(20,83,45,.27); color: #4ade80; }
+  .chip-blue   { background: rgba(12,74,110,.27); color: #38bdf8; }
+  .chip-red    { background: rgba(69,10,10,.4);   color: #f87171; }
+  .chip-gray   { background: #1e293b; color: #64748b; }
+  .chip-yellow { background: rgba(69,39,0,.27);   color: #fcd34d; }
+  .resource-row { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+  .resource-chip { background: #1e293b; border-radius: 4px; padding: 3px 8px; font-size: 0.72rem; color: #94a3b8; }
+  .resource-chip span { color: #e2e8f0; font-weight: 600; }
+  .failure-list { margin-top: 8px; }
+  .failure-item { background: #1e293b; border-left: 2px solid #f87171; padding: 4px 10px;
+                  margin-bottom: 4px; border-radius: 0 4px 4px 0; font-size: 0.72rem;
+                  font-family: monospace; color: #fca5a5; }
+  .failure-item .fi-name { color: #e2e8f0; font-weight: 600; }
+  .failure-item .fi-meta { color: #64748b; margin-left: 8px; }
+  .stall-banner { background: rgba(69,26,3,.13); border: 1px solid rgba(251,146,60,.27); border-radius: 4px;
+                  padding: 4px 10px; font-size: 0.75rem; color: #fb923c; margin-bottom: 8px; }
   /* Log modal */
   #log-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7);
                z-index:1000; align-items:center; justify-content:center; }
@@ -56,9 +81,9 @@
                    width:90vw; max-width:1100px; max-height:85vh; display:flex; flex-direction:column; }
   #log-modal-header { display:flex; justify-content:space-between; align-items:center;
                       padding:12px 16px; border-bottom:1px solid #334155; }
-  #log-modal-title { font-size:0.85rem; font-weight:600; color:#f8fafc; font-family:monospace; }
-  #log-modal-close { background:none; border:none; color:#94a3b8; font-size:1.4rem;
-                     cursor:pointer; line-height:1; padding:0 4px; }
+  #log-modal-title  { font-size:0.85rem; font-weight:600; color:#f8fafc; font-family:monospace; }
+  #log-modal-close  { background:none; border:none; color:#94a3b8; font-size:1.4rem;
+                      cursor:pointer; line-height:1; padding:0 4px; }
   #log-modal-close:hover { color:#f8fafc; }
   #log-modal-body { flex:1; overflow-y:auto; padding:12px 16px;
                     font-family:monospace; font-size:0.72rem; line-height:1.5;
@@ -71,36 +96,36 @@
   <div id="log-modal-box">
     <div id="log-modal-header">
       <span id="log-modal-title"></span>
-      <button id="log-modal-close" onclick="closeLogModal()">✕</button>
+      <button id="log-modal-close" onclick="closeLogModal()">&#x2715;</button>
     </div>
-    <pre id="log-modal-body">Loading…</pre>
+    <pre id="log-modal-body">Loading...</pre>
   </div>
 </div>
 <header>
-  <h1>🦪 Mussel Dispatcher Dashboard</h1>
+  <h1>&#x1F9AA; Mussel Dispatcher Dashboard</h1>
   <div style="display:flex;gap:12px;align-items:center">
-    <span id="last-updated">Loading…</span>
-    <button class="btn-refresh" onclick="refresh()">↻ Refresh</button>
+    <span id="last-updated">Loading...</span>
+    <button class="btn-sm" onclick="refresh()">&#x21BB; Refresh</button>
   </div>
 </header>
 
 <div class="grid">
-  <!-- Summary -->
+  <!-- Overview -->
   <div class="card full">
     <h2>Overview</h2>
     <div class="summary-grid" id="summary-grid">
-      <div class="stat"><div class="val" id="s-total">—</div><div class="lbl">Total Slides</div></div>
-      <div class="stat"><div class="val" id="s-done" style="color:#4ade80">—</div><div class="lbl">Succeeded</div></div>
-      <div class="stat"><div class="val" id="s-failed" style="color:#f87171">—</div><div class="lbl">Failed</div></div>
-      <div class="stat"><div class="val" id="s-pending" style="color:#a5b4fc">—</div><div class="lbl">Pending</div></div>
-      <div class="stat"><div class="val" id="s-dispatched" style="color:#38bdf8">—</div><div class="lbl">Dispatched</div></div>
-      <div class="stat" title="Slides with pt/h5 features generated (Nextflow succeeded). Does not include WDS upload status."><div class="val" id="s-pct">—</div><div class="lbl">% Features Extracted</div></div>
-      <div class="stat" title="Slides confirmed written to WDS shards and uploaded to S3, as a percentage of all SUCCEEDED+DISPATCHED slides (total expected)."><div class="val" id="s-wds-pct" style="color:#38bdf8">—</div><div class="lbl">% in WDS</div></div>
-      <div class="stat"><div class="val" id="s-running">—</div><div class="lbl">Running Batches</div></div>
-      <div class="stat"><div class="val" id="s-blacklisted" style="color:#fb923c">—</div><div class="lbl">Blacklisted</div></div>
+      <div class="stat"><div class="val" id="s-total">--</div><div class="lbl">Total Slides</div></div>
+      <div class="stat"><div class="val" id="s-done" style="color:#4ade80">--</div><div class="lbl">Succeeded</div></div>
+      <div class="stat"><div class="val" id="s-failed" style="color:#f87171">--</div><div class="lbl">Failed</div></div>
+      <div class="stat"><div class="val" id="s-pending" style="color:#a5b4fc">--</div><div class="lbl">Pending</div></div>
+      <div class="stat"><div class="val" id="s-dispatched" style="color:#38bdf8">--</div><div class="lbl">Dispatched</div></div>
+      <div class="stat" title="Features extracted (Nextflow succeeded)"><div class="val" id="s-pct">--</div><div class="lbl">% Features Extracted</div></div>
+      <div class="stat" title="Slides confirmed written to WDS shards on S3"><div class="val" id="s-wds-pct" style="color:#38bdf8">--</div><div class="lbl">% in WDS</div></div>
+      <div class="stat"><div class="val" id="s-running">--</div><div class="lbl">Running Batches</div></div>
+      <div class="stat"><div class="val" id="s-blacklisted" style="color:#fb923c">--</div><div class="lbl">Blacklisted</div></div>
     </div>
-    <div class="progress-bar-wrap" style="margin-top:12px">
-      <div class="progress-bar" id="progress-bar" style="width:0%"></div>
+    <div class="pbar-wrap-main" style="margin-top:12px">
+      <div class="pbar-main" id="progress-bar" style="width:0%"></div>
     </div>
   </div>
 
@@ -113,16 +138,22 @@
   <!-- WDS + S3 -->
   <div class="card">
     <h2>WDS</h2>
-    <div id="wds-content"><span class="no-data">Loading…</span></div>
+    <div id="wds-content"><span class="no-data">Loading...</span></div>
   </div>
 
   <!-- SLURM -->
   <div class="card">
     <h2>SLURM</h2>
-    <div id="slurm-content"><span class="no-data">Loading…</span></div>
+    <div id="slurm-content"><span class="no-data">Loading...</span></div>
   </div>
 
-  <!-- Batch table -->
+  <!-- Running batches - Tower live view -->
+  <div class="card full" id="running-card">
+    <h2>Running Batches <span id="running-tower-badge" style="display:none;font-size:0.7rem;font-weight:400;color:#38bdf8;margin-left:6px">&#x25CF; Tower live</span></h2>
+    <div id="running-content"><span class="no-data">No running batches.</span></div>
+  </div>
+
+  <!-- Batch history table -->
   <div class="card full">
     <h2>Recent Batches</h2>
     <div style="overflow-x:auto">
@@ -131,29 +162,18 @@
           <tr>
             <th>Batch ID</th>
             <th>Status</th>
-            <th>Tasks</th>
+            <th>Slides</th>
+            <th>Progress</th>
             <th>SLURM</th>
             <th>Started</th>
             <th>Duration</th>
-            <th>Alerts</th>
+            <th>Exit</th>
             <th>Log</th>
           </tr>
         </thead>
-        <tbody id="batch-tbody"><tr><td colspan="8" class="no-data">Loading…</td></tr></tbody>
+        <tbody id="batch-tbody"><tr><td colspan="9" class="no-data">Loading...</td></tr></tbody>
       </table>
     </div>
-  </div>
-
-  <!-- Log tails -->
-  <div class="card full" id="logs-card">
-    <h2>Live Logs (Running Batches)</h2>
-    <div id="logs-content"><span class="no-data">No running batches.</span></div>
-  </div>
-
-  <!-- .nextflow.log tail -->
-  <div class="card full" id="nflog-card">
-    <h2>.nextflow.log <span style="font-weight:400;color:#475569;font-size:0.75rem">(shared, last 40 lines)</span></h2>
-    <pre id="nflog-content" style="background:#0f172a;border-radius:6px;padding:10px 12px;font-size:0.7rem;line-height:1.5;color:#64748b;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin:0">Loading…</pre>
   </div>
 </div>
 
@@ -161,36 +181,38 @@
 let statusChart = null;
 let _chartJsReady = false;
 
-function onChartJsReady() {
-  _chartJsReady = true;
-  // Draw chart with latest data if already loaded
-  loadStatus();
-}
+function onChartJsReady() { _chartJsReady = true; loadStatus(); }
 
-function badge(status) {
+function badge(status, stalled) {
+  if (stalled) return '<span class="badge badge-stalled">STALLED</span>';
   const cls = {RUNNING:'running',SUCCEEDED:'succeeded',FAILED:'failed',PENDING:'pending',DISPATCHED:'running'}[status] || 'pending';
-  return `<span class="badge badge-${cls}">${status}</span>`;
+  return '<span class="badge badge-' + cls + '">' + status + '</span>';
 }
 
 function fmtDuration(s, startIso, ongoing) {
   let sec = s;
   if ((sec === null || sec === undefined) && startIso) {
-    // Compute elapsed from start to now for running batches
-    try { sec = Math.floor((Date.now() - new Date(startIso).getTime()) / 1000); } catch {}
+    try { sec = Math.floor((Date.now() - new Date(startIso).getTime()) / 1000); } catch(e) {}
   }
-  if (sec === null || sec === undefined || isNaN(sec) || sec < 0) return '—';
+  if (sec === null || sec === undefined || isNaN(sec) || sec < 0) return '--';
   let str;
   if (sec < 60) str = sec + 's';
   else if (sec < 3600) str = Math.floor(sec/60) + 'm ' + (sec%60) + 's';
   else str = Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
-  return ongoing ? str + ' <span title="ongoing" style="color:#f59e0b">⏳</span>' : str;
+  return ongoing ? str + ' <span title="ongoing" style="color:#f59e0b">&#x23F3;</span>' : str;
 }
 
 function fmtTime(iso) {
-  if (!iso) return '—';
-  try {
-    return new Date(iso).toLocaleString();
-  } catch { return iso; }
+  if (!iso) return '--';
+  try { return new Date(iso).toLocaleString(); } catch(e) { return iso; }
+}
+
+function fmtBytes(b) {
+  if (b == null) return '--';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
+  return (b/1073741824).toFixed(1) + ' GB';
 }
 
 async function apiFetch(url) {
@@ -199,33 +221,31 @@ async function apiFetch(url) {
   return r.json();
 }
 
+// Status overview
 async function loadStatus() {
   try {
     const d = await apiFetch('/api/status');
     const c = d.counts || {};
-    document.getElementById('s-total').textContent = d.total ?? '—';
-    document.getElementById('s-done').textContent = c.SUCCEEDED ?? 0;
-    document.getElementById('s-failed').textContent = c.FAILED ?? 0;
-    document.getElementById('s-pending').textContent = c.PENDING ?? 0;
-    document.getElementById('s-dispatched').textContent = c.DISPATCHED ?? 0;
-    document.getElementById('s-pct').textContent = (d.pct_done ?? 0) + '%';
-    document.getElementById('s-running').textContent = d.running_batches ?? 0;
+    document.getElementById('s-total').textContent       = d.total ?? '--';
+    document.getElementById('s-done').textContent        = c.SUCCEEDED ?? 0;
+    document.getElementById('s-failed').textContent      = c.FAILED ?? 0;
+    document.getElementById('s-pending').textContent     = c.PENDING ?? 0;
+    document.getElementById('s-dispatched').textContent  = c.DISPATCHED ?? 0;
+    document.getElementById('s-pct').textContent         = (d.pct_done ?? 0) + '%';
+    document.getElementById('s-running').textContent     = d.running_batches ?? 0;
     document.getElementById('s-blacklisted').textContent = d.blacklisted ?? 0;
-    document.getElementById('progress-bar').style.width = (d.pct_done ?? 0) + '%';
-
+    document.getElementById('progress-bar').style.width  = (d.pct_done ?? 0) + '%';
     const labels = Object.keys(c);
     const values = Object.values(c);
-    const colors = labels.map(l => ({
-      SUCCEEDED:'#22c55e', FAILED:'#ef4444', PENDING:'#6366f1', DISPATCHED:'#0ea5e9'
-    }[l] || '#64748b'));
-
-    if (typeof Chart === 'undefined' || !_chartJsReady) return; // Chart.js not yet loaded
+    const colors = labels.map(function(l) {
+      return {SUCCEEDED:'#22c55e',FAILED:'#ef4444',PENDING:'#6366f1',DISPATCHED:'#0ea5e9'}[l] || '#64748b';
+    });
+    if (typeof Chart === 'undefined' || !_chartJsReady) return;
     if (!statusChart) {
       statusChart = new Chart(document.getElementById('statusChart'), {
         type: 'doughnut',
-        data: { labels, datasets: [{ data: values, backgroundColor: colors, borderWidth: 0 }] },
-        options: { plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
-                   cutout: '60%' }
+        data: { labels: labels, datasets: [{ data: values, backgroundColor: colors, borderWidth: 0 }] },
+        options: { plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } }, cutout: '60%' }
       });
     } else {
       statusChart.data.labels = labels;
@@ -235,314 +255,336 @@ async function loadStatus() {
     }
   } catch(e) {
     document.getElementById('s-total').textContent = 'ERR';
-    console.error('loadStatus failed:', e);
+    console.error('loadStatus:', e);
   }
 }
 
+// Per-process breakdown
+function renderProcesses(processes) {
+  if (!processes || !processes.length) return '';
+  const items = processes.map(function(p) {
+    const name = (p.process || p.name || '?').split(':').pop();
+    const done  = (p.succeeded||0) + (p.cached||0);
+    const total = done + (p.failed||0) + (p.running||0) + (p.pending||0) + (p.submitted||0);
+    const pct   = total ? Math.round(done/total*100) : 0;
+    const run = p.running || 0;
+    const fail= p.failed  || 0;
+    return '<div class="process-item">' +
+      '<div class="process-name" title="' + (p.process||'') + '">' + name + '</div>' +
+      '<div class="pbar-wrap"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + pct + '%"></div></div>' +
+      '<div class="process-counts">' +
+        '<span class="chip chip-green">&#x2714; ' + done + '</span>' +
+        (run  ? '<span class="chip chip-blue">&#x25B6; ' + run  + '</span>' : '') +
+        (fail ? '<span class="chip chip-red">&#x2716; '  + fail + '</span>' : '') +
+        '<span class="chip chip-gray">' + pct + '%</span>' +
+      '</div></div>';
+  }).join('');
+  return '<div style="margin-top:6px;font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em">Processes</div>' +
+         '<div class="process-grid">' + items + '</div>';
+}
+
+// Resource metrics
+function renderResources(res) {
+  if (!res || !Object.keys(res).length) return '';
+  const parts = [];
+  if (res.loadCpus    != null) parts.push('<div class="resource-chip">CPU load <span>' + res.loadCpus + '</span></div>');
+  if (res.loadMemory  != null) parts.push('<div class="resource-chip">Mem load <span>' + fmtBytes(res.loadMemory) + '</span></div>');
+  if (res.peakCpus    != null) parts.push('<div class="resource-chip">Peak CPU <span>' + res.peakCpus + '</span></div>');
+  if (res.peakMemory  != null) parts.push('<div class="resource-chip">Peak mem <span>' + fmtBytes(res.peakMemory) + '</span></div>');
+  if (res.peakRunning != null) parts.push('<div class="resource-chip">Peak running <span>' + res.peakRunning + '</span></div>');
+  return parts.length ? '<div class="resource-row">' + parts.join('') + '</div>' : '';
+}
+
+// Failed task list
+function renderFailures(failures) {
+  if (!failures || !failures.length) return '';
+  const recent = failures.slice(-5).reverse();
+  const items = recent.map(function(f) {
+    const exit = f.exit != null ? ' exit:' + f.exit : '';
+    const tag  = f.tag  ? ' (' + f.tag + ')' : '';
+    return '<div class="failure-item">' +
+      '<span class="fi-name">' + (f.process||f.name||'?') + '</span>' + tag +
+      '<span class="fi-meta">' + exit + (f.hash ? ' #' + f.hash : '') + '</span>' +
+      '</div>';
+  }).join('');
+  return '<div class="failure-list">' +
+    '<div style="font-size:0.7rem;color:#f87171;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">' +
+    'Failed Tasks (last ' + Math.min(5,failures.length) + ' of ' + failures.length + ')</div>' +
+    items + '</div>';
+}
+
+// Full running batch card
+function renderBatchCard(b) {
+  const t = b.tower;
+  const stalled = t && t.stalled;
+  let progressHtml = '';
+  if (t) {
+    const tc = t.task_counts || {};
+    const done  = (tc.succeeded||0) + (tc.cached||0);
+    const total = done + (tc.failed||0) + (tc.running||0) + (tc.pending||0) + (tc.submitted||0);
+    const pct   = total ? Math.round(done/total*100) : 0;
+    const fail  = tc.failed||0;
+    progressHtml =
+      '<div style="margin-bottom:8px">' +
+        '<div style="display:flex;justify-content:space-between;font-size:0.75rem;margin-bottom:3px">' +
+          '<span>' +
+            '<span class="chip chip-green">&#x2714; ' + (tc.succeeded||0) + '</span> ' +
+            (tc.cached   ? '<span class="chip chip-blue" title="cached">' + tc.cached + ' cached</span> ' : '') +
+            (tc.running  ? '<span class="chip chip-blue">&#x25B6; ' + tc.running  + '</span> ' : '') +
+            (tc.pending  ? '<span class="chip chip-gray">&#x23F3; ' + tc.pending  + '</span> ' : '') +
+            (fail        ? '<span class="chip chip-red">&#x2716; '  + fail        + '</span>'  : '') +
+          '</span>' +
+          '<span style="color:#94a3b8">' + pct + '% &middot; ' + done + '/' + total + '</span>' +
+        '</div>' +
+        '<div class="pbar-wrap" style="height:8px"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + pct + '%;height:8px"></div></div>' +
+      '</div>';
+  }
+  const stalledHtml = stalled
+    ? '<div class="stall-banner">&#x26A0;&#xFE0F; No Tower heartbeat for &gt;5 min &mdash; batch may be stalled</div>' : '';
+  const slurmHtml = (b.slurm_running != null)
+    ? '<span style="font-size:0.72rem;color:#64748b">SLURM: <span style="color:#6ee7b7">' + b.slurm_running + '&#x25B6;</span>' +
+      (b.slurm_pending ? ' <span style="color:#fcd34d">' + b.slurm_pending + '&#x23F3;</span>' : '') + '</span>'
+    : '';
+  const lastHb = t && t.updated_at
+    ? '<span style="font-size:0.7rem;color:#475569">heartbeat ' + Math.round((Date.now()/1000 - t.updated_at)) + 's ago</span>'
+    : '';
+  const logBtn = b.has_log ? '<button class="btn-sm" onclick="showLog(\'' + b.batch_id + '\')">Log</button>' : '';
+  const towerContent = t
+    ? renderProcesses(t.processes) + renderResources(t.resources) + renderFailures(t.failures)
+    : '<span class="no-data" style="font-size:0.75rem">Tower not yet connected for this batch</span>';
+  return '<div class="batch-card' + (stalled?' stalled':'') + '">' +
+    '<div class="batch-card-header">' +
+      '<div>' +
+        '<div class="batch-title">' + b.batch_id + ' ' + badge(b.status, stalled) + '</div>' +
+        '<div class="batch-meta">' + (b.slide_count||'?') + ' slides &middot; started ' + fmtTime(b.dispatched_at) +
+        ' &middot; elapsed ' + fmtDuration(null, b.dispatched_at, true) + '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-shrink:0">' +
+        lastHb + ' ' + slurmHtml + ' ' + logBtn +
+      '</div>' +
+    '</div>' +
+    stalledHtml + progressHtml + towerContent +
+  '</div>';
+}
+
+// Batches: history table + running cards
 async function loadBatches() {
-  const tbody = document.getElementById('batch-tbody');
-  const logsDiv = document.getElementById('logs-content');
   try {
     const batches = await apiFetch('/api/batches');
-    if (!batches.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="no-data">No batches yet.</td></tr>';
-      logsDiv.innerHTML = '<span class="no-data">No running batches.</span>';
-      return;
-    }
-    tbody.innerHTML = batches.map(b => {
-      const np = b.nf_progress;
-      const tasksCell = np
-        ? `<span title="${np.done} of ${np.total} tasks">${np.done}/${np.total} <span style="color:#6ee7b7">(${np.pct}%)</span></span>`
-        : (b.slide_count ?? '—');
-      const slurmR = b.slurm_running;
-      const slurmP = b.slurm_pending;
-      const nodes = (b.slurm_nodes || []).join(', ');
-      let slurmCell = '—';
-      if (slurmR !== null && slurmR !== undefined) {
-        const tip = nodes ? `title="${nodes}"` : '';
-        slurmCell = `<span ${tip} style="cursor:${nodes?'help':'default'}">` +
-          `<span style="color:#6ee7b7">${slurmR}▶</span>` +
-          (slurmP ? ` <span style="color:#fcd34d">${slurmP}⏳</span>` : '') +
-          `</span>`;
-      }
-      // Alerts: killed > errors > warns
-      let alertCell = '—';
-      const parts = [];
-      if (b.killed !== null && b.killed !== undefined)
-        parts.push(`<span style="color:#f87171" title="Infra kill: ${b.killed} tasks killed">💀${b.killed}</span>`);
-      if (b.error_count)
-        parts.push(`<span style="color:#fca5a5" title="${b.first_error || 'errors'}">⛔${b.error_count}</span>`);
-      if (b.warn_count)
-        parts.push(`<span style="color:#fcd34d" title="${(b.last_warn || '').replace(/"/g,"'")}">⚠️${b.warn_count}</span>`);
-      if (b.nextflow_exit !== null && b.nextflow_exit !== undefined && b.nextflow_exit !== 0)
-        parts.push(`<span style="color:#f87171" title="NF exit code">exit:${b.nextflow_exit}</span>`);
-      if (parts.length) alertCell = parts.join(' ');
-      return `
-      <tr>
-        <td style="font-family:monospace;font-size:0.7rem">${b.batch_id}</td>
-        <td>${badge(b.status)}</td>
-        <td>${tasksCell}</td>
-        <td>${slurmCell}</td>
-        <td>${fmtTime(b.dispatched_at)}</td>
-        <td>${fmtDuration(b.duration_s, b.dispatched_at, b.status === 'RUNNING')}</td>
-        <td>${alertCell}</td>
-        <td>${b.has_log ? `<button class="btn-refresh" onclick="showLog('${b.batch_id}')">View</button>` : '—'}</td>
-      </tr>`;
-    }).join('');
-
-    const running = batches.filter(b => b.status === 'RUNNING');
+    const running = batches.filter(function(b) { return b.status === 'RUNNING'; });
+    const towerActive = running.some(function(b) { return b.tower; });
+    document.getElementById('running-tower-badge').style.display = towerActive ? '' : 'none';
+    const rc = document.getElementById('running-content');
     if (!running.length) {
-      logsDiv.innerHTML = '<span class="no-data">No running batches.</span>';
+      rc.innerHTML = '<span class="no-data">No running batches.</span>';
+    } else {
+      rc.innerHTML = running.map(renderBatchCard).join('');
+    }
+    const tbody = document.getElementById('batch-tbody');
+    if (!batches.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="no-data">No batches yet.</td></tr>';
       return;
     }
-
-    // Add panels for new running batches; keep existing ones (update in-place)
-    const existingIds = new Set([...logsDiv.querySelectorAll('[data-batch]')].map(el => el.dataset.batch));
-    const runningIds = new Set(running.map(b => b.batch_id));
-
-    // Remove panels for batches no longer running
-    logsDiv.querySelectorAll('[data-batch]').forEach(el => {
-      if (!runningIds.has(el.dataset.batch)) el.remove();
-    });
-    if (!logsDiv.querySelector('[data-batch]')) logsDiv.innerHTML = '';
-
-    // Add new panels
-    for (const b of running) {
-      if (!existingIds.has(b.batch_id)) {
-        const card = document.createElement('div');
-        card.dataset.batch = b.batch_id;
-        card.style.marginBottom = '12px';
-        card.innerHTML = `
-          <div class="log-header" style="display:flex;justify-content:space-between">
-            <span style="font-family:monospace">${b.batch_id} <span style="color:#475569">(${b.slide_count} slides)</span></span>
-            <button class="btn-refresh" onclick="showLog('${b.batch_id}')">Full log</button>
-          </div>
-          <pre class="log-block" id="logtext-${b.batch_id}" style="max-height:160px">Loading…</pre>`;
-        logsDiv.appendChild(card);
+    tbody.innerHTML = batches.map(function(b) {
+      const t = b.tower;
+      let progressCell = '--';
+      if (t && t.total) {
+        const fail = (t.task_counts||{}).failed || 0;
+        progressCell = '<span style="font-size:0.75rem">' + t.done + '/' + t.total + '</span>' +
+          '<div class="pbar-wrap" style="min-width:60px"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + t.pct + '%"></div></div>';
+      } else if (b.slide_count) {
+        progressCell = '<span style="color:#64748b">' + b.slide_count + ' slides</span>';
       }
-    }
-
-    // Refresh log content for all running batches
-    running.forEach(b => refreshInlineLog(b.batch_id));
+      const slurmR = b.slurm_running;
+      const nodes  = (b.slurm_nodes || []).join(', ');
+      let slurmCell = '--';
+      if (slurmR != null) {
+        const tip = nodes ? 'title="' + nodes + '"' : '';
+        slurmCell = '<span ' + tip + ' style="cursor:' + (nodes?'help':'default') + '">' +
+          '<span style="color:#6ee7b7">' + slurmR + '&#x25B6;</span>' +
+          (b.slurm_pending ? ' <span style="color:#fcd34d">' + b.slurm_pending + '&#x23F3;</span>' : '') + '</span>';
+      }
+      const stalled  = t && t.stalled;
+      const failChip = t && (t.task_counts||{}).failed
+        ? '<span class="chip chip-red" style="margin-left:4px">&#x2716;' + t.task_counts.failed + '</span>' : '';
+      const exitCell = (b.nextflow_exit != null && b.nextflow_exit !== 0)
+        ? '<span style="color:#f87171">' + b.nextflow_exit + '</span>'
+        : (b.nextflow_exit === 0 ? '0' : '--');
+      return '<tr>' +
+        '<td style="font-family:monospace;font-size:0.7rem">' + b.batch_id + '</td>' +
+        '<td>' + badge(b.status, stalled) + failChip + '</td>' +
+        '<td style="color:#94a3b8">' + (b.slide_count ?? '--') + '</td>' +
+        '<td>' + progressCell + '</td>' +
+        '<td>' + slurmCell + '</td>' +
+        '<td>' + fmtTime(b.dispatched_at) + '</td>' +
+        '<td>' + fmtDuration(b.duration_s, b.dispatched_at, b.status === 'RUNNING') + '</td>' +
+        '<td>' + exitCell + '</td>' +
+        '<td>' + (b.has_log ? '<button class="btn-sm" onclick="showLog(\'' + b.batch_id + '\')">View</button>' : '--') + '</td>' +
+        '</tr>';
+    }).join('');
   } catch(e) {
-    tbody.innerHTML = '<tr><td colspan="7" class="no-data">Failed to load batches.</td></tr>';
-    console.error('loadBatches failed:', e);
+    document.getElementById('batch-tbody').innerHTML = '<tr><td colspan="9" class="no-data">Failed to load batches.</td></tr>';
+    console.error('loadBatches:', e);
   }
 }
 
-async function refreshInlineLog(batch_id) {
-  const el = document.getElementById('logtext-' + batch_id);
-  if (!el) return;
-  try {
-    const d = await apiFetch('/api/logs/' + batch_id);
-    const text = (d.lines || []).join('\\n') || d.error || '(empty)';
-    el.textContent = text;
-    el.scrollTop = el.scrollHeight;
-    // Update shared .nextflow.log panel (last writer wins, that's fine)
-    if (d.nf_log && d.nf_log.length) {
-      const nfEl = document.getElementById('nflog-content');
-      if (nfEl) {
-        const atBottom = nfEl.scrollHeight - nfEl.scrollTop <= nfEl.clientHeight + 20;
-        nfEl.textContent = d.nf_log.join('\\n');
-        if (atBottom) nfEl.scrollTop = nfEl.scrollHeight;
-      }
-    }
-  } catch { if (el) el.textContent = 'Failed to load log.'; }
-}
-
+// Log modal
 let _modalBatchId = null;
 let _modalInterval = null;
 
 function openLogModal(batch_id) {
   _modalBatchId = batch_id;
   document.getElementById('log-modal-title').textContent = batch_id;
-  document.getElementById('log-modal-body').textContent = 'Loading…';
+  document.getElementById('log-modal-body').textContent = 'Loading...';
   document.getElementById('log-modal').classList.add('open');
   refreshModalLog();
   clearInterval(_modalInterval);
   _modalInterval = setInterval(refreshModalLog, 5000);
 }
-
 function closeLogModal() {
   document.getElementById('log-modal').classList.remove('open');
-  clearInterval(_modalInterval);
-  _modalInterval = null;
-  _modalBatchId = null;
+  clearInterval(_modalInterval); _modalInterval = null; _modalBatchId = null;
 }
-
 async function refreshModalLog() {
   if (!_modalBatchId) return;
   const el = document.getElementById('log-modal-body');
   try {
     const d = await apiFetch('/api/logs/' + _modalBatchId);
-    const text = (d.lines || []).join('\\n') + (d.nf_log && d.nf_log.length ? '\\n\\n--- .nextflow.log ---\\n' + d.nf_log.join('\\n') : '');
+    const text = (d.lines || []).join('\n') || d.error || '(empty)';
     const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 20;
-    el.textContent = text || d.error || '(empty)';
+    el.textContent = text;
     if (atBottom) el.scrollTop = el.scrollHeight;
-  } catch { el.textContent = 'Failed to load log.'; }
+  } catch(e) { el.textContent = 'Failed to load log.'; }
 }
-
-// Close modal on backdrop click
 document.getElementById('log-modal').addEventListener('click', function(e) {
   if (e.target === this) closeLogModal();
 });
+function showLog(batch_id) { openLogModal(batch_id); }
 
-async function showLog(batch_id) { openLogModal(batch_id); }
-
+// WDS
 async function loadWds() {
   const el = document.getElementById('wds-content');
   try {
     const data = await apiFetch('/api/wds');
-    const models = data.models || {};
-    const keys = Object.keys(models);
-    // Use db_total_expected (SUCCEEDED + DISPATCHED) as denominator so in-flight
-    // slides are accounted for and the % doesn't show 100% when a batch is running.
-    const dbExpected = data.db_total_expected || data.db_succeeded || 0;
+    const models    = data.models || {};
+    const keys      = Object.keys(models);
+    const dbExpected  = data.db_total_expected || data.db_succeeded || 0;
     const dbSucceeded = data.db_succeeded || 0;
-
-    // Update summary grid % in WDS stat
-    const totalWds = keys.reduce((a, m) => a + (models[m].slides || 0), 0);
     const wdsPctEl = document.getElementById('s-wds-pct');
     if (wdsPctEl && dbExpected > 0) {
-      // Use minimum across models with actual slides (weakest link = true completion)
-      const activeKeys = keys.filter(m => (models[m].slides || 0) > 0);
-      const minWds = activeKeys.length ? Math.min(...activeKeys.map(m => models[m].slides)) : 0;
-      const pct = Math.round(minWds / dbExpected * 100);
-      wdsPctEl.textContent = Math.min(100, pct) + '%';
+      const activeKeys = keys.filter(function(m) { return (models[m].slides||0) > 0; });
+      const minWds = activeKeys.length ? Math.min.apply(null, activeKeys.map(function(m) { return models[m].slides; })) : 0;
+      wdsPctEl.textContent = Math.min(100, Math.round(minWds / dbExpected * 100)) + '%';
     }
-
     if (!keys.length) { el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return; }
-
-    const header = `<table style="width:100%;border-collapse:collapse;font-size:0.78rem">
-      <thead><tr style="color:#64748b;text-align:left">
-        <th style="padding:4px 6px">Model</th>
-        <th style="padding:4px 6px;text-align:right">WDS Slides</th>
-        <th style="padding:4px 6px;text-align:right" title="SUCCEEDED in DB minus WDS-indexed slides">Gap</th>
-        <th style="padding:4px 6px;text-align:right" title="Valid S3 shards / manifest shards">S3 / Manifest Shards</th>
-        <th style="padding:4px 6px;text-align:right" title="Average · min–max slides per shard (from manifest)">Slides/Shard</th>
-        <th style="padding:4px 6px;text-align:right" title="Features .pt files still on local disk (pending cleanup)">Local .pt</th>
-      </tr></thead><tbody>`;
-
-    const rows = keys.map(m => {
+    const header = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">' +
+      '<thead><tr style="color:#64748b;text-align:left">' +
+      '<th style="padding:4px 6px">Model</th>' +
+      '<th style="padding:4px 6px;text-align:right">WDS Slides</th>' +
+      '<th style="padding:4px 6px;text-align:right" title="SUCCEEDED in DB minus WDS-indexed slides">Gap</th>' +
+      '<th style="padding:4px 6px;text-align:right" title="Valid S3 shards / manifest shards">S3 / Manifest</th>' +
+      '<th style="padding:4px 6px;text-align:right" title="Average slides per shard">Slides/Shard</th>' +
+      '<th style="padding:4px 6px;text-align:right" title="Local .pt files pending cleanup">Local .pt</th>' +
+      '</tr></thead><tbody>';
+    const rows = keys.map(function(m) {
       const mv = models[m];
-      const n = mv.slides || 0;
       const gap = mv.gap || 0;
-      const ns = mv.shards || 0;
-      const ms = mv.manifest_shards || 0;
-      const ss = mv.shard_stats || {};
-      const localPt = mv.local_pt || 0;
+      const ns  = mv.shards || 0;
+      const ms  = mv.manifest_shards || 0;
+      const ss  = mv.shard_stats || {};
       const gapColor = gap === 0 ? '#4ade80' : gap < 100 ? '#fcd34d' : '#f87171';
       const shardStr = mv.error
-        ? `<span style="color:#f87171" title="${mv.error}">err</span> / ${ms}`
-        : `<span style="color:#38bdf8">${ns}</span> / ${ms}`;
+        ? '<span style="color:#f87171" title="' + mv.error + '">err</span> / ' + ms
+        : '<span style="color:#38bdf8">' + ns + '</span> / ' + ms;
       const slidesPerShard = ss.avg != null
-        ? `<span style="color:#c4b5fd">${ss.avg}</span> <span style="color:#64748b;font-size:0.7rem">(${ss.min}–${ss.max})</span>`
-        : '—';
+        ? '<span style="color:#c4b5fd">' + ss.avg + '</span> <span style="color:#64748b;font-size:0.7rem">(' + ss.min + '-' + ss.max + ')</span>'
+        : '--';
+      const localPt = mv.local_pt || 0;
       const localColor = localPt === 0 ? '#4ade80' : localPt < 200 ? '#fcd34d' : '#f87171';
-      return `<tr style="border-top:1px solid #1e293b">
-        <td style="padding:4px 6px;font-weight:600">${m}</td>
-        <td style="padding:4px 6px;text-align:right;color:#4ade80">${n}</td>
-        <td style="padding:4px 6px;text-align:right;color:${gapColor}">${gap > 0 ? '+'+gap : '0'}</td>
-        <td style="padding:4px 6px;text-align:right">${shardStr}</td>
-        <td style="padding:4px 6px;text-align:right">${slidesPerShard}</td>
-        <td style="padding:4px 6px;text-align:right;color:${localColor}">${localPt}</td>
-      </tr>`;
+      return '<tr style="border-top:1px solid #1e293b">' +
+        '<td style="padding:4px 6px;font-weight:600">' + m + '</td>' +
+        '<td style="padding:4px 6px;text-align:right;color:#4ade80">' + (mv.slides||0) + '</td>' +
+        '<td style="padding:4px 6px;text-align:right;color:' + gapColor + '">' + (gap > 0 ? '+'+gap : '0') + '</td>' +
+        '<td style="padding:4px 6px;text-align:right">' + shardStr + '</td>' +
+        '<td style="padding:4px 6px;text-align:right">' + slidesPerShard + '</td>' +
+        '<td style="padding:4px 6px;text-align:right;color:' + localColor + '">' + localPt + '</td>' +
+        '</tr>';
     });
-
     const footer = dbSucceeded
-      ? `<tr style="border-top:1px solid #334155;color:#94a3b8">
-          <td style="padding:4px 6px" colspan="2">SUCCEEDED in DB: <b style="color:#fff">${dbSucceeded}</b></td>
-          <td colspan="5" style="padding:4px 6px;font-size:0.7rem;color:#64748b">Gap = SUCCEEDED − WDS indexed</td>
-        </tr>` : '';
-
+      ? '<tr style="border-top:1px solid #334155;color:#94a3b8">' +
+        '<td style="padding:4px 6px" colspan="2">SUCCEEDED in DB: <b style="color:#fff">' + dbSucceeded + '</b></td>' +
+        '<td colspan="4" style="padding:4px 6px;font-size:0.7rem;color:#64748b">Gap = SUCCEEDED - WDS indexed</td>' +
+        '</tr>' : '';
     el.innerHTML = header + rows.join('') + footer + '</tbody></table>';
   } catch(e) {
     el.innerHTML = '<span class="no-data">Failed to load WDS data.</span>';
-    console.error('loadWds failed:', e);
+    console.error('loadWds:', e);
   }
 }
 
-async function loadS3() { /* merged into loadWds */ }
-
-async function refresh() {
-  document.getElementById('last-updated').textContent = 'Refreshing…';
-  await Promise.allSettled([loadStatus(), loadBatches(), loadWds(), loadSlurm()]);
-  document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
-}
-
+// SLURM
 async function loadSlurm() {
   const el = document.getElementById('slurm-content');
   try {
     const d = await apiFetch('/api/slurm');
-    if (d.error) { el.innerHTML = `<span class="no-data">squeue error: ${d.error}</span>`; return; }
-
-    // Summary line
-    const summary = `<div style="font-size:1.1rem;margin-bottom:0.5rem">
-      <span style="color:#6ee7b7;font-weight:600">${d.running}</span> running &nbsp;
-      <span style="color:#fcd34d;font-weight:600">${d.pending}</span> pending &nbsp;
-      <span style="color:#94a3b8">(${d.total} total)</span>
-    </div>`;
-
-    // Node utilization
-    const nodes = Object.entries(d.nodes || {}).sort((a,b) => b[1]-a[1]);
-    const nodeHtml = nodes.length ? `<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">NODES</span><br>` +
-      nodes.map(([n,c]) => `<span style="font-family:monospace;font-size:0.8rem">${n}</span> <span style="color:#6ee7b7">×${c}</span>`).join(' &nbsp; ') +
-      `</div>` : '';
-
-    // Pending reasons
-    const reasons = Object.entries(d.pending_reasons || {}).sort((a,b) => b[1]-a[1]);
-    const reasonHtml = reasons.length ? `<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem">PENDING REASONS</span><br>` +
-      reasons.map(([r,c]) => `<span style="color:#fcd34d">${r}</span>: ${c}`).join(' &nbsp; ') +
-      `</div>` : '';
-
-    // sacct history (last 24h)
+    if (d.error) { el.innerHTML = '<span class="no-data">squeue error: ' + d.error + '</span>'; return; }
+    const summary = '<div style="font-size:1.1rem;margin-bottom:0.5rem">' +
+      '<span style="color:#6ee7b7;font-weight:600">' + d.running + '</span> running &nbsp;' +
+      '<span style="color:#fcd34d;font-weight:600">' + d.pending + '</span> pending &nbsp;' +
+      '<span style="color:#94a3b8">(' + d.total + ' total)</span></div>';
+    const nodes = Object.entries(d.nodes || {}).sort(function(a,b){return b[1]-a[1];});
+    const nodeHtml = nodes.length
+      ? '<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">NODES</span><br>' +
+        nodes.map(function(e) { return '<span style="font-family:monospace;font-size:0.8rem">' + e[0] + '</span> <span style="color:#6ee7b7">x' + e[1] + '</span>'; }).join(' &nbsp; ') + '</div>'
+      : '';
+    const reasons = Object.entries(d.pending_reasons || {}).sort(function(a,b){return b[1]-a[1];});
+    const reasonHtml = reasons.length
+      ? '<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem">PENDING REASONS</span><br>' +
+        reasons.map(function(e) { return '<span style="color:#fcd34d">' + e[0] + '</span>: ' + e[1]; }).join(' &nbsp; ') + '</div>'
+      : '';
     let histHtml = '';
     if (d.completed !== undefined) {
       const parts = [];
-      if (d.completed) parts.push(`<span style="color:#6ee7b7">✔ ${d.completed} completed</span>`);
-      if (d.failed)    parts.push(`<span style="color:#f87171">✖ ${d.failed} failed</span>`);
-      if (d.cancelled) parts.push(`<span style="color:#94a3b8">⊘ ${d.cancelled} cancelled</span>`);
-      if (d.timeout)   parts.push(`<span style="color:#fcd34d">⏱ ${d.timeout} timeout</span>`);
+      if (d.completed) parts.push('<span style="color:#6ee7b7">&#x2714; ' + d.completed + ' completed</span>');
+      if (d.failed)    parts.push('<span style="color:#f87171">&#x2716; ' + d.failed + ' failed</span>');
+      if (d.cancelled) parts.push('<span style="color:#94a3b8">&#x2296; ' + d.cancelled + ' cancelled</span>');
+      if (d.timeout)   parts.push('<span style="color:#fcd34d">&#x23F1; ' + d.timeout + ' timeout</span>');
       let avgStr = '';
-      if (d.avg_elapsed_s !== null && d.avg_elapsed_s !== undefined) {
-        avgStr = ` &nbsp; <span style="color:#94a3b8">avg ${fmtDuration(d.avg_elapsed_s)} &nbsp; min ${fmtDuration(d.min_elapsed_s)} &nbsp; max ${fmtDuration(d.max_elapsed_s)}</span>`;
-      }
-      histHtml = `<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">LAST 24H</span><br>${parts.join(' &nbsp; ')}${avgStr}</div>`;
-
-      // Failure type breakdown
+      if (d.avg_elapsed_s != null) avgStr = ' &nbsp; <span style="color:#94a3b8">avg ' + fmtDuration(d.avg_elapsed_s) + ' &nbsp; min ' + fmtDuration(d.min_elapsed_s) + ' &nbsp; max ' + fmtDuration(d.max_elapsed_s) + '</span>';
+      histHtml = '<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">LAST 24H</span><br>' + parts.join(' &nbsp; ') + avgStr + '</div>';
       const ftypes = d.failure_types || {};
       const ftypeLabels = {
-        sigterm:      {icon:'⚡', label:'SIGTERM (infra)', color:'#94a3b8'},
-        oom_gpu:      {icon:'🔥', label:'GPU OOM',         color:'#f87171'},
-        oom_host:     {icon:'💥', label:'Host OOM',        color:'#f87171'},
-        disk_full:    {icon:'💾', label:'Disk full',       color:'#fcd34d'},
-        s3_error:     {icon:'☁️', label:'S3 error',        color:'#fbbf24'},
-        python_error: {icon:'🐍', label:'Python error',    color:'#fb923c'},
-        timeout:      {icon:'⏱', label:'Timeout',          color:'#fcd34d'},
-        error_exit1:  {icon:'❌', label:'Exit 1',          color:'#f87171'},
-        unknown:      {icon:'❓', label:'Unknown',          color:'#94a3b8'},
+        sigterm:{icon:'&#x26A1;',label:'SIGTERM',color:'#94a3b8'}, oom_gpu:{icon:'&#x1F525;',label:'GPU OOM',color:'#f87171'},
+        oom_host:{icon:'&#x1F4A5;',label:'Host OOM',color:'#f87171'}, disk_full:{icon:'&#x1F4BE;',label:'Disk full',color:'#fcd34d'},
+        s3_error:{icon:'&#x2601;&#xFE0F;',label:'S3 error',color:'#fbbf24'}, python_error:{icon:'&#x1F40D;',label:'Python error',color:'#fb923c'},
+        timeout:{icon:'&#x23F1;',label:'Timeout',color:'#fcd34d'}, error_exit1:{icon:'&#x274C;',label:'Exit 1',color:'#f87171'},
+        unknown:{icon:'&#x2753;',label:'Unknown',color:'#94a3b8'},
       };
-      const ftypeEntries = Object.entries(ftypes).sort((a,b) => b[1]-a[1]);
+      const ftypeEntries = Object.entries(ftypes).sort(function(a,b){return b[1]-a[1];});
       if (ftypeEntries.length) {
-        const ftHtml = ftypeEntries.map(([k, n]) => {
-          const lbl = ftypeLabels[k] || {icon:'⚠️', label:k, color:'#94a3b8'};
-          return `<span style="color:${lbl.color}" title="${lbl.label}">${lbl.icon} ${lbl.label}: ${n}</span>`;
+        const ftHtml = ftypeEntries.map(function(e) {
+          const l = ftypeLabels[e[0]] || {icon:'&#x26A0;&#xFE0F;',label:e[0],color:'#94a3b8'};
+          return '<span style="color:' + l.color + '" title="' + l.label + '">' + l.icon + ' ' + l.label + ': ' + e[1] + '</span>';
         }).join(' &nbsp; ');
-        histHtml += `<div style="font-size:0.8rem">${ftHtml}</div>`;
+        histHtml += '<div style="font-size:0.8rem">' + ftHtml + '</div>';
       }
-      if (d.sacct_error) histHtml += `<div style="color:#f87171;font-size:0.75rem">sacct: ${d.sacct_error}</div>`;
+      if (d.sacct_error) histHtml += '<div style="color:#f87171;font-size:0.75rem">sacct: ' + d.sacct_error + '</div>';
     }
-
     el.innerHTML = summary + nodeHtml + reasonHtml + histHtml;
-  } catch(e) {
-    el.innerHTML = '<span class="no-data">Failed to load SLURM data.</span>';
-  }
+  } catch(e) { el.innerHTML = '<span class="no-data">Failed to load SLURM data.</span>'; }
+}
+
+// Main refresh
+async function refresh() {
+  document.getElementById('last-updated').textContent = 'Refreshing...';
+  await Promise.allSettled([loadStatus(), loadBatches(), loadWds(), loadSlurm()]);
+  document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 }
 
 refresh();
 setInterval(refresh, 10000);
-setInterval(loadSlurm, 15000);  // matches squeue cache TTL
-setInterval(loadWds, 60000);  // S3 stats are expensive — refresh less often via loadWds
+setInterval(loadSlurm, 15000);
+setInterval(loadWds, 60000);
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"
   onload="onChartJsReady()"></script>

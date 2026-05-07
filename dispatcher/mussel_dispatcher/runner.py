@@ -174,12 +174,14 @@ class NextflowRunner:
                 self.batch_id,
             )
 
+        trace_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.trace.tsv")
         cmd = [
             "nextflow", "run", self.cfg.repo_dir,
             "-profile", self.cfg.nextflow_profiles,
             "-work-dir", work_dir,
             "--samples_csv", csv_path,
             "--outdir", self.cfg.outdir,
+            "-with-trace", trace_path,
         ]
         if self.cfg.nextflow_config:
             cmd += ["-c", self.cfg.nextflow_config]

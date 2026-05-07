@@ -2206,3 +2206,138 @@ class TestE2EDispatcherLoop:
         ).fetchone()
         assert ok_row["status"] == "SUCCEEDED"
         assert missing_row["status"] == "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Nextflow trace file parsing
+# ---------------------------------------------------------------------------
+
+class TestParseNfTrace:
+    """Tests for parse_nf_trace and _trace_path_for_log in helpers.py."""
+
+    from mussel_dispatcher.dashboard.helpers import parse_nf_trace, _trace_path_for_log
+
+    # --- _trace_path_for_log ---
+
+    def test_trace_path_replaces_dot_log(self):
+        from mussel_dispatcher.dashboard.helpers import _trace_path_for_log
+        assert _trace_path_for_log("/logs/batch_001.log") == "/logs/batch_001.trace.tsv"
+
+    def test_trace_path_no_extension(self):
+        from mussel_dispatcher.dashboard.helpers import _trace_path_for_log
+        assert _trace_path_for_log("/logs/batch_001") == "/logs/batch_001.trace.tsv"
+
+    # --- parse_nf_trace ---
+
+    def _write_trace(self, tmp_path, rows: list[dict]) -> str:
+        headers = ["task_id", "hash", "native_id", "name", "status", "exit",
+                   "submit", "duration", "realtime", "%cpu", "peak_rss"]
+        path = str(tmp_path / "batch_001.trace.tsv")
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=headers, delimiter="\t",
+                               extrasaction="ignore")
+            w.writeheader()
+            for row in rows:
+                w.writerow({h: row.get(h, "") for h in headers})
+        return path
+
+    def test_empty_trace_returns_zeros(self, tmp_path):
+        from mussel_dispatcher.dashboard.helpers import parse_nf_trace
+        path = self._write_trace(tmp_path, [])
+        result = parse_nf_trace(path)
+        assert result == {"completed": 0, "cached": 0, "failed": 0, "total": 0, "failures": []}
+
+    def test_counts_completed_and_cached(self, tmp_path):
+        from mussel_dispatcher.dashboard.helpers import parse_nf_trace
+        rows = [
+            {"name": "TESSELLATE (slide_a)", "status": "COMPLETED", "exit": "0", "hash": "aa/111111"},
+            {"name": "TESSELLATE (slide_b)", "status": "COMPLETED", "exit": "0", "hash": "bb/222222"},
+            {"name": "FEATURIZE (slide_c)", "status": "CACHED",    "exit": "0", "hash": "cc/333333"},
+        ]
+        result = parse_nf_trace(self._write_trace(tmp_path, rows))
+        assert result["completed"] == 2
+        assert result["cached"] == 1
+        assert result["failed"] == 0
+        assert result["total"] == 3
+        assert result["failures"] == []
+
+    def test_counts_failed_and_aborted(self, tmp_path):
+        from mussel_dispatcher.dashboard.helpers import parse_nf_trace
+        rows = [
+            {"name": "FEATURIZE (slide_x)", "status": "FAILED",  "exit": "1",  "hash": "ab/123456"},
+            {"name": "FEATURIZE (slide_y)", "status": "ABORTED", "exit": "143","hash": "cd/789012"},
+            {"name": "FEATURIZE (slide_z)", "status": "COMPLETED","exit": "0", "hash": "ef/345678"},
+        ]
+        result = parse_nf_trace(self._write_trace(tmp_path, rows))
+        assert result["failed"] == 2
+        assert result["completed"] == 1
+        assert result["total"] == 3
+        assert len(result["failures"]) == 2
+        assert result["failures"][0]["name"] == "FEATURIZE (slide_x)"
+        assert result["failures"][0]["exit"] == "1"
+
+    def test_failures_capped_at_five(self, tmp_path):
+        from mussel_dispatcher.dashboard.helpers import parse_nf_trace
+        rows = [
+            {"name": f"PROC (slide_{i})", "status": "FAILED", "exit": "1", "hash": f"aa/{i:06d}"}
+            for i in range(8)
+        ]
+        result = parse_nf_trace(self._write_trace(tmp_path, rows))
+        assert result["failed"] == 8
+        assert len(result["failures"]) == 5
+
+    def test_missing_file_returns_zeros(self):
+        from mussel_dispatcher.dashboard.helpers import parse_nf_trace
+        result = parse_nf_trace("/nonexistent/trace.tsv")
+        assert result["total"] == 0
+        assert result["failures"] == []
+
+    def test_none_path_returns_zeros(self):
+        from mussel_dispatcher.dashboard.helpers import parse_nf_trace
+        result = parse_nf_trace(None)
+        assert result["total"] == 0
+
+    def test_running_tasks_not_counted(self, tmp_path):
+        """RUNNING/SUBMITTED tasks don't appear in the trace file yet."""
+        from mussel_dispatcher.dashboard.helpers import parse_nf_trace
+        rows = [
+            {"name": "PROC (a)", "status": "COMPLETED", "exit": "0", "hash": "aa/000001"},
+            {"name": "PROC (b)", "status": "RUNNING",   "exit": "-", "hash": "bb/000002"},
+        ]
+        result = parse_nf_trace(self._write_trace(tmp_path, rows))
+        assert result["completed"] == 1
+        assert result["total"] == 1  # RUNNING is not a finished status
+
+    # --- parse_nf_log uses trace for errors when available ---
+
+    def test_parse_nf_log_uses_trace_for_errors(self, tmp_path):
+        from mussel_dispatcher.dashboard.helpers import parse_nf_log
+        # Write a minimal NF log (no ERROR lines)
+        log_path = str(tmp_path / "batch_001.log")
+        Path(log_path).write_text("[ 50%] 10 of 20\n", encoding="utf-8")
+        # Write companion trace with one failure
+        trace_path = str(tmp_path / "batch_001.trace.tsv")
+        headers = ["task_id", "hash", "native_id", "name", "status", "exit"]
+        with open(trace_path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=headers, delimiter="\t")
+            w.writeheader()
+            w.writerow({"task_id": "1", "hash": "aa/111111", "native_id": "100",
+                        "name": "FEATURIZE_BATCH (batch_001_0)", "status": "FAILED", "exit": "2"})
+        result = parse_nf_log(log_path)
+        assert result["error_count"] == 1
+        assert "FEATURIZE_BATCH" in result["first_error"]
+        assert "exit 2" in result["first_error"]
+        assert len(result["failures"]) == 1
+
+    def test_parse_nf_log_falls_back_to_regex_when_no_trace(self, tmp_path):
+        from mussel_dispatcher.dashboard.helpers import parse_nf_log
+        log_path = str(tmp_path / "batch_002.log")
+        Path(log_path).write_text(
+            "[ 50%] 5 of 10\nERROR ~ Error executing process > 'FEATURIZE_BATCH'\n",
+            encoding="utf-8",
+        )
+        # No trace file exists — should fall back to regex
+        result = parse_nf_log(log_path)
+        assert result["error_count"] == 1
+        assert result["first_error"] == "FEATURIZE_BATCH"
+        assert result["failures"] == []

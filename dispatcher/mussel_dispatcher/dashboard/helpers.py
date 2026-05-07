@@ -1,10 +1,12 @@
 """Helper functions for the Mussel dispatcher dashboard.
 
 Separated from dashboard.py to keep the main HTTP server module concise.
-Covers: Nextflow log parsing, SLURM stats (squeue + sacct), S3 shard counting.
+Covers: Nextflow log parsing, trace file parsing, SLURM stats (squeue + sacct),
+S3 shard counting.
 """
 from __future__ import annotations
 
+import csv
 import os
 import re
 import subprocess
@@ -20,9 +22,75 @@ _NF_WARN_RE     = re.compile(r'^WARN[:\s](.+)', re.MULTILINE)
 _NF_ERROR_RE    = re.compile(r"^ERROR ~ Error executing process > '([^']+)'", re.MULTILINE)
 _NF_KILLED_RE   = re.compile(r'Killing running tasks \((\d+)\)', re.MULTILINE)
 
+_TRACE_DONE_STATUSES = {"COMPLETED", "CACHED"}
+_TRACE_FAIL_STATUSES = {"FAILED", "ABORTED"}
+
+
+def _trace_path_for_log(log_path: str) -> str:
+    """Return the expected trace TSV path for a given batch log path."""
+    base = log_path[: -len(".log")] if log_path.endswith(".log") else log_path
+    return base + ".trace.tsv"
+
+
+def parse_nf_trace(trace_path: str) -> dict:
+    """Parse a Nextflow trace TSV file and return task counts + failure details.
+
+    The trace file (written by ``-with-trace``) is a tab-separated file
+    updated in real-time as tasks complete.  It is more reliable than log
+    regex for accurate done/failed counts and provides the exact process
+    name and exit code of failed tasks.
+
+    Returns a dict with:
+        completed  (int)  – tasks with status COMPLETED
+        cached     (int)  – tasks with status CACHED (resumed from cache)
+        failed     (int)  – tasks with status FAILED or ABORTED
+        total      (int)  – all finished tasks seen so far
+        failures   (list) – up to 5 dicts {name, exit, hash} for failed tasks
+    """
+    result: dict = {
+        "completed": 0,
+        "cached": 0,
+        "failed": 0,
+        "total": 0,
+        "failures": [],
+    }
+    if not trace_path or not os.path.exists(trace_path):
+        return result
+    try:
+        with open(trace_path, newline="", encoding="utf-8", errors="replace") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                status = (row.get("status") or "").strip().upper()
+                if status in _TRACE_DONE_STATUSES:
+                    if status == "CACHED":
+                        result["cached"] += 1
+                    else:
+                        result["completed"] += 1
+                    result["total"] += 1
+                elif status in _TRACE_FAIL_STATUSES:
+                    result["failed"] += 1
+                    result["total"] += 1
+                    if len(result["failures"]) < 5:
+                        result["failures"].append({
+                            "name": (row.get("name") or "").strip(),
+                            "exit": (row.get("exit") or "").strip(),
+                            "hash": (row.get("hash") or "").strip(),
+                        })
+    except Exception:
+        pass
+    return result
+
 
 def parse_nf_log(log_path: str) -> dict:
-    """Parse a NF batch stdout log and return a dict with all useful metrics."""
+    """Parse a NF batch stdout log and return a dict with all useful metrics.
+
+    When a companion trace file (``<batch>.trace.tsv``) exists, failure
+    counts and details are taken from it instead of log regex — giving the
+    exact process name and exit code rather than a best-effort regex match.
+    Progress (done/total) still comes from the log's progress line because
+    the trace only contains *finished* tasks and cannot report the total
+    expected task count while the run is still in progress.
+    """
     result = {
         "progress": None,   # {pct, done, total}
         "slurm_jobs": None, # current active SLURM jobs
@@ -31,6 +99,7 @@ def parse_nf_log(log_path: str) -> dict:
         "error_count": 0,
         "first_error": None,
         "killed": None,     # N tasks killed (infra kill signal)
+        "failures": [],     # [{name, exit, hash}] from trace (up to 5)
     }
     if not log_path:
         return result
@@ -54,14 +123,24 @@ def parse_nf_log(log_path: str) -> dict:
         if warns:
             result["last_warn"] = warns[-1].strip()[:120]
 
-        errors = _NF_ERROR_RE.findall(text)
-        result["error_count"] = len(errors)
-        if errors:
-            result["first_error"] = errors[0].strip()[:120]
-
         killed = _NF_KILLED_RE.findall(text)
         if killed:
             result["killed"] = int(killed[-1])
+
+        # Prefer trace file for error info — gives exact process name + exit code.
+        trace = parse_nf_trace(_trace_path_for_log(log_path))
+        if trace["failed"] > 0:
+            result["error_count"] = trace["failed"]
+            result["failures"] = trace["failures"]
+            if trace["failures"]:
+                f0 = trace["failures"][0]
+                result["first_error"] = f"{f0['name']} (exit {f0['exit']})"
+        else:
+            # Fall back to log regex when trace is absent or has no failures yet.
+            errors = _NF_ERROR_RE.findall(text)
+            result["error_count"] = len(errors)
+            if errors:
+                result["first_error"] = errors[0].strip()[:120]
 
     except Exception:
         pass

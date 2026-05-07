@@ -157,6 +157,7 @@ def _build_handler(cfg: Config):
                 "error_count": log_info.get("error_count", 0),
                 "first_error": log_info.get("first_error"),
                 "killed": log_info.get("killed"),
+                "failures": log_info.get("failures", []),
             })
         return result
 

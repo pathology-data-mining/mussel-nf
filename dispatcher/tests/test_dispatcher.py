@@ -31,6 +31,7 @@ from mussel_dispatcher.runner import (
     _parse_run_name_from_log,
     _lookup_session_id_in_history,
     _extract_nf_session_id_from_log,
+    _query_session_id_via_nf_cli,
 )
 from mussel_dispatcher.config import (
     _read_nf_model_types,
@@ -1899,6 +1900,46 @@ class TestNfSessionIdExtraction:
         # Fallback: log parsing succeeds
         fallback = _extract_nf_session_id_from_log(str(log), str(tmp_path))
         assert fallback == "cafecafe-aaaa-bbbb-cccc-ddddeeeeffff"
+
+    def test_query_session_id_via_nf_cli_success(self, tmp_path):
+        """_query_session_id_via_nf_cli returns the UUID when nextflow log succeeds."""
+        import unittest.mock as mock
+        uuid = "deadbeef-1111-2222-3333-444455556666"
+        completed = mock.MagicMock()
+        completed.returncode = 0
+        completed.stdout = f"{uuid}\n"
+        with mock.patch("subprocess.run", return_value=completed) as m:
+            result = _query_session_id_via_nf_cli(str(tmp_path), "dispatcher_batch-042")
+        assert result == uuid
+        args = m.call_args[0][0]
+        assert args == ["nextflow", "log", "dispatcher_batch-042", "-f", "session_id"]
+
+    def test_query_session_id_via_nf_cli_nonzero_returns_none(self, tmp_path):
+        """_query_session_id_via_nf_cli returns None when nextflow log exits non-zero."""
+        import unittest.mock as mock
+        completed = mock.MagicMock()
+        completed.returncode = 1
+        completed.stdout = ""
+        with mock.patch("subprocess.run", return_value=completed):
+            result = _query_session_id_via_nf_cli(str(tmp_path), "dispatcher_batch-042")
+        assert result is None
+
+    def test_query_session_id_via_nf_cli_not_found_returns_none(self, tmp_path):
+        """_query_session_id_via_nf_cli returns None when nextflow is not on PATH."""
+        import unittest.mock as mock
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("nextflow not found")):
+            result = _query_session_id_via_nf_cli(str(tmp_path), "dispatcher_batch-042")
+        assert result is None
+
+    def test_query_session_id_via_nf_cli_invalid_uuid_returns_none(self, tmp_path):
+        """_query_session_id_via_nf_cli returns None if output is not a valid UUID."""
+        import unittest.mock as mock
+        completed = mock.MagicMock()
+        completed.returncode = 0
+        completed.stdout = "not-a-uuid\n"
+        with mock.patch("subprocess.run", return_value=completed):
+            result = _query_session_id_via_nf_cli(str(tmp_path), "dispatcher_batch-042")
+        assert result is None
 
 
 # ===========================================================================

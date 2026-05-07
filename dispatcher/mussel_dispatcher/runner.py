@@ -104,11 +104,38 @@ def _parse_run_name_from_log(log_path: str) -> str | None:
     return None
 
 
+def _query_session_id_via_nf_cli(repo_dir: str, run_name: str) -> str | None:
+    """Query NF session UUID via ``nextflow log <run_name> -f session_id``.
+
+    This is the preferred path: it uses NF's own CLI abstraction and avoids
+    direct parsing of the internal ``.nextflow/history`` file format.
+    Returns None on any failure (NF not on PATH, run not found, etc.).
+    """
+    try:
+        result = subprocess.run(
+            ["nextflow", "log", run_name, "-f", "session_id"],
+            capture_output=True,
+            text=True,
+            cwd=repo_dir,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            session_id = result.stdout.strip().splitlines()[-1].strip() if result.stdout.strip() else ""
+            if re.match(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id):
+                return session_id
+    except Exception:
+        pass
+    return None
+
+
 def _lookup_session_id_in_history(repo_dir: str, run_name: str) -> str | None:
-    """Look up a NF session UUID from .nextflow/history by run name.
+    """Look up a NF session UUID from .nextflow/history by run name (fallback).
 
     History columns (tab-separated):
         date  time  duration  run_name  status  session_uuid  command
+
+    Prefer ``_query_session_id_via_nf_cli`` over this function; it reads the
+    internal history file directly and is fragile against format changes.
     """
     history_file = os.path.join(repo_dir, ".nextflow", "history")
     try:
@@ -123,7 +150,7 @@ def _lookup_session_id_in_history(repo_dir: str, run_name: str) -> str | None:
 
 
 def _extract_nf_session_id_from_log(log_path: str, repo_dir: str) -> str | None:
-    """Extract the NF session UUID for the batch identified by log_path."""
+    """Extract the NF session UUID for the batch identified by log_path (legacy fallback)."""
     run_name = _parse_run_name_from_log(log_path)
     if not run_name:
         return None
@@ -243,11 +270,13 @@ class NextflowRunner:
 
         # Capture and store the NF session ID so future resumes can use -resume <uuid>
         # instead of bare -resume (which would collide across concurrent batches).
-        # Primary path: look up by deterministic run name (no log parsing needed).
-        # Fallback: parse runName from log + look up in history (legacy batches that
-        # ran before the -name flag was introduced).
+        # Primary path: nextflow log CLI (uses NF's own abstraction, no file parsing).
+        # First fallback: read .nextflow/history directly by deterministic run name.
+        # Second fallback: parse runName from log + look up in history (legacy batches).
         if not self._resume:
-            session_id = _lookup_session_id_in_history(self.cfg.repo_dir, nf_run_name)
+            session_id = _query_session_id_via_nf_cli(self.cfg.repo_dir, nf_run_name)
+            if not session_id:
+                session_id = _lookup_session_id_in_history(self.cfg.repo_dir, nf_run_name)
             if not session_id:
                 session_id = _extract_nf_session_id_from_log(log_path, self.cfg.repo_dir)
             if session_id:

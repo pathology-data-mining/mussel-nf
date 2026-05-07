@@ -174,6 +174,7 @@ class NextflowRunner:
                 self.batch_id,
             )
 
+        nf_run_name = f"dispatcher_{self.batch_id}"
         trace_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.trace.tsv")
         cmd = [
             "nextflow", "run", self.cfg.repo_dir,
@@ -181,6 +182,7 @@ class NextflowRunner:
             "-work-dir", work_dir,
             "--samples_csv", csv_path,
             "--outdir", self.cfg.outdir,
+            "-name", nf_run_name,
             "-with-trace", trace_path,
         ]
         if self.cfg.nextflow_config:
@@ -237,8 +239,13 @@ class NextflowRunner:
 
         # Capture and store the NF session ID so future resumes can use -resume <uuid>
         # instead of bare -resume (which would collide across concurrent batches).
+        # Primary path: look up by deterministic run name (no log parsing needed).
+        # Fallback: parse runName from log + look up in history (legacy batches that
+        # ran before the -name flag was introduced).
         if not self._resume:
-            session_id = _extract_nf_session_id_from_log(log_path, self.cfg.repo_dir)
+            session_id = _lookup_session_id_in_history(self.cfg.repo_dir, nf_run_name)
+            if not session_id:
+                session_id = _extract_nf_session_id_from_log(log_path, self.cfg.repo_dir)
             if session_id:
                 self.state.set_batch_session_id(self.batch_id, session_id)
                 log.debug("Batch %s: recorded NF session ID %s", self.batch_id, session_id)
@@ -409,6 +416,13 @@ class NextflowRunner:
                 if old_log and os.path.exists(old_log):
                     os.unlink(old_log)
                     log.info("Removed old log (batch %s): %s", row["batch_id"], old_log)
+                # Also remove the companion trace file written by -with-trace.
+                if old_log:
+                    from .dashboard.helpers import _trace_path_for_log
+                    old_trace = _trace_path_for_log(old_log)
+                    if os.path.exists(old_trace):
+                        os.unlink(old_trace)
+                        log.info("Removed old trace (batch %s): %s", row["batch_id"], old_trace)
 
     def _collect_manifest(self, run_started_at: float):
         """Find the manifest-*.csv written by this batch and update the combined manifest."""

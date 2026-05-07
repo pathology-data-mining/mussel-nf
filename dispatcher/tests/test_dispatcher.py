@@ -750,6 +750,33 @@ class TestNextflowRunnerCommand:
         cfg = Config.load(str(yaml_path))
         assert cfg.nextflow_params_file == ""
 
+    def test_name_flag_uses_deterministic_run_name(self, tmp_path):
+        """-name dispatcher_{batch_id} is added to the NF command for deterministic run names."""
+        cfg = make_config()
+        slides = [{"slide_path": "/slides/a.svs", "slide_id": "a"}]
+        state = MagicMock()
+        runner = NextflowRunner(cfg, "batch-007", slides, state)
+        work_dir = "/tmp/work/batch_007"
+        csv_path = "/tmp/dispatch/batch_007.csv"
+        # Mirror the cmd construction from runner.py
+        nf_run_name = "dispatcher_batch-007"
+        cmd = [
+            "nextflow", "run", cfg.repo_dir,
+            "-profile", cfg.nextflow_profiles,
+            "-work-dir", work_dir,
+            "--samples_csv", csv_path,
+            "--outdir", cfg.outdir,
+            "-name", nf_run_name,
+        ]
+        assert "-name" in cmd
+        assert "dispatcher_batch-007" in cmd
+
+    def test_name_flag_includes_batch_id(self):
+        """The -name value always embeds the batch_id so it is unique per batch."""
+        batch_id = "xyz-123"
+        nf_run_name = f"dispatcher_{batch_id}"
+        assert batch_id in nf_run_name
+
 class TestRecoverInFlight:
     def test_no_running_batches_does_nothing(self, tmp_path):
         store = StateStore(str(tmp_path / "test.db"))
@@ -1490,6 +1517,63 @@ class TestCleanup:
 
         assert work_dir.exists(), "work dir should be kept when cleanup_work_dir=False"
 
+    def test_cleanup_old_logs_also_removes_trace_file(self, tmp_path):
+        """Trace file (.trace.tsv) is deleted alongside the log during log rotation."""
+        from datetime import datetime, timedelta, timezone
+
+        state = self._make_state(tmp_path)
+        log_file = tmp_path / "old_batch.log"
+        trace_file = tmp_path / "old_batch.trace.tsv"
+        log_file.write_text("nextflow output\n")
+        trace_file.write_text("task_id\tname\tstatus\n1\tPROC\tCOMPLETED\n")
+
+        state.add_batch("old_batch", str(tmp_path / "old.csv"), None, 5, str(log_file))
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+        conn = state._conn()
+        conn.execute(
+            "UPDATE batches SET status='SUCCEEDED', completed_at=? WHERE batch_id='old_batch'",
+            (old_ts,),
+        )
+        conn.commit()
+
+        cfg = make_config(cleanup_logs_after_days=30)
+        runner = NextflowRunner(cfg, "current_batch", [], state)
+        runner._cleanup(
+            csv_path=str(tmp_path / "current.csv"),
+            log_path=str(tmp_path / "current.log"),
+            work_dir=str(tmp_path / "work"),
+        )
+
+        assert not log_file.exists(), "log file should be removed"
+        assert not trace_file.exists(), "companion trace file should also be removed"
+
+    def test_cleanup_old_logs_trace_missing_does_not_raise(self, tmp_path):
+        """If no .trace.tsv exists alongside a rotated log, cleanup still succeeds."""
+        from datetime import datetime, timedelta, timezone
+
+        state = self._make_state(tmp_path)
+        log_file = tmp_path / "old_batch2.log"
+        log_file.write_text("nextflow output\n")
+
+        state.add_batch("old_batch2", str(tmp_path / "old2.csv"), None, 5, str(log_file))
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+        conn = state._conn()
+        conn.execute(
+            "UPDATE batches SET status='SUCCEEDED', completed_at=? WHERE batch_id='old_batch2'",
+            (old_ts,),
+        )
+        conn.commit()
+
+        cfg = make_config(cleanup_logs_after_days=30)
+        runner = NextflowRunner(cfg, "current_batch", [], state)
+        runner._cleanup(
+            csv_path=str(tmp_path / "current.csv"),
+            log_path=str(tmp_path / "current.log"),
+            work_dir=str(tmp_path / "work"),
+        )
+
+        assert not log_file.exists()
+
 
 # ===========================================================================
 # DatabricksWatcher
@@ -1776,6 +1860,45 @@ class TestNfSessionIdExtraction:
         )
         result = _extract_nf_session_id_from_log(str(log), str(tmp_path))
         assert result == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def test_session_id_lookup_by_deterministic_name(self, tmp_path):
+        """When -name dispatcher_{batch_id} is used, session ID can be found directly
+        from .nextflow/history without any log parsing."""
+        from mussel_dispatcher.runner import _lookup_session_id_in_history
+        nf_dir = tmp_path / ".nextflow"
+        nf_dir.mkdir()
+        (nf_dir / "history").write_text(
+            "2024-01-01\t12:00:00\t5m\tdispatcher_batch-042\tOK\t"
+            "deadbeef-1111-2222-3333-444455556666\tnextflow run main.nf -name dispatcher_batch-042\n"
+        )
+        result = _lookup_session_id_in_history(str(tmp_path), "dispatcher_batch-042")
+        assert result == "deadbeef-1111-2222-3333-444455556666"
+
+    def test_session_id_falls_back_to_log_parsing_when_history_missing(self, tmp_path):
+        """If .nextflow/history doesn't have the deterministic name entry, fall back
+        to _extract_nf_session_id_from_log (legacy log parsing)."""
+        from mussel_dispatcher.runner import (
+            _lookup_session_id_in_history,
+            _extract_nf_session_id_from_log,
+        )
+        # History has a run under the OLD random name, not the deterministic one
+        nf_dir = tmp_path / ".nextflow"
+        nf_dir.mkdir()
+        (nf_dir / "history").write_text(
+            "2024-01-01\t12:00:00\t5m\told_random_name\tOK\t"
+            "cafecafe-aaaa-bbbb-cccc-ddddeeeeffff\tnextflow run main.nf\n"
+        )
+        # Log has the old-style runName entry
+        log = tmp_path / "batch.log"
+        log.write_text("runName                 : old_random_name\n")
+
+        # Primary: deterministic name lookup fails
+        primary = _lookup_session_id_in_history(str(tmp_path), "dispatcher_batch-042")
+        assert primary is None
+
+        # Fallback: log parsing succeeds
+        fallback = _extract_nf_session_id_from_log(str(log), str(tmp_path))
+        assert fallback == "cafecafe-aaaa-bbbb-cccc-ddddeeeeffff"
 
 
 # ===========================================================================

@@ -318,7 +318,18 @@ workflow MUSSEL {
 
         // ── WebDataset sharding (opt-in) ──────────────────────────────────────
         ch_wds_shards = Channel.empty()
-        if (params.wds.enabled) {
+        if (params.wds?.existing_shard_dir) {
+            // Use pre-existing shards — skip mussel featurization entirely.
+            ch_wds_shards = Channel.fromPath("${params.wds.existing_shard_dir}/*.tar")
+                .collect()
+                .map { files ->
+                    tuple(
+                        params.wds.existing_group      ?: "all",
+                        params.wds.existing_model_type ?: "default",
+                        files
+                    )
+                }
+        } else if (params.wds.enabled) {
             // Determine group key per slide: oncotree_code or the fixed string "all"
             ch_pt_keyed = ch_extract_feat.pt.map { meta, model_type, pt_file ->
                 def group = (params.wds.group_by_oncotree && meta.oncotree_code)
@@ -363,8 +374,8 @@ workflow MUSSEL {
         // (cast at load time). Uses precision: 32-true so the model sees features
         // in the loaded dtype — the same no-AMP contract as the linear probe path.
         if (params.abmil_benchmark?.enabled) {
-            if (!params.wds?.enabled) {
-                error "abmil_benchmark.enabled requires wds.enabled = true to generate WDS shards first."
+            if (!params.wds?.enabled && !params.wds?.existing_shard_dir) {
+                error "abmil_benchmark.enabled requires either wds.enabled = true or wds.existing_shard_dir to be set."
             }
             ch_abmil_dtypes = Channel.fromList(params.abmil_benchmark.dtypes ?: ['float32', 'float16', 'bfloat16'])
 

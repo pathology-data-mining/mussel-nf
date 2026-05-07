@@ -23,7 +23,6 @@
 
 process PALADIN_ABMIL_BENCHMARK {
     label "gpuTask"
-    conda params.abmil_benchmark.conda_env
 
     publishDir path: { "${params.outdir}/abmil_benchmark/${model_type}/${group_name}/${feature_dtype}" },
                mode: "${params.publish_mode}",

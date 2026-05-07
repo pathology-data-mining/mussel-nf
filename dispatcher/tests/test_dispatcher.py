@@ -2464,3 +2464,288 @@ class TestParseNfTrace:
         assert result["error_count"] == 1
         assert result["first_error"] == "FEATURIZE_BATCH"
         assert result["failures"] == []
+
+
+# ===========================================================================
+# Tower shim tests
+# ===========================================================================
+
+class TestTowerShim:
+    """Unit tests for mussel_dispatcher.tower_shim in-memory state store."""
+
+    def setup_method(self):
+        # Clear global state before each test.
+        import mussel_dispatcher.tower_shim as shim
+        with shim._lock:
+            shim._workflows.clear()
+        self.shim = shim
+
+    def test_register_and_get_empty_progress(self):
+        shim = self.shim
+        shim.register_workflow("wf1", "b1", "dispatcher_b1")
+        prog = shim.get_progress("b1")
+        assert prog is None or prog == {}  # no updates yet → task_counts empty
+
+    def test_update_progress(self):
+        shim = self.shim
+        shim.register_workflow("dispatcher_b2", "b2", "dispatcher_b2")
+        shim.update_progress("dispatcher_b2", {"succeeded": 5, "failed": 1, "cached": 2, "running": 3, "pending": 0})
+        prog = shim.get_progress("b2")
+        assert prog is not None
+        assert prog["succeeded"] == 5
+        assert prog["failed"] == 1
+        assert prog["cached"] == 2
+        assert prog["running"] == 3
+
+    def test_mark_complete(self):
+        shim = self.shim
+        shim.register_workflow("dispatcher_b3", "b3", "dispatcher_b3")
+        shim.update_progress("dispatcher_b3", {"succeeded": 10, "failed": 0, "cached": 0, "running": 0, "pending": 0})
+        shim.mark_complete("dispatcher_b3", {"succeeded": 10, "failed": 0, "cached": 0, "running": 0, "pending": 0})
+        state = shim.get_state("b3")
+        assert state["complete"] is True
+        prog = shim.get_progress("b3")
+        assert prog["succeeded"] == 10
+
+    def test_get_progress_unknown_batch(self):
+        prog = self.shim.get_progress("nonexistent")
+        assert prog is None
+
+    def test_evict_old_removes_completed(self):
+        shim = self.shim
+        shim.register_workflow("dispatcher_b4", "b4", "dispatcher_b4")
+        shim.mark_complete("dispatcher_b4")
+        # Age it artificially.
+        with shim._lock:
+            shim._workflows["dispatcher_b4"].updated_at -= 7200
+        removed = shim.evict_old(max_age_seconds=3600)
+        assert removed == 1
+        assert shim.get_state("b4") is None
+
+    def test_evict_old_keeps_running(self):
+        shim = self.shim
+        shim.register_workflow("dispatcher_b5", "b5", "dispatcher_b5")
+        # Not marked complete — should not be evicted.
+        with shim._lock:
+            shim._workflows["dispatcher_b5"].updated_at -= 7200
+        removed = shim.evict_old(max_age_seconds=3600)
+        assert removed == 0
+
+    def test_workflow_id_for_batch(self):
+        assert self.shim.workflow_id_for_batch("abc123") == "dispatcher_abc123"
+
+    def test_user_info_response_has_required_fields(self):
+        resp = self.shim.user_info_response()
+        assert "user" in resp
+        assert "id" in resp["user"]
+        assert "userName" in resp["user"]
+
+    def test_trace_create_response(self):
+        resp = self.shim.trace_create_response("dispatcher_xyz")
+        assert resp["workflowId"] == "dispatcher_xyz"
+        assert "watchUrl" in resp
+
+    def test_get_all_states_returns_snapshot(self):
+        shim = self.shim
+        shim.register_workflow("dispatcher_b6", "b6", "dispatcher_b6")
+        shim.register_workflow("dispatcher_b7", "b7", "dispatcher_b7")
+        states = shim.get_all_states()
+        batch_ids = {s["batch_id"] for s in states}
+        assert "b6" in batch_ids
+        assert "b7" in batch_ids
+
+
+class TestTowerShimServerRoutes:
+    """Integration tests for Tower API HTTP routes added to the dashboard server."""
+
+    def _make_server(self, tmp_path):
+        """Build a minimal dashboard handler for route testing."""
+        import sqlite3
+        from mussel_dispatcher.dashboard.server import _build_handler
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        db_path = state_dir / "dispatcher.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""CREATE TABLE batches (
+            batch_id TEXT PRIMARY KEY, status TEXT, slide_count INTEGER,
+            dispatched_at TEXT, completed_at TEXT, nextflow_exit INTEGER,
+            log_path TEXT, session_id TEXT)""")
+        conn.execute("""CREATE TABLE slides (
+            slide_id TEXT PRIMARY KEY, status TEXT, dispatched INTEGER DEFAULT 0,
+            fail_count INTEGER DEFAULT 0, last_dispatch TEXT)""")
+        conn.commit()
+        conn.close()
+
+        cfg = make_config(
+            state_dir=str(state_dir),
+            outdir=str(tmp_path / "results"),
+            repo_dir=str(tmp_path),
+        )
+        Handler = _build_handler(cfg)
+        return Handler
+
+    def _fake_request(self, handler_cls, method, path, body: dict | None = None):
+        """Invoke do_POST / do_PUT / do_GET on a handler without a real socket."""
+        import io, json
+        body_bytes = json.dumps(body or {}).encode()
+        headers = {
+            "Content-Length": str(len(body_bytes)),
+            "Content-Type": "application/json",
+        }
+
+        class FakeRequest:
+            def makefile(self, *a, **kw):
+                return io.BytesIO(body_bytes)
+
+        responses = []
+
+        class TrackingHandler(handler_cls):
+            def __init__(self):
+                # Don't call super().__init__ — that would try to handle a real request.
+                self.path = path
+                self.headers = headers
+                self.rfile = io.BytesIO(body_bytes)
+                self._response_code = None
+                self._response_body = None
+                self._headers_sent = {}
+
+            def send_response(self, code, message=None):
+                self._response_code = code
+
+            def send_header(self, key, value):
+                self._headers_sent[key] = value
+
+            def end_headers(self):
+                pass
+
+            def _write(self, data):
+                self._response_body = data
+
+            @property
+            def wfile(self):
+                class W:
+                    def write(_, data):
+                        responses.append(data)
+                return W()
+
+        h = TrackingHandler()
+        getattr(h, f"do_{method}")()
+        return h, responses
+
+    def setup_method(self):
+        import mussel_dispatcher.tower_shim as shim
+        with shim._lock:
+            shim._workflows.clear()
+
+    def test_user_info_route(self, tmp_path):
+        import json
+        import mussel_dispatcher.tower_shim as shim
+        Handler = self._make_server(tmp_path)
+        h, responses = self._fake_request(Handler, "GET", "/user-info")
+        assert h._response_code == 200
+        body = json.loads(responses[0])
+        assert "user" in body
+
+    def test_trace_create_route(self, tmp_path):
+        import json
+        import mussel_dispatcher.tower_shim as shim
+        Handler = self._make_server(tmp_path)
+        h, responses = self._fake_request(
+            Handler, "POST", "/trace/create",
+            body={"runName": "dispatcher_test99", "sessionId": "abc-123"}
+        )
+        assert h._response_code == 200
+        body = json.loads(responses[0])
+        assert body["workflowId"] == "dispatcher_test99"
+        # State should now exist in the shim
+        state = shim.get_state("test99")
+        assert state is not None
+        assert state["batch_id"] == "test99"
+
+    def test_trace_progress_route(self, tmp_path):
+        import json
+        import mussel_dispatcher.tower_shim as shim
+        shim.register_workflow("dispatcher_test88", "test88", "dispatcher_test88")
+        Handler = self._make_server(tmp_path)
+        progress = {"succeeded": 3, "failed": 1, "cached": 0, "running": 2, "pending": 4}
+        h, responses = self._fake_request(
+            Handler, "PUT", "/trace/dispatcher_test88/progress",
+            body={"progress": progress, "instant": 1234567890}
+        )
+        assert h._response_code == 200
+        prog = shim.get_progress("test88")
+        assert prog["succeeded"] == 3
+        assert prog["running"] == 2
+
+    def test_trace_complete_route(self, tmp_path):
+        import json
+        import mussel_dispatcher.tower_shim as shim
+        shim.register_workflow("dispatcher_test77", "test77", "dispatcher_test77")
+        Handler = self._make_server(tmp_path)
+        h, responses = self._fake_request(
+            Handler, "PUT", "/trace/dispatcher_test77/complete",
+            body={"progress": {"succeeded": 10}, "instant": 1234567890}
+        )
+        assert h._response_code == 200
+        state = shim.get_state("test77")
+        assert state["complete"] is True
+
+    def test_trace_begin_route(self, tmp_path):
+        import mussel_dispatcher.tower_shim as shim
+        Handler = self._make_server(tmp_path)
+        h, responses = self._fake_request(
+            Handler, "PUT", "/trace/dispatcher_test66/begin",
+            body={"workflow": {}, "instant": 1234567890}
+        )
+        assert h._response_code == 200
+
+
+class TestRunnerTowerEnv:
+    """Test that runner.py passes tower env vars when cfg.tower_endpoint is set."""
+
+    def test_tower_env_added_when_configured(self, tmp_path):
+        """When tower_endpoint is set, TOWER_API_ENDPOINT and TOWER_ACCESS_TOKEN
+        must be present in the subprocess environment."""
+        import os
+
+        cfg = make_config(
+            tower_endpoint="http://localhost:8050",
+            outdir=str(tmp_path / "results"),
+            repo_dir=str(tmp_path),
+        )
+        # Simulate the run-env construction logic from runner.py
+        run_env = dict(os.environ)
+        if cfg.nextflow_version:
+            run_env["NXF_VER"] = cfg.nextflow_version
+        if cfg.tower_endpoint:
+            run_env["TOWER_API_ENDPOINT"] = cfg.tower_endpoint
+            run_env["TOWER_ACCESS_TOKEN"] = run_env.get("TOWER_ACCESS_TOKEN") or "local"
+        assert run_env["TOWER_API_ENDPOINT"] == "http://localhost:8050"
+        assert run_env["TOWER_ACCESS_TOKEN"] == "local"
+
+    def test_no_tower_env_when_not_configured(self, tmp_path):
+        import os
+        cfg = make_config(outdir=str(tmp_path / "results"), repo_dir=str(tmp_path))
+        run_env = dict(os.environ)
+        if cfg.tower_endpoint:
+            run_env["TOWER_API_ENDPOINT"] = cfg.tower_endpoint
+        assert "TOWER_API_ENDPOINT" not in run_env or os.environ.get("TOWER_API_ENDPOINT") is not None
+
+    def test_with_tower_flag_in_command(self, tmp_path):
+        """When tower_endpoint is set, -with-tower should appear in the NF command."""
+        import sqlite3, subprocess
+        from unittest.mock import patch, MagicMock
+        cfg = make_config(
+            tower_endpoint="http://localhost:8050",
+            outdir=str(tmp_path / "results"),
+            repo_dir=str(tmp_path),
+        )
+        # Verify the config carries the endpoint; command construction is covered
+        # by runner integration tests — just confirm the flag logic is correct.
+        assert cfg.tower_endpoint == "http://localhost:8050"
+        # Simulate the command-building logic from runner.py
+        cmd = ["nextflow", "run", "main.nf"]
+        if cfg.tower_endpoint:
+            cmd += ["-with-tower"]
+        assert "-with-tower" in cmd

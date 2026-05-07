@@ -27,6 +27,7 @@ from pathlib import Path
 
 from mussel_dispatcher.config import Config, WatcherConfig
 from mussel_dispatcher.dashboard import helpers as _helpers
+from mussel_dispatcher import tower_shim as _tower_shim
 
 parse_nf_log  = _helpers.parse_nf_log
 slurm_stats   = _helpers.slurm_stats
@@ -90,12 +91,21 @@ def _build_handler(cfg: Config):
         in_flight_done = 0
         in_flight_total = 0
         for rb in running_rows:
-            log_info = parse_nf_log(rb["log_path"]) if rb["log_path"] else {}
-            np = log_info.get("progress")
-            if np and np["total"] > 0:
-                slide_count = rb["slide_count"] or 0
-                in_flight_done += slide_count * np["done"] / np["total"]
-                in_flight_total += slide_count
+            slide_count = rb["slide_count"] or 0
+            # Prefer Tower shim real-time progress; fall back to log parsing.
+            tower_prog = _tower_shim.get_progress(rb["batch_id"])
+            if tower_prog:
+                done = tower_prog.get("succeeded", 0) + tower_prog.get("cached", 0)
+                total_tasks = done + tower_prog.get("failed", 0) + tower_prog.get("running", 0) + tower_prog.get("pending", 0)
+                if total_tasks > 0:
+                    in_flight_done += slide_count * done / total_tasks
+                    in_flight_total += slide_count
+            else:
+                log_info = parse_nf_log(rb["log_path"]) if rb["log_path"] else {}
+                np = log_info.get("progress")
+                if np and np["total"] > 0:
+                    in_flight_done += slide_count * np["done"] / np["total"]
+                    in_flight_total += slide_count
         if total:
             effective_done = succeeded + in_flight_done
             pct = round(effective_done / total * 100, 1)
@@ -138,6 +148,23 @@ def _build_handler(cfg: Config):
                     pass
             log_info = parse_nf_log(r["log_path"]) if r["log_path"] else {}
             slurm_batch = jobs_by_batch.get(r["batch_id"], {})
+            # Prefer Tower shim for real-time progress when the batch is RUNNING.
+            tower_prog = _tower_shim.get_progress(r["batch_id"]) if r["status"] == "RUNNING" else None
+            if tower_prog is not None:
+                nf_progress = {
+                    "succeeded": tower_prog.get("succeeded", 0),
+                    "failed":    tower_prog.get("failed", 0),
+                    "cached":    tower_prog.get("cached", 0),
+                    "running":   tower_prog.get("running", 0),
+                    "pending":   tower_prog.get("pending", 0),
+                }
+                done = nf_progress["succeeded"] + nf_progress["cached"]
+                total_tasks = done + nf_progress["failed"] + nf_progress["running"] + nf_progress["pending"]
+                nf_progress["pct"] = round(done / total_tasks * 100) if total_tasks else 0
+                nf_progress["done"] = done
+                nf_progress["total"] = total_tasks
+            else:
+                nf_progress = log_info.get("progress") if r["status"] == "RUNNING" else None
             result.append({
                 "batch_id": r["batch_id"],
                 "status": r["status"],
@@ -147,7 +174,8 @@ def _build_handler(cfg: Config):
                 "duration_s": duration,
                 "nextflow_exit": r["nextflow_exit"],
                 "has_log": bool(r["log_path"] and os.path.exists(r["log_path"])),
-                "nf_progress": log_info.get("progress") if r["status"] == "RUNNING" else None,
+                "nf_progress": nf_progress,
+                "tower_active": tower_prog is not None,
                 "slurm_jobs": log_info.get("slurm_jobs"),
                 "slurm_running": slurm_batch.get("running"),
                 "slurm_pending": slurm_batch.get("pending"),
@@ -317,6 +345,70 @@ def _build_handler(cfg: Config):
                     self._send_json(_api_wds())
                 elif path == "/api/slurm":
                     self._send_json(slurm_stats())
+                # Tower shim: GET /user-info (auth check NF makes on startup)
+                elif path == "/user-info":
+                    self._send_json(_tower_shim.user_info_response())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            except Exception as exc:
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except Exception:
+                    pass
+
+        def _read_body(self) -> dict:
+            """Read JSON request body."""
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {}
+
+        def do_POST(self):
+            """Handle Tower trace API POST requests from Nextflow."""
+            path = self.path.split("?")[0]
+            try:
+                if path == "/trace/create":
+                    body = self._read_body()
+                    run_name = body.get("runName", "")
+                    # run_name is "dispatcher_{batch_id}" — parse batch_id out
+                    batch_id = run_name.removeprefix("dispatcher_") if run_name.startswith("dispatcher_") else run_name
+                    workflow_id = _tower_shim.workflow_id_for_batch(batch_id)
+                    _tower_shim.register_workflow(workflow_id, batch_id, run_name)
+                    self._send_json(_tower_shim.trace_create_response(workflow_id))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            except Exception as exc:
+                try:
+                    self._send_json({"error": str(exc)}, status=500)
+                except Exception:
+                    pass
+
+        def do_PUT(self):
+            """Handle Tower trace API PUT requests from Nextflow."""
+            path = self.path.split("?")[0]
+            try:
+                # /trace/{workflowId}/begin|progress|heartbeat|complete
+                parts = path.strip("/").split("/")
+                if len(parts) == 3 and parts[0] == "trace":
+                    workflow_id = parts[1]
+                    action = parts[2]
+                    body = self._read_body()
+                    progress = body.get("progress") or {}
+                    if action in ("progress", "heartbeat"):
+                        _tower_shim.update_progress(workflow_id, progress)
+                        self._send_json({})
+                    elif action == "complete":
+                        _tower_shim.mark_complete(workflow_id, progress)
+                        self._send_json({})
+                    elif action == "begin":
+                        self._send_json({"watchUrl": None})
+                    else:
+                        self.send_response(404)
+                        self.end_headers()
                 else:
                     self.send_response(404)
                     self.end_headers()

@@ -189,6 +189,8 @@ class NextflowRunner:
             cmd += ["-c", self.cfg.nextflow_config]
         if self.cfg.nextflow_params_file:
             cmd += ["-params-file", self.cfg.nextflow_params_file]
+        if self.cfg.tower_endpoint:
+            cmd += ["-with-tower"]
         # If this batch includes slides that need GDC download, pass the token
         # file to NF if configured (open-access TCGA data needs no token).
         has_download = any(s.get("needs_download") for s in self.slides)
@@ -219,10 +221,12 @@ class NextflowRunner:
 
         run_started_at = time.time()
         exit_code = -1
-        run_env = None
+        run_env = dict(os.environ)
         if self.cfg.nextflow_version:
-            run_env = dict(os.environ)
             run_env["NXF_VER"] = self.cfg.nextflow_version
+        if self.cfg.tower_endpoint:
+            run_env["TOWER_API_ENDPOINT"] = self.cfg.tower_endpoint
+            run_env["TOWER_ACCESS_TOKEN"] = run_env.get("TOWER_ACCESS_TOKEN") or "local"
         try:
             with open(log_path, "w") as lf:
                 result = subprocess.run(

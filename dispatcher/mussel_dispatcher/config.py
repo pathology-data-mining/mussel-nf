@@ -89,6 +89,7 @@ class Config:
     nextflow_config: str = ""
     nextflow_params_file: str = ""
     nextflow_version: str = ""
+    tower_endpoint: str = ""           # if set, pass -with-tower to NF (e.g. http://localhost:8050)
     combined_manifest_path: Optional[str] = None
     post_batch_hooks: list = field(default_factory=list)
     watchers: list = field(default_factory=list)

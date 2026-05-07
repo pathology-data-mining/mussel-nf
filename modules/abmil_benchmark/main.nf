@@ -23,6 +23,7 @@
 
 process PALADIN_ABMIL_BENCHMARK {
     label "gpuTask"
+    conda params.abmil_benchmark.conda_env
 
     publishDir path: { "${params.outdir}/abmil_benchmark/${model_type}/${group_name}/${feature_dtype}" },
                mode: "${params.publish_mode}",
@@ -53,9 +54,6 @@ process PALADIN_ABMIL_BENCHMARK {
     for f in ${shard_list}; do
         ln -sf "\$(realpath "\$f")" \${WORK_DIR}/shards/
     done
-
-    source ~/.bashrc
-    conda activate ${cfg.conda_env}
 
     cd ${cfg.paladin_dir}
 

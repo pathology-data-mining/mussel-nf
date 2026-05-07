@@ -1,5 +1,6 @@
 include { CLIP } from './clip'
 include { LINEAR_PROBE } from './linear_probe'
+include { PALADIN_ABMIL_BENCHMARK; SUMMARIZE_ABMIL_BENCHMARK } from './abmil_benchmark'
 
 include { FEATURIZE_BATCH; FEATURIZE_BATCH as FILTER_FEATURIZE } from './featurize'
 
@@ -355,6 +356,35 @@ workflow MUSSEL {
             WDS_SHARD(ch_wds_input)
             ch_wds_shards = WDS_SHARD.out.shards
         }
+
+        // ── ABMIL precision benchmarking (paladin) ────────────────────────────
+        // When abmil_benchmark.enabled and WDS shards are present, train paladin
+        // ABMIL models on the same float32 shards at each feature_dtype variant
+        // (cast at load time). Uses precision: 32-true so the model sees features
+        // in the loaded dtype — the same no-AMP contract as the linear probe path.
+        if (params.abmil_benchmark?.enabled) {
+            if (!params.wds?.enabled) {
+                error "abmil_benchmark.enabled requires wds.enabled = true to generate WDS shards first."
+            }
+            ch_abmil_dtypes = Channel.fromList(params.abmil_benchmark.dtypes ?: ['float32', 'float16', 'bfloat16'])
+
+            ch_abmil_input = ch_wds_shards
+                .combine(ch_abmil_dtypes)
+                .map { group_name, model_type, shard_files, feature_dtype ->
+                    tuple(group_name, model_type, shard_files, feature_dtype)
+                }
+
+            PALADIN_ABMIL_BENCHMARK(ch_abmil_input)
+
+            ch_abmil_summary_input = PALADIN_ABMIL_BENCHMARK.out.metrics
+                .map { group_name, model_type, feature_dtype, metrics_json ->
+                    "${group_name}:${model_type}:${feature_dtype}:${metrics_json}"
+                }
+                .collect()
+
+            SUMMARIZE_ABMIL_BENCHMARK(ch_abmil_summary_input)
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
     emit:
         pt         = ch_extract_feat.pt

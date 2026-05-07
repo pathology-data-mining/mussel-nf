@@ -1,6 +1,5 @@
 include { CLIP } from './clip'
 include { LINEAR_PROBE } from './linear_probe'
-include { PALADIN_ABMIL_BENCHMARK; SUMMARIZE_ABMIL_BENCHMARK } from './abmil_benchmark'
 
 include { FEATURIZE_BATCH; FEATURIZE_BATCH as FILTER_FEATURIZE } from './featurize'
 
@@ -318,18 +317,7 @@ workflow MUSSEL {
 
         // ── WebDataset sharding (opt-in) ──────────────────────────────────────
         ch_wds_shards = Channel.empty()
-        if (params.wds?.existing_shard_dir) {
-            // Use pre-existing shards — skip mussel featurization entirely.
-            ch_wds_shards = Channel.fromPath("${params.wds.existing_shard_dir}/*.tar")
-                .collect()
-                .map { files ->
-                    tuple(
-                        params.wds.existing_group      ?: "all",
-                        params.wds.existing_model_type ?: "default",
-                        files
-                    )
-                }
-        } else if (params.wds.enabled) {
+        if (params.wds.enabled) {
             // Determine group key per slide: oncotree_code or the fixed string "all"
             ch_pt_keyed = ch_extract_feat.pt.map { meta, model_type, pt_file ->
                 def group = (params.wds.group_by_oncotree && meta.oncotree_code)
@@ -367,35 +355,6 @@ workflow MUSSEL {
             WDS_SHARD(ch_wds_input)
             ch_wds_shards = WDS_SHARD.out.shards
         }
-
-        // ── ABMIL precision benchmarking (paladin) ────────────────────────────
-        // When abmil_benchmark.enabled and WDS shards are present, train paladin
-        // ABMIL models on the same float32 shards at each feature_dtype variant
-        // (cast at load time). Uses precision: 32-true so the model sees features
-        // in the loaded dtype — the same no-AMP contract as the linear probe path.
-        if (params.abmil_benchmark?.enabled) {
-            if (!params.wds?.enabled && !params.wds?.existing_shard_dir) {
-                error "abmil_benchmark.enabled requires either wds.enabled = true or wds.existing_shard_dir to be set."
-            }
-            ch_abmil_dtypes = Channel.fromList(params.abmil_benchmark.dtypes ?: ['float32', 'float16', 'bfloat16'])
-
-            ch_abmil_input = ch_wds_shards
-                .combine(ch_abmil_dtypes)
-                .map { group_name, model_type, shard_files, feature_dtype ->
-                    tuple(group_name, model_type, shard_files, feature_dtype)
-                }
-
-            PALADIN_ABMIL_BENCHMARK(ch_abmil_input)
-
-            ch_abmil_summary_input = PALADIN_ABMIL_BENCHMARK.out.metrics
-                .map { group_name, model_type, feature_dtype, metrics_json ->
-                    "${group_name}:${model_type}:${feature_dtype}:${metrics_json}"
-                }
-                .collect()
-
-            SUMMARIZE_ABMIL_BENCHMARK(ch_abmil_summary_input)
-        }
-        // ─────────────────────────────────────────────────────────────────────
 
     emit:
         pt         = ch_extract_feat.pt

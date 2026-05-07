@@ -29,9 +29,10 @@ from mussel_dispatcher.config import Config, WatcherConfig
 from mussel_dispatcher.dashboard import helpers as _helpers
 from mussel_dispatcher import tower_shim as _tower_shim
 
-parse_nf_log  = _helpers.parse_nf_log
-slurm_stats   = _helpers.slurm_stats
-s3_stats      = _helpers.s3_stats
+parse_nf_log              = _helpers.parse_nf_log
+slurm_stats               = _helpers.slurm_stats
+s3_stats                  = _helpers.s3_stats
+tower_process_to_slurm_name = _helpers.tower_process_to_slurm_name
 _s3_cache     = _helpers._s3_cache
 _S3_CACHE_TTL = _helpers._S3_CACHE_TTL
 
@@ -139,6 +140,21 @@ def _build_handler(cfg: Config):
             slurm_batch = jobs_by_batch.get(r["batch_id"], {})
             # Tower shim is the sole source of live progress data.
             tower = _tower_shim.get_progress(r["batch_id"])
+            # Enrich Tower processes with SLURM node/elapsed info.
+            # Tower process names (e.g. "MUSSEL:EXTRACT_FEATURES:TESSELLATE_FEATURIZE_BATCH")
+            # map to SLURM job name prefixes by replacing ":" with "_".
+            if tower and tower.get("processes") and slurm_batch.get("processes"):
+                slurm_procs = slurm_batch["processes"]
+                for proc in tower["processes"]:
+                    slurm_key = tower_process_to_slurm_name(
+                        proc.get("process", proc.get("name", ""))
+                    )
+                    sp = slurm_procs.get(slurm_key) or slurm_procs.get(slurm_key + "_")
+                    if sp:
+                        proc["slurm_running"] = sp["running"]
+                        proc["slurm_nodes"]   = sp["nodes"]
+                        elapsed = sp.get("elapsed_s", [])
+                        proc["slurm_elapsed_max"] = max(elapsed) if elapsed else None
             result.append({
                 "batch_id":      r["batch_id"],
                 "status":        r["status"],

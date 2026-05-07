@@ -269,6 +269,18 @@ function renderProcesses(processes) {
     const pct   = total ? Math.round(done/total*100) : 0;
     const run = p.running || 0;
     const fail= p.failed  || 0;
+
+    // SLURM enrichment: node badge + elapsed time
+    let slurmBadge = '';
+    if (p.slurm_running != null) {
+      const nodes = (p.slurm_nodes || []).join(', ');
+      const elapsed = p.slurm_elapsed_max != null
+        ? ' ' + fmtDuration(p.slurm_elapsed_max) : '';
+      slurmBadge = '<span class="chip chip-yellow" title="SLURM: ' + (nodes||'?') + elapsed + '">' +
+        '&#x26A1; ' + p.slurm_running + (nodes ? ' @' + nodes.split(',')[0].trim() : '') +
+        '</span>';
+    }
+
     return '<div class="process-item">' +
       '<div class="process-name" title="' + (p.process||'') + '">' + name + '</div>' +
       '<div class="pbar-wrap"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + pct + '%"></div></div>' +
@@ -276,6 +288,7 @@ function renderProcesses(processes) {
         '<span class="chip chip-green">&#x2714; ' + done + '</span>' +
         (run  ? '<span class="chip chip-blue">&#x25B6; ' + run  + '</span>' : '') +
         (fail ? '<span class="chip chip-red">&#x2716; '  + fail + '</span>' : '') +
+        slurmBadge +
         '<span class="chip chip-gray">' + pct + '%</span>' +
       '</div></div>';
   }).join('');

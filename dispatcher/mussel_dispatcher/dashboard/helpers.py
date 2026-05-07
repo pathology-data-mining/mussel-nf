@@ -298,6 +298,21 @@ def _parse_elapsed_hms(elapsed: str) -> int | None:
     return None
 
 
+def tower_process_to_slurm_name(tower_process: str) -> str:
+    """Convert a Tower process name to its SLURM job name prefix.
+
+    NF maps ``SCOPE:PROCESS_NAME`` → ``nf-SCOPE_PROCESS_NAME_(N)``.
+    We replicate that: replace ``:`` with ``_`` and strip trailing ``_``.
+    The result matches the ``proc_short`` values produced by squeue parsing
+    after stripping the ``nf-`` prefix and ``(N)`` task-index suffix.
+
+    Example:
+        ``MUSSEL:EXTRACT_FEATURES:TESSELLATE_FEATURIZE_BATCH``
+        → ``MUSSEL_EXTRACT_FEATURES_TESSELLATE_FEATURIZE_BATCH``
+    """
+    return tower_process.replace(":", "_").rstrip("_")
+
+
 def slurm_stats() -> dict:
     """Return summary of current user's NF/mussel SLURM jobs via squeue + sacct.
 
@@ -345,7 +360,9 @@ def slurm_stats() -> dict:
             batch_id = m.group(1) if m else None
             if batch_id:
                 b = result["jobs_by_batch"].setdefault(
-                    batch_id, {"running": 0, "pending": 0, "nodes": []})
+                    batch_id, {"running": 0, "pending": 0, "nodes": [], "processes": {}})
+                bp = b["processes"].setdefault(
+                    proc_short, {"running": 0, "pending": 0, "nodes": [], "elapsed_s": []})
             p = result["processes"].setdefault(
                 proc_short, {"running": 0, "pending": 0})
 
@@ -358,15 +375,21 @@ def slurm_stats() -> dict:
                     b["running"] += 1
                     if node not in b["nodes"]:
                         b["nodes"].append(node)
+                    bp["running"] += 1
+                    if node and node != "N/A" and node not in bp["nodes"]:
+                        bp["nodes"].append(node)
                 elapsed_s = _parse_elapsed_hms(elapsed)
-                if elapsed_s and elapsed_s > _STALL_THRESHOLD_S:
-                    result["stalled_tasks"].append({
-                        "job_id":   job_id,
-                        "process":  proc_short,
-                        "node":     node,
-                        "elapsed_s": elapsed_s,
-                        "batch_id": batch_id,
-                    })
+                if elapsed_s:
+                    if batch_id:
+                        bp["elapsed_s"].append(elapsed_s)
+                    if elapsed_s > _STALL_THRESHOLD_S:
+                        result["stalled_tasks"].append({
+                            "job_id":   job_id,
+                            "process":  proc_short,
+                            "node":     node,
+                            "elapsed_s": elapsed_s,
+                            "batch_id": batch_id,
+                        })
             elif state == "PENDING":
                 result["pending"] += 1
                 p["pending"] += 1
@@ -374,6 +397,7 @@ def slurm_stats() -> dict:
                 result["pending_reasons"][r] = result["pending_reasons"].get(r, 0) + 1
                 if batch_id:
                     b["pending"] += 1
+                    bp["pending"] += 1
     except FileNotFoundError:
         result["error"] = "squeue not found"
     except subprocess.TimeoutExpired:

@@ -2885,3 +2885,54 @@ class TestSlurmStats:
         assert _parse_elapsed_hms("2:30") == 150
         assert _parse_elapsed_hms("1-02:00:00") == 93600
         assert _parse_elapsed_hms("bad") is None
+
+    def test_per_batch_process_tracking(self, monkeypatch):
+        """jobs_by_batch entries include a 'processes' dict with per-process SLURM data."""
+        self._mock_squeue([
+            "600|nf-MUSSEL_EXTRACT_FEATURES_TESSELLATE_FEATURIZE_BATCH_(1)|RUNNING|(None)|gpu01"
+            "|/work/batch_20240101T120000_abcd1234/work/ab/cd|0:20:00",
+            "601|nf-MUSSEL_EXTRACT_FEATURES_TESSELLATE_FEATURIZE_BATCH_(2)|RUNNING|(None)|gpu02"
+            "|/work/batch_20240101T120000_abcd1234/work/ef/gh|0:25:00",
+        ], monkeypatch)
+        from mussel_dispatcher.dashboard.helpers import slurm_stats
+        result = slurm_stats()
+        b = result["jobs_by_batch"].get("20240101T120000_abcd1234")
+        assert b is not None
+        assert b["running"] == 2
+        procs = b["processes"]
+        proc_key = "MUSSEL_EXTRACT_FEATURES_TESSELLATE_FEATURIZE_BATCH_"
+        assert proc_key in procs
+        assert procs[proc_key]["running"] == 2
+        assert set(procs[proc_key]["nodes"]) == {"gpu01", "gpu02"}
+        assert sorted(procs[proc_key]["elapsed_s"]) == [1200, 1500]
+
+
+# ===========================================================================
+# tower_process_to_slurm_name
+# ===========================================================================
+
+class TestTowerProcessToSlurmName:
+    """Tests for the Tower→SLURM process name mapping."""
+
+    def test_basic_conversion(self):
+        from mussel_dispatcher.dashboard.helpers import tower_process_to_slurm_name
+        assert tower_process_to_slurm_name(
+            "MUSSEL:EXTRACT_FEATURES:TESSELLATE_FEATURIZE_BATCH"
+        ) == "MUSSEL_EXTRACT_FEATURES_TESSELLATE_FEATURIZE_BATCH"
+
+    def test_single_segment(self):
+        from mussel_dispatcher.dashboard.helpers import tower_process_to_slurm_name
+        assert tower_process_to_slurm_name("DOWNLOAD_SLIDE") == "DOWNLOAD_SLIDE"
+
+    def test_matches_actual_job_names(self):
+        """Derived name matches what squeue proc_short produces (strip trailing _)."""
+        from mussel_dispatcher.dashboard.helpers import tower_process_to_slurm_name
+        import re
+        # Real job name from sacct:
+        job_name = "nf-MUSSEL_EXTRACT_FEATURES_ONE_STEP_TESSELLATE_FEATURIZE_BATCH_(7)"
+        proc_short = re.sub(r'\s*\(\d+\)$', '', job_name[3:])
+        # proc_short = "MUSSEL_EXTRACT_FEATURES_ONE_STEP_TESSELLATE_FEATURIZE_BATCH_"
+        tower_name = "MUSSEL:EXTRACT_FEATURES:ONE_STEP:TESSELLATE_FEATURIZE_BATCH"
+        derived = tower_process_to_slurm_name(tower_name)
+        # derived strips trailing _, squeue proc_short has trailing _
+        assert proc_short.rstrip("_") == derived

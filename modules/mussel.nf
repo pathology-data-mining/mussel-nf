@@ -1,5 +1,6 @@
 include { CLIP } from './clip'
 include { LINEAR_PROBE } from './linear_probe'
+include { ABMIL_BENCHMARK_WORKFLOW } from './abmil_benchmark/main'
 
 include { FEATURIZE_BATCH; FEATURIZE_BATCH as FILTER_FEATURIZE } from './featurize'
 
@@ -295,9 +296,12 @@ workflow MUSSEL {
                         target_precision != source_precision
                     }
             )
-            LINEAR_PROBE(ch_annotations, ch_lp_h5.mix(CONVERT_FEATURES_PRECISION.out.h5))
+            def ch_all_h5 = ch_lp_h5.mix(CONVERT_FEATURES_PRECISION.out.h5)
+            LINEAR_PROBE(ch_annotations, ch_all_h5)
+            ABMIL_BENCHMARK_WORKFLOW(ch_all_h5)
         } else {
             LINEAR_PROBE(ch_annotations, ch_lp_h5)
+            ABMIL_BENCHMARK_WORKFLOW(ch_lp_h5)
         }
         // ─────────────────────────────────────────────────────────────────────
 

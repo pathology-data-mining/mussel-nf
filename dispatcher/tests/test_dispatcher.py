@@ -2794,3 +2794,94 @@ class TestRunnerTowerEnv:
         if cfg.tower_endpoint:
             cmd += ["-with-tower"]
         assert "-with-tower" in cmd
+
+
+# ===========================================================================
+# SLURM squeue parsing
+# ===========================================================================
+
+class TestSlurmStats:
+    """Tests for slurm_stats() and _parse_elapsed_hms() in helpers.py."""
+
+    def _mock_squeue(self, lines, monkeypatch):
+        import subprocess
+        from mussel_dispatcher.dashboard import helpers
+
+        def fake_check_output(cmd, **kwargs):
+            if cmd[0] == "squeue":
+                return "\n".join(lines)
+            if cmd[0] == "sacct":
+                return ""
+            return ""
+
+        monkeypatch.setattr(helpers, "_squeue_cache", {})
+        monkeypatch.setattr(helpers, "_sacct_cache", {"ts": 9e18, "data": {}})
+        monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+
+    def test_non_nf_jobs_excluded(self, monkeypatch):
+        """squeue rows whose job name does not start with nf- are ignored."""
+        self._mock_squeue([
+            "123|my_other_job|RUNNING|(None)|gpu01|/some/other/path|0:01:00",
+            "124|nf-MUSSEL_EXTRACT_FEATURES_(1)|RUNNING|(None)|gpu02|/work/batch_20240101T120000_abcd1234/work/ab/cd|0:05:00",
+        ], monkeypatch)
+        from mussel_dispatcher.dashboard.helpers import slurm_stats
+        result = slurm_stats()
+        assert result["running"] == 1        # only the nf- job
+        assert result["total"] == 1
+        assert "MUSSEL_EXTRACT_FEATURES_" in result["processes"]
+
+    def test_batch_id_correlated(self, monkeypatch):
+        """Running nf- jobs are mapped to their batch via workdir regex."""
+        self._mock_squeue([
+            "200|nf-MUSSEL_EXTRACT_FEATURES_(1)|RUNNING|(None)|gpu01"
+            "|/work/batch_20240101T120000_abcd1234/work/ab/cd|0:10:00",
+            "201|nf-MUSSEL_EXTRACT_FEATURES_(2)|RUNNING|(None)|gpu01"
+            "|/work/batch_20240101T120000_abcd1234/work/ef/gh|0:12:00",
+        ], monkeypatch)
+        from mussel_dispatcher.dashboard.helpers import slurm_stats
+        result = slurm_stats()
+        assert result["running"] == 2
+        b = result["jobs_by_batch"].get("20240101T120000_abcd1234")
+        assert b is not None
+        assert b["running"] == 2
+
+    def test_stalled_task_detected(self, monkeypatch):
+        """Tasks running >2h are reported in stalled_tasks."""
+        self._mock_squeue([
+            "300|nf-MUSSEL_EXTRACT_FEATURES_(1)|RUNNING|(None)|gpu01"
+            "|/work/batch_20240101T120000_abcd1234/work/ab/cd|2:30:00",
+        ], monkeypatch)
+        from mussel_dispatcher.dashboard.helpers import slurm_stats
+        result = slurm_stats()
+        assert len(result["stalled_tasks"]) == 1
+        assert result["stalled_tasks"][0]["elapsed_s"] == 2 * 3600 + 30 * 60
+
+    def test_short_running_task_not_stalled(self, monkeypatch):
+        """Tasks running <2h are not stalled."""
+        self._mock_squeue([
+            "400|nf-MUSSEL_EXTRACT_FEATURES_(1)|RUNNING|(None)|gpu01"
+            "|/work/batch_20240101T120000_abcd1234/work/ab/cd|0:45:00",
+        ], monkeypatch)
+        from mussel_dispatcher.dashboard.helpers import slurm_stats
+        result = slurm_stats()
+        assert result["stalled_tasks"] == []
+
+    def test_pending_reason_recorded(self, monkeypatch):
+        """Pending jobs accumulate their reason counts."""
+        self._mock_squeue([
+            "500|nf-MUSSEL_EXTRACT_FEATURES_(1)|PENDING|(Resources)|N/A"
+            "|/work/batch_20240101T120000_abcd1234/work/ab/cd|0:00:00",
+            "501|nf-MUSSEL_EXTRACT_FEATURES_(2)|PENDING|(Resources)|N/A"
+            "|/work/batch_20240101T120000_abcd1234/work/ef/gh|0:00:00",
+        ], monkeypatch)
+        from mussel_dispatcher.dashboard.helpers import slurm_stats
+        result = slurm_stats()
+        assert result["pending"] == 2
+        assert result["pending_reasons"].get("Resources") == 2
+
+    def test_parse_elapsed_hms_formats(self):
+        from mussel_dispatcher.dashboard.helpers import _parse_elapsed_hms
+        assert _parse_elapsed_hms("1:30:00") == 5400
+        assert _parse_elapsed_hms("2:30") == 150
+        assert _parse_elapsed_hms("1-02:00:00") == 93600
+        assert _parse_elapsed_hms("bad") is None

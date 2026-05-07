@@ -531,7 +531,34 @@ async function loadSlurm() {
     const summary = '<div style="font-size:1.1rem;margin-bottom:0.5rem">' +
       '<span style="color:#6ee7b7;font-weight:600">' + d.running + '</span> running &nbsp;' +
       '<span style="color:#fcd34d;font-weight:600">' + d.pending + '</span> pending &nbsp;' +
-      '<span style="color:#94a3b8">(' + d.total + ' total)</span></div>';
+      '<span style="color:#94a3b8">(' + d.total + ' total nf-* jobs)</span></div>';
+
+    // Per-process breakdown
+    const procs = Object.entries(d.processes || {}).sort(function(a,b){
+      return (b[1].running + b[1].pending) - (a[1].running + a[1].pending);
+    });
+    const procHtml = procs.length
+      ? '<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem">BY PROCESS</span><br>' +
+        procs.map(function(e) {
+          const name = e[0]; const v = e[1];
+          return '<span style="font-family:monospace;font-size:0.75rem;color:#c4b5fd">' + name + '</span> ' +
+            (v.running ? '<span style="color:#6ee7b7">&#x25B6;' + v.running + '</span> ' : '') +
+            (v.pending ? '<span style="color:#fcd34d">&#x23F3;' + v.pending + '</span>' : '');
+        }).join(' &nbsp; ') + '</div>'
+      : '';
+
+    // Stalled tasks
+    const stalled = d.stalled_tasks || [];
+    const stalledHtml = stalled.length
+      ? '<div style="margin-bottom:0.5rem;background:#451a0322;border:1px solid #fb923c44;border-radius:4px;padding:6px 10px">' +
+        '<span style="color:#fb923c;font-size:0.75rem;font-weight:600">&#x26A0; ' + stalled.length + ' task(s) running &gt;2h</span><br>' +
+        stalled.map(function(t) {
+          return '<span style="font-family:monospace;font-size:0.7rem;color:#fca5a5">' +
+            t.process + '</span> <span style="color:#94a3b8">' + fmtDuration(t.elapsed_s) +
+            ' on ' + t.node + '</span>';
+        }).join('<br>') + '</div>'
+      : '';
+
     const nodes = Object.entries(d.nodes || {}).sort(function(a,b){return b[1]-a[1];});
     const nodeHtml = nodes.length
       ? '<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">NODES</span><br>' +
@@ -570,7 +597,7 @@ async function loadSlurm() {
       }
       if (d.sacct_error) histHtml += '<div style="color:#f87171;font-size:0.75rem">sacct: ' + d.sacct_error + '</div>';
     }
-    el.innerHTML = summary + nodeHtml + reasonHtml + histHtml;
+    el.innerHTML = summary + stalledHtml + procHtml + nodeHtml + reasonHtml + histHtml;
   } catch(e) { el.innerHTML = '<span class="no-data">Failed to load SLURM data.</span>'; }
 }
 

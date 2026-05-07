@@ -245,7 +245,7 @@ def sacct_stats() -> dict:
             if len(parts) < 6:
                 continue
             job_id, job_name, state, exit_code, elapsed, work_dir = parts[:6]
-            if "." in job_id or "nf-MUSSEL" not in job_name:
+            if "." in job_id or not job_name.startswith("nf-"):
                 continue
             state = state.strip()
             if state == "COMPLETED":
@@ -280,8 +280,31 @@ def sacct_stats() -> dict:
     return result
 
 
+def _parse_elapsed_hms(elapsed: str) -> int | None:
+    """Parse squeue elapsed string (D-HH:MM:SS or HH:MM:SS or M:SS) to seconds."""
+    try:
+        if "-" in elapsed:
+            days, rest = elapsed.split("-", 1)
+            d = int(days)
+        else:
+            rest, d = elapsed, 0
+        parts = rest.split(":")
+        if len(parts) == 3:
+            return d * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        if len(parts) == 2:
+            return d * 86400 + int(parts[0]) * 60 + int(parts[1])
+    except Exception:
+        pass
+    return None
+
+
 def slurm_stats() -> dict:
-    """Return summary of current user's SLURM jobs via squeue + sacct."""
+    """Return summary of current user's NF/mussel SLURM jobs via squeue + sacct.
+
+    squeue format: job_id | job_name | state | reason | node | workdir | elapsed
+    Only rows whose job_name starts with ``nf-`` are counted; unrelated user jobs
+    (e.g. other pipelines) are excluded so the counts are mussel-specific.
+    """
     now = time.time()
     if _squeue_cache.get("ts", 0) + _SQUEUE_TTL > now:
         return _squeue_cache.get("data", {})
@@ -291,33 +314,62 @@ def slurm_stats() -> dict:
         "running": 0, "pending": 0, "total": 0,
         "nodes": {}, "pending_reasons": {},
         "jobs_by_batch": {},
+        # Per-process breakdown: {process_short_name: {"running": n, "pending": n}}
+        "processes": {},
+        # Stalled tasks: running tasks whose elapsed > stall_threshold_s
+        "stalled_tasks": [],
         "error": None,
     }
+    _STALL_THRESHOLD_S = 7200  # 2 hours — tasks running longer than this are flagged
     try:
         out = subprocess.check_output(
-            ["squeue", "--me", "--noheader", "--format=%T|%R|%N|%Z"],
+            ["squeue", "--me", "--noheader",
+             "--format=%i|%j|%T|%R|%N|%Z|%M"],
             timeout=10, text=True, stderr=subprocess.DEVNULL,
         )
         for line in out.splitlines():
             parts = line.strip().split("|")
-            if len(parts) < 4:
+            if len(parts) < 7:
                 continue
-            state, reason, node, workdir = parts[0], parts[1], parts[2], parts[3]
+            job_id, job_name, state, reason, node, workdir, elapsed = parts[:7]
+
+            # Only count NF-submitted jobs (job names begin with "nf-")
+            if not job_name.startswith("nf-"):
+                continue
+
+            # Short process name: strip "nf-" prefix and task index suffix "(N)"
+            proc_short = re.sub(r'\s*\(\d+\)$', '', job_name[3:])
+
             result["total"] += 1
             m = _BATCH_RE.search(workdir)
             batch_id = m.group(1) if m else None
             if batch_id:
-                b = result["jobs_by_batch"].setdefault(batch_id, {"running": 0, "pending": 0, "nodes": []})
+                b = result["jobs_by_batch"].setdefault(
+                    batch_id, {"running": 0, "pending": 0, "nodes": []})
+            p = result["processes"].setdefault(
+                proc_short, {"running": 0, "pending": 0})
+
             if state == "RUNNING":
                 result["running"] += 1
+                p["running"] += 1
                 if node and node != "N/A":
                     result["nodes"][node] = result["nodes"].get(node, 0) + 1
                 if batch_id:
                     b["running"] += 1
                     if node not in b["nodes"]:
                         b["nodes"].append(node)
+                elapsed_s = _parse_elapsed_hms(elapsed)
+                if elapsed_s and elapsed_s > _STALL_THRESHOLD_S:
+                    result["stalled_tasks"].append({
+                        "job_id":   job_id,
+                        "process":  proc_short,
+                        "node":     node,
+                        "elapsed_s": elapsed_s,
+                        "batch_id": batch_id,
+                    })
             elif state == "PENDING":
                 result["pending"] += 1
+                p["pending"] += 1
                 r = reason.strip("()")
                 result["pending_reasons"][r] = result["pending_reasons"].get(r, 0) + 1
                 if batch_id:

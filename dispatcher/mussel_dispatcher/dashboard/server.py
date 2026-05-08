@@ -293,6 +293,10 @@ def _build_handler(cfg: Config):
         def log_message(self, fmt, *args):  # suppress default access log spam
             pass
 
+        def log_tower(self, method, path, status, note=""):
+            if "/trace" in path or "user" in path:
+                print(f"TOWER {method} {path} -> {status} {note}", flush=True)
+
         def _send_json(self, data, status=200):
             body = json.dumps(data).encode()
             self.send_response(status)
@@ -331,8 +335,10 @@ def _build_handler(cfg: Config):
                     self._send_json(slurm_stats())
                 # Tower shim: GET /user-info (auth check NF makes on startup)
                 elif path == "/user-info":
+                    self.log_tower("GET", path, 200)
                     self._send_json(_tower_shim.user_info_response())
                 else:
+                    self.log_tower("GET", path, 404)
                     self.send_response(404)
                     self.end_headers()
             except Exception as exc:
@@ -361,8 +367,10 @@ def _build_handler(cfg: Config):
                     batch_id = run_name.removeprefix("dispatcher_") if run_name.startswith("dispatcher_") else run_name
                     workflow_id = _tower_shim.workflow_id_for_batch(batch_id)
                     _tower_shim.register_workflow(workflow_id, batch_id, run_name)
+                    self.log_tower("POST", path, 200, f"run={run_name} wid={workflow_id}")
                     self._send_json(_tower_shim.trace_create_response(workflow_id))
                 else:
+                    self.log_tower("POST", path, 404)
                     self.send_response(404)
                     self.end_headers()
             except Exception as exc:
@@ -384,16 +392,22 @@ def _build_handler(cfg: Config):
                     progress = body.get("progress") or {}
                     if action in ("progress", "heartbeat"):
                         tasks = body.get("tasks") or []
-                        # Auto-recover: if shim restarted and lost state, re-register
-                        # from DB using the workflow object's runName if provided
+                        # Auto-recover: workflow_id IS "dispatcher_{batch_id}" — register directly
                         if not _tower_shim.is_registered(workflow_id):
-                            run_name = (body.get("workflow") or {}).get("runName", "")
-                            if run_name.startswith("dispatcher_"):
+                            run_name = (body.get("workflow") or {}).get("runName", "") or workflow_id
+                            if workflow_id.startswith("dispatcher_"):
+                                batch_id = workflow_id.removeprefix("dispatcher_")
+                            elif run_name.startswith("dispatcher_"):
                                 batch_id = run_name.removeprefix("dispatcher_")
-                                _tower_shim.register_workflow(workflow_id, batch_id, run_name)
+                            else:
+                                batch_id = workflow_id
+                            _tower_shim.register_workflow(workflow_id, batch_id, run_name or workflow_id)
+                            self.log_tower("PUT", path, 200, f"auto-registered batch={batch_id}")
                         _tower_shim.update_progress(workflow_id, progress, tasks)
+                        self.log_tower("PUT", path, 200, f"registered={_tower_shim.is_registered(workflow_id)}")
                         self._send_json({})
                     elif action == "complete":
+                        self.log_tower("PUT", path, 200, "complete")
                         _tower_shim.mark_complete(workflow_id, progress)
                         self._send_json({})
                     elif action == "begin":
@@ -402,6 +416,7 @@ def _build_handler(cfg: Config):
                         if run_name.startswith("dispatcher_") and not _tower_shim.is_registered(workflow_id):
                             batch_id = run_name.removeprefix("dispatcher_")
                             _tower_shim.register_workflow(workflow_id, batch_id, run_name)
+                        self.log_tower("PUT", path, 200, f"begin run={run_name}")
                         self._send_json({"watchUrl": None})
                     else:
                         self.send_response(404)

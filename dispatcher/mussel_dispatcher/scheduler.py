@@ -141,16 +141,44 @@ class BatchScheduler:
                 self._first_seen_at = time.monotonic()
             log.debug("Pending queue size: %d", len(self._pending))
 
+    # How often to sweep the DB for PENDING slides that fell out of the deque.
+    # This catches slides reset to PENDING by _verify_wds_coverage (or similar)
+    # that weren't re-added to the in-memory dispatch queue.
+    _DB_SWEEP_INTERVAL = 60  # seconds
+
     def run(self):
         """Scheduler loop — call in the main thread."""
         log.info("BatchScheduler started (batch_size=%d, max_wait=%ds)",
                  self.cfg.batch_size, self.cfg.max_wait_seconds)
+        _last_db_sweep = time.monotonic()
         while not self.stop_event.is_set():
             self._maybe_dispatch()
+            now = time.monotonic()
+            if now - _last_db_sweep >= self._DB_SWEEP_INTERVAL:
+                _last_db_sweep = now
+                self._requeue_db_pending()
             self.stop_event.wait(5)
         # Do NOT force-dispatch on shutdown — pending slides stay in the DB
         # and will be recovered on next startup.
         log.info("BatchScheduler stopped. Pending slides will be recovered on restart.")
+
+    def _requeue_db_pending(self):
+        """Re-enqueue PENDING slides from the DB that are not currently in the dispatch deque.
+
+        Handles slides reset to PENDING after a batch completion (e.g. by
+        _verify_wds_coverage) that were never re-added to the in-memory queue.
+        """
+        with self._lock:
+            in_deque_ids = {s.get("slide_id") for s in self._pending}
+        pending_in_db = self.state.get_pending_slides()
+        newly_enqueued = 0
+        for slide in pending_in_db:
+            if slide.get("slide_id") not in in_deque_ids:
+                self.enqueue(slide)
+                newly_enqueued += 1
+        if newly_enqueued:
+            log.info("BatchScheduler: re-enqueued %d PENDING slide(s) from DB (missed by watcher)",
+                     newly_enqueued)
 
     def _maybe_dispatch(self, force: bool = False):
         with self._lock:

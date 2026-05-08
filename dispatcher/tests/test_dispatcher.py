@@ -595,6 +595,33 @@ class TestBatchScheduler:
         batch = run_manager.submit.call_args[0][1]
         assert {s["slide_id"] for s in batch} == {"a", "b", "c"}
 
+    def test_requeue_db_pending_enqueues_missing_slides(self, tmp_path):
+        """Slides that are PENDING in the DB but not in the deque are re-enqueued."""
+        from mussel_dispatcher.state import StateStore
+        from mussel_dispatcher.scheduler import BatchScheduler
+        db = StateStore(str(tmp_path / "s.db"))
+        db.add_slide("/s/x.svs", "x")
+        db.add_slide("/s/y.svs", "y")
+        cfg = make_config(batch_size=10, max_wait_seconds=9_999)
+        scheduler = BatchScheduler(cfg, db, MagicMock(), threading.Event())
+        # Deque is empty; DB has 2 PENDING slides
+        scheduler._requeue_db_pending()
+        assert len(scheduler._pending) == 2
+        assert {s["slide_id"] for s in scheduler._pending} == {"x", "y"}
+
+    def test_requeue_db_pending_skips_already_queued(self, tmp_path):
+        """Slides already in the deque are not double-enqueued."""
+        from mussel_dispatcher.state import StateStore
+        from mussel_dispatcher.scheduler import BatchScheduler
+        db = StateStore(str(tmp_path / "s.db"))
+        db.add_slide("/s/x.svs", "x")
+        cfg = make_config(batch_size=10, max_wait_seconds=9_999)
+        scheduler = BatchScheduler(cfg, db, MagicMock(), threading.Event())
+        scheduler.enqueue({"slide_id": "x", "slide_path": "/s/x.svs"})
+        scheduler._requeue_db_pending()
+        # Still only 1 entry — not duplicated
+        assert len(scheduler._pending) == 1
+
 
 # ===========================================================================
 # NextflowRunner._write_csv

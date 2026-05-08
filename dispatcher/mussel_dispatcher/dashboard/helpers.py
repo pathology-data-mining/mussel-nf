@@ -298,19 +298,7 @@ def _parse_elapsed_hms(elapsed: str) -> int | None:
     return None
 
 
-def tower_process_to_slurm_name(tower_process: str) -> str:
-    """Convert a Tower process name to its SLURM job name prefix.
-
-    NF maps ``SCOPE:PROCESS_NAME`` → ``nf-SCOPE_PROCESS_NAME_(N)``.
-    We replicate that: replace ``:`` with ``_`` and strip trailing ``_``.
-    The result matches the ``proc_short`` values produced by squeue parsing
-    after stripping the ``nf-`` prefix and ``(N)`` task-index suffix.
-
-    Example:
-        ``MUSSEL:EXTRACT_FEATURES:TESSELLATE_FEATURIZE_BATCH``
-        → ``MUSSEL_EXTRACT_FEATURES_TESSELLATE_FEATURIZE_BATCH``
-    """
-    return tower_process.replace(":", "_").rstrip("_")
+from nextflow_turret import tower_process_to_slurm_name  # noqa: F401 — re-exported here for backward compatibility
 
 
 def slurm_stats() -> dict:

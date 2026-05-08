@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Streaming slide dispatcher for mussel-nf"
 requires-python = ">=3.10"
 dependencies = [
+    "nextflow-turret @ git+https://github.com/msk-mind/nextflow-turret.git",
     "pyyaml",
     "boto3",
     "pandas",

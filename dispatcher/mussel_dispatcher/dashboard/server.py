@@ -27,7 +27,7 @@ from pathlib import Path
 
 from mussel_dispatcher.config import Config, WatcherConfig
 from mussel_dispatcher.dashboard import helpers as _helpers
-from mussel_dispatcher import tower_shim as _tower_shim
+import nextflow_turret as _tower_shim
 
 parse_nf_log              = _helpers.parse_nf_log
 slurm_stats               = _helpers.slurm_stats

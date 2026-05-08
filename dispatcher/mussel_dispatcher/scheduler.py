@@ -355,6 +355,30 @@ def main():
     os.makedirs(cfg.state_dir, exist_ok=True)
     os.makedirs(cfg.log_dir, exist_ok=True)
 
+    # PID lockfile — prevent two dispatcher instances from running simultaneously
+    pid_lock_path = os.path.join(cfg.state_dir, "dispatcher.pid")
+    try:
+        with open(pid_lock_path) as _fh:
+            old_pid = int(_fh.read().strip())
+        # Check if that process is still alive
+        os.kill(old_pid, 0)
+        log.error(
+            "Another dispatcher instance is already running (PID %d, lockfile %s). "
+            "Kill it first or delete the lockfile if it is stale.",
+            old_pid, pid_lock_path,
+        )
+        sys.exit(1)
+    except FileNotFoundError:
+        pass  # No lockfile yet — normal startup
+    except ProcessLookupError:
+        log.warning("Stale PID lockfile found (PID %d no longer running). Overwriting.", old_pid)
+    except (ValueError, OSError):
+        pass  # Unreadable lockfile — overwrite
+
+    with open(pid_lock_path, "w") as _fh:
+        _fh.write(str(os.getpid()))
+    log.info("PID lockfile written: %s (PID=%d)", pid_lock_path, os.getpid())
+
     db_path = os.path.join(cfg.state_dir, "dispatcher.db")
     state = StateStore(db_path)
     log.info("State store: %s", db_path)
@@ -423,6 +447,10 @@ def main():
 
     if not watchers:
         log.error("No watchers configured. Exiting.")
+        try:
+            os.unlink(pid_lock_path)
+        except OSError:
+            pass
         sys.exit(1)
 
     log.info("mussel-dispatcher running with %d watcher(s). PID=%d", len(watchers), os.getpid())
@@ -440,6 +468,10 @@ def main():
                     "They will be recovered on next startup.", run_manager.running_count())
         run_manager.shutdown(wait=False)
     log.info("mussel-dispatcher stopped.")
+    try:
+        os.unlink(pid_lock_path)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

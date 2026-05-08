@@ -196,10 +196,22 @@ class NextflowRunner:
             os.makedirs(self.cfg.log_dir, exist_ok=True)
 
             self.state.add_batch(self.batch_id, csv_path, work_dir, len(self.slides), log_path)
-            self.state.mark_dispatched(
-                [s.get("_db_key") or s["slide_path"] for s in self.slides],
-                self.batch_id,
-            )
+            slide_keys = [s.get("_db_key") or s["slide_path"] for s in self.slides]
+            claimed = self.state.mark_dispatched(slide_keys, self.batch_id)
+            if claimed == 0:
+                log.warning(
+                    "Batch %s: 0 of %d slides claimed (all already dispatched by another instance). "
+                    "Aborting batch.",
+                    self.batch_id, len(self.slides),
+                )
+                self.state.cancel_batch(self.batch_id)
+                return
+            if claimed < len(self.slides):
+                log.warning(
+                    "Batch %s: only %d of %d slides claimed; %d were already dispatched "
+                    "by another instance and will be skipped.",
+                    self.batch_id, claimed, len(self.slides), len(self.slides) - claimed,
+                )
 
         nf_run_name = f"dispatcher_{self.batch_id}"
         trace_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.trace.tsv")

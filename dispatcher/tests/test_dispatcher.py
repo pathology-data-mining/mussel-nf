@@ -129,8 +129,34 @@ class TestStateStore:
 
     def test_mark_dispatched_removes_from_pending(self, store):
         store.add_slide("/slides/a.svs", "a")
-        store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        claimed = store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        assert claimed == 1
         assert store.get_pending_slides() == []
+
+    def test_mark_dispatched_returns_claimed_count(self, store):
+        """mark_dispatched only claims PENDING slides; returns count actually updated."""
+        store.add_slide("/slides/a.svs", "a")
+        store.add_slide("/slides/b.svs", "b")
+        # Claim a first
+        store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        # Try to claim both — only b is still PENDING
+        claimed = store.mark_dispatched(["/slides/a.svs", "/slides/b.svs"], "batch-002")
+        assert claimed == 1  # only b was claimed; a was already DISPATCHED
+
+    def test_mark_dispatched_race_condition(self, store):
+        """Simulates two dispatchers racing: second batch claims 0 slides."""
+        store.add_slide("/slides/a.svs", "a")
+        # First dispatcher claims the slide
+        c1 = store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        assert c1 == 1
+        # Second dispatcher tries to claim the same slide
+        c2 = store.mark_dispatched(["/slides/a.svs"], "batch-002")
+        assert c2 == 0
+        # Slide still belongs to batch-001
+        row = store._conn().execute(
+            "SELECT batch_id FROM slides WHERE slide_path=?", ("/slides/a.svs",)
+        ).fetchone()
+        assert row["batch_id"] == "batch-001"
 
     def test_mark_slides_complete_succeeded(self, store):
         store.add_slide("/slides/a.svs", "a")
@@ -154,6 +180,12 @@ class TestStateStore:
     def test_mark_slides_complete_increments_fail_count(self, store):
         store.add_slide("/slides/a.svs", "a")
         for i in range(3):
+            # In real usage, slides are reset to PENDING before each retry
+            store._conn().execute(
+                "UPDATE slides SET status='PENDING', batch_id=NULL WHERE slide_path=?",
+                ("/slides/a.svs",),
+            )
+            store._conn().commit()
             store.mark_dispatched(["/slides/a.svs"], f"batch-{i:03d}")
             store.mark_slides_complete(f"batch-{i:03d}", succeeded=False)
         row = store._conn().execute(
@@ -887,6 +919,11 @@ class TestRecoverInFlight:
         store.add_slide("/slides/ok.svs", "ok")
         # Fail bad slide 3 times
         for i in range(3):
+            store._conn().execute(
+                "UPDATE slides SET status='PENDING', batch_id=NULL WHERE slide_path=?",
+                ("/slides/bad.svs",),
+            )
+            store._conn().commit()
             store.mark_dispatched(["/slides/bad.svs"], f"batch-{i:03d}")
             store.mark_slides_complete(f"batch-{i:03d}", succeeded=False)
         # Fail ok slide once
@@ -1092,7 +1129,6 @@ class TestNextflowRunnerRun:
         for s in slides:
             state.add_slide(s["slide_path"], s["slide_id"])
         runner = NextflowRunner(cfg, "batch-001", slides, state)
-        state.mark_dispatched([s["slide_path"] for s in slides], "batch-001")
         return runner, state
 
     def test_run_success_marks_slides_succeeded(self, tmp_path):

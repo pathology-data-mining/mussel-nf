@@ -120,13 +120,25 @@ class StateStore:
                         s["file_name"] = rest[slash + 1:]
         return slides
 
-    def mark_dispatched(self, slide_paths: list, batch_id: str):
+    def mark_dispatched(self, slide_paths: list, batch_id: str) -> int:
+        """Atomically claim PENDING slides for a batch.
+
+        Only slides still in PENDING status are updated.  Returns the number
+        of slides actually claimed.  If this is less than len(slide_paths),
+        another dispatcher instance raced and claimed some of them first.
+        """
         now = datetime.now(timezone.utc).isoformat()
-        self._conn().executemany(
-            "UPDATE slides SET status='DISPATCHED', batch_id=?, dispatched_at=? WHERE slide_path=?",
-            [(batch_id, now, p) for p in slide_paths],
-        )
-        self._conn().commit()
+        claimed = 0
+        conn = self._conn()
+        for p in slide_paths:
+            cur = conn.execute(
+                "UPDATE slides SET status='DISPATCHED', batch_id=?, dispatched_at=?"
+                " WHERE slide_path=? AND status='PENDING'",
+                (batch_id, now, p),
+            )
+            claimed += cur.rowcount
+        conn.commit()
+        return claimed
 
     def mark_slides_complete(self, batch_id: str, succeeded: bool,
                              per_slide_status: dict | None = None,
@@ -267,6 +279,11 @@ class StateStore:
             "UPDATE batches SET status='RUNNING', completed_at=NULL WHERE batch_id=?",
             (batch_id,),
         )
+        self._conn().commit()
+
+    def cancel_batch(self, batch_id: str):
+        """Remove a batch record that was never actually started (race-condition abort)."""
+        self._conn().execute("DELETE FROM batches WHERE batch_id=?", (batch_id,))
         self._conn().commit()
 
     def complete_batch(self, batch_id: str, exit_code: int):

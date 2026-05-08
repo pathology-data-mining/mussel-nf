@@ -82,7 +82,7 @@ def _build_handler(cfg: Config):
 
         with _db() as conn:
             running_rows = conn.execute(
-                "SELECT log_path, slide_count FROM batches WHERE status='RUNNING'"
+                "SELECT batch_id, log_path, slide_count FROM batches WHERE status='RUNNING'"
             ).fetchall()
             n_blacklisted = conn.execute(
                 "SELECT COUNT(*) FROM slides WHERE fail_count >= 100"

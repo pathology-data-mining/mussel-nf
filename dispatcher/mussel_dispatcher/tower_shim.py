@@ -135,6 +135,11 @@ def register_workflow(workflow_id: str, batch_id: str, run_name: str) -> None:
         _workflows[workflow_id] = WorkflowState(workflow_id, batch_id, run_name)
 
 
+def is_registered(workflow_id: str) -> bool:
+    with _lock:
+        return workflow_id in _workflows
+
+
 def update_progress(workflow_id: str, progress: dict,
                     tasks: list[dict] | None = None) -> None:
     with _lock:

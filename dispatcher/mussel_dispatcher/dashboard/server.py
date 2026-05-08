@@ -384,12 +384,24 @@ def _build_handler(cfg: Config):
                     progress = body.get("progress") or {}
                     if action in ("progress", "heartbeat"):
                         tasks = body.get("tasks") or []
+                        # Auto-recover: if shim restarted and lost state, re-register
+                        # from DB using the workflow object's runName if provided
+                        if not _tower_shim.is_registered(workflow_id):
+                            run_name = (body.get("workflow") or {}).get("runName", "")
+                            if run_name.startswith("dispatcher_"):
+                                batch_id = run_name.removeprefix("dispatcher_")
+                                _tower_shim.register_workflow(workflow_id, batch_id, run_name)
                         _tower_shim.update_progress(workflow_id, progress, tasks)
                         self._send_json({})
                     elif action == "complete":
                         _tower_shim.mark_complete(workflow_id, progress)
                         self._send_json({})
                     elif action == "begin":
+                        # Auto-register on begin — NF sends runName here
+                        run_name = (body.get("workflow") or {}).get("runName", "")
+                        if run_name.startswith("dispatcher_") and not _tower_shim.is_registered(workflow_id):
+                            batch_id = run_name.removeprefix("dispatcher_")
+                            _tower_shim.register_workflow(workflow_id, batch_id, run_name)
                         self._send_json({"watchUrl": None})
                     else:
                         self.send_response(404)

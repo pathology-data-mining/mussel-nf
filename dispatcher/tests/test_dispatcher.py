@@ -2089,6 +2089,63 @@ class TestVerifyWdsCoverage:
         # No wds_manifest.csv written
         runner._verify_wds_coverage(batch_csv)  # must not raise
 
+    def test_permanently_failed_at_max_retries(self, tmp_path):
+        """Slides missing from WDS that reach max_slide_retries are FAILed, not re-queued."""
+        runner, state = self._make_runner(tmp_path, {"hoptimus1": "s3://bucket/wds/"})
+        runner.cfg = make_config(
+            repo_dir=str(tmp_path),
+            outdir=str(tmp_path / "results"),
+            work_base_dir=str(tmp_path / "work"),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            watchers=[WatcherConfig(type="tcga", wds_destinations={"hoptimus1": "s3://bucket/wds/"})],
+            max_slide_retries=3,
+        )
+        # Slide "A" has already failed twice → next fail will hit the threshold (3)
+        state.add_slide("/slides/A.svs", "A")
+        state.mark_dispatched(["/slides/A.svs"], "batch-001")
+        state.mark_slides_complete("batch-001", succeeded=True)
+        state._conn().execute("UPDATE slides SET fail_count=2 WHERE slide_id='A'")
+        state._conn().commit()
+        batch_csv = self._write_batch_csv(tmp_path, ["A"])
+        # A not in WDS manifest — third failure should permanently fail it
+        self._write_wds_manifest(tmp_path, [])
+        runner._verify_wds_coverage(batch_csv)
+        row = state._conn().execute(
+            "SELECT status, fail_count FROM slides WHERE slide_id='A'"
+        ).fetchone()
+        assert row["status"] == "FAILED", f"expected FAILED, got {row['status']}"
+        assert row["fail_count"] == 3
+
+    def test_retryable_below_max_retries(self, tmp_path):
+        """Slides missing from WDS below max_slide_retries are reset to PENDING."""
+        runner, state = self._make_runner(tmp_path, {"hoptimus1": "s3://bucket/wds/"})
+        runner.cfg = make_config(
+            repo_dir=str(tmp_path),
+            outdir=str(tmp_path / "results"),
+            work_base_dir=str(tmp_path / "work"),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            watchers=[WatcherConfig(type="tcga", wds_destinations={"hoptimus1": "s3://bucket/wds/"})],
+            max_slide_retries=3,
+        )
+        state.add_slide("/slides/A.svs", "A")
+        state.mark_dispatched(["/slides/A.svs"], "batch-001")
+        state.mark_slides_complete("batch-001", succeeded=True)
+        # fail_count=1 → next fail (2) is still below threshold (3)
+        state._conn().execute("UPDATE slides SET fail_count=1 WHERE slide_id='A'")
+        state._conn().commit()
+        batch_csv = self._write_batch_csv(tmp_path, ["A"])
+        self._write_wds_manifest(tmp_path, [])
+        runner._verify_wds_coverage(batch_csv)
+        row = state._conn().execute(
+            "SELECT status, fail_count FROM slides WHERE slide_id='A'"
+        ).fetchone()
+        assert row["status"] == "PENDING"
+        assert row["fail_count"] == 2
+
 
 # ===========================================================================
 # S3Watcher._scan / _in_progress_keys

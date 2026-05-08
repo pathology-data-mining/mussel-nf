@@ -369,8 +369,10 @@ class NextflowRunner:
 
     def _verify_wds_coverage(self, batch_csv: str) -> None:
         """After append_wds hooks, verify all batch slides appear in WDS for every
-        configured model. Slides missing from any model are reset to PENDING so they
-        get retried — append_wds.py will skip already-indexed slides on the next run."""
+        configured model. Slides missing from any model are reset to PENDING for retry.
+        Slides whose fail_count+1 would reach max_slide_retries are permanently FAILed
+        instead — preventing infinite retry loops for slides that produce 0 features or
+        otherwise can never satisfy WDS coverage (e.g. empty/corrupted slides)."""
         import csv as _csv
         from collections import defaultdict
 
@@ -418,16 +420,49 @@ class NextflowRunner:
             ", ".join(sorted(incomplete)[:5]),
             " …" if len(incomplete) > 5 else "",
         )
+        max_retries = self.cfg.max_slide_retries or 0
         conn = self.state._conn()
-        conn.executemany(
-            "UPDATE slides SET status='PENDING', fail_count=fail_count+1, "
-            "batch_id=NULL, dispatched_at=NULL "
-            "WHERE slide_id=? AND status='SUCCEEDED'",
-            [(sid,) for sid in incomplete],
-        )
+
+        permanently_failed: list[str] = []
+        retryable: list[str] = []
+        if max_retries > 0:
+            for sid in incomplete:
+                row = conn.execute(
+                    "SELECT fail_count FROM slides WHERE slide_id=?", (sid,)
+                ).fetchone()
+                current = row[0] if row else 0
+                if current + 1 >= max_retries:
+                    permanently_failed.append(sid)
+                else:
+                    retryable.append(sid)
+        else:
+            retryable = list(incomplete)
+
+        if permanently_failed:
+            conn.executemany(
+                "UPDATE slides SET status='FAILED', fail_count=fail_count+1, "
+                "batch_id=NULL, dispatched_at=NULL, "
+                "error_msg='Permanently failed: missing from WDS after max retries' "
+                "WHERE slide_id=? AND status='SUCCEEDED'",
+                [(sid,) for sid in permanently_failed],
+            )
+            log.warning(
+                "Batch %s: permanently failed %d slide(s) missing from WDS (fail_count >= %d): %s",
+                self.batch_id, len(permanently_failed), max_retries,
+                ", ".join(sorted(permanently_failed)),
+            )
+
+        if retryable:
+            conn.executemany(
+                "UPDATE slides SET status='PENDING', fail_count=fail_count+1, "
+                "batch_id=NULL, dispatched_at=NULL "
+                "WHERE slide_id=? AND status='SUCCEEDED'",
+                [(sid,) for sid in retryable],
+            )
+            log.info("Batch %s: reset %d incomplete slide(s) to PENDING (will retry).",
+                     self.batch_id, len(retryable))
+
         conn.commit()
-        log.info("Batch %s: reset %d incomplete slide(s) to PENDING (will retry).",
-                 self.batch_id, len(incomplete))
 
     def _cleanup(self, csv_path: str, log_path: str, work_dir: str, *, succeeded: bool = True):
         """Post-batch cleanup. Work dir is removed on both success and failure when enabled.

@@ -113,7 +113,8 @@ def _build_handler(cfg: Config):
         with _db() as conn:
             rows = conn.execute("""
                 SELECT batch_id, status, slide_count, dispatched_at,
-                       completed_at, nextflow_exit, log_path
+                       completed_at, nextflow_exit, log_path,
+                       tasks_done, tasks_total, tasks_failed
                 FROM batches
                 ORDER BY dispatched_at DESC
                 LIMIT 30
@@ -140,6 +141,15 @@ def _build_handler(cfg: Config):
             slurm_batch = jobs_by_batch.get(r["batch_id"], {})
             # Tower shim is the sole source of live progress data.
             tower = _tower_shim.get_progress(r["batch_id"])
+            # Fallback: use persisted task counts from DB when Tower state was lost.
+            if tower is None and r["tasks_total"]:
+                tower = {
+                    "done":        r["tasks_done"],
+                    "total":       r["tasks_total"],
+                    "pct":         round(r["tasks_done"] / r["tasks_total"] * 100) if r["tasks_total"] else 0,
+                    "task_counts": {"failed": r["tasks_failed"] or 0},
+                    "complete":    True,
+                }
             # Enrich Tower processes with SLURM node/elapsed info.
             # Tower process names (e.g. "MUSSEL:EXTRACT_FEATURES:TESSELLATE_FEATURIZE_BATCH")
             # map to SLURM job name prefixes by replacing ":" with "_".
@@ -410,6 +420,18 @@ def _build_handler(cfg: Config):
                     elif action == "complete":
                         self.log_tower("PUT", path, 200, "complete")
                         _tower_shim.mark_complete(workflow_id, progress)
+                        # Persist final task counts to DB so they survive restarts.
+                        if workflow_id.startswith("dispatcher_"):
+                            batch_id = workflow_id.removeprefix("dispatcher_")
+                            done   = progress.get("succeeded", 0) + progress.get("cached", 0)
+                            total  = progress.get("succeeded", 0) + progress.get("failed", 0) + \
+                                     progress.get("cached", 0) + progress.get("running", 0) + \
+                                     progress.get("pending", 0)
+                            failed = progress.get("failed", 0)
+                            try:
+                                cfg.state.record_batch_task_counts(batch_id, done, total, failed)
+                            except Exception as exc:
+                                self.log_tower("PUT", path, 500, f"task count persist error: {exc}")
                         self._send_json({})
                     elif action == "begin":
                         # Auto-register on begin — NF sends runName here

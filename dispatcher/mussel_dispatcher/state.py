@@ -55,9 +55,19 @@ class StateStore:
                 work_dir      TEXT,
                 log_path      TEXT,
                 manifest_path TEXT,
-                session_id    TEXT
+                session_id    TEXT,
+                tasks_done    INTEGER,
+                tasks_total   INTEGER,
+                tasks_failed  INTEGER
             );
+            -- migrations for databases created before tasks_* columns existed
+            CREATE TABLE IF NOT EXISTS _schema_migrations (name TEXT PRIMARY KEY);
         """)
+        for col, coltype in [("tasks_done", "INTEGER"), ("tasks_total", "INTEGER"), ("tasks_failed", "INTEGER")]:
+            try:
+                conn.execute(f"ALTER TABLE batches ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass  # column already exists
         conn.commit()
 
     # -----------------------------------------------------------------------
@@ -292,6 +302,14 @@ class StateStore:
             """UPDATE batches SET status=?, completed_at=?, nextflow_exit=?
                WHERE batch_id=?""",
             (status, datetime.now(timezone.utc).isoformat(), exit_code, batch_id),
+        )
+        self._conn().commit()
+
+    def record_batch_task_counts(self, batch_id: str, done: int, total: int, failed: int):
+        """Persist final task counts from the Tower complete event."""
+        self._conn().execute(
+            "UPDATE batches SET tasks_done=?, tasks_total=?, tasks_failed=? WHERE batch_id=?",
+            (done, total, failed, batch_id),
         )
         self._conn().commit()
 

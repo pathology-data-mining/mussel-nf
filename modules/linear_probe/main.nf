@@ -159,7 +159,12 @@ process SUMMARIZE_LINEAR_PROBE {
         return None if (isinstance(v, float) and (math.isnan(v) or math.isinf(v))) else v
 
     def get_json_for_model(model):
-        path = next(token.split(":", 2)[1] for token in triples_str.split() if token.startswith(model + ":"))
+        path = next(
+            (token.split(":", 2)[1] for token in triples_str.split() if token.startswith(model + ":")),
+            None
+        )
+        if path is None:
+            raise ValueError(f"No results found for model '{model}' in triples_str")
         return json.loads(pathlib.Path(path).read_text())
 
     # ── Parse inputs ──────────────────────────────────────────────────────────
@@ -314,7 +319,8 @@ process SUMMARIZE_LINEAR_PROBE {
                             )
             delta_rows.append(delta)
 
-    pd.DataFrame(delta_rows).to_csv("precision_delta.csv", index=False)
+    df_delta = pd.DataFrame(delta_rows)
+    df_delta.to_csv("precision_delta.csv", index=False)
     print("Summary written: summary.csv, summary.png, per_class_f1.csv, per_class_heatmap.png, precision_delta.csv")
 
     # ── report.html ───────────────────────────────────────────────────────────

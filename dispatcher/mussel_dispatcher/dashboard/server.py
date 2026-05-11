@@ -29,6 +29,8 @@ from mussel_dispatcher.config import Config, WatcherConfig
 from mussel_dispatcher.dashboard import helpers as _helpers
 import nextflow_turret as _tower_shim
 from nextflow_turret import TowerRouter as _TowerRouter
+from nextflow_turret.server.registry import PersistentWorkflowRegistry as _PersistentRegistry
+from nextflow_turret.db.store import RunStore as _RunStore
 
 parse_nf_log              = _helpers.parse_nf_log
 slurm_stats               = _helpers.slurm_stats
@@ -66,8 +68,11 @@ def _build_handler(cfg: Config):
             target=s3_stats, args=(tcga_watcher, "wds"), daemon=True, name="s3-prewarm"
         ).start()
 
+    # Persistent registry: Tower state survives dashboard restarts.
+    _run_store = _RunStore(os.path.join(cfg.state_dir, "turret_runs.db"))
+    _registry  = _PersistentRegistry(_run_store)
     # Single TowerRouter instance shared across all requests in this handler.
-    _router = _TowerRouter()
+    _router = _TowerRouter(registry=_registry)
 
     def _db():
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -97,7 +102,7 @@ def _build_handler(cfg: Config):
         in_flight_total = 0
         for rb in running_rows:
             slide_count = rb["slide_count"] or 0
-            tower = _tower_shim.get_progress(rb["batch_id"])
+            tower = _registry.get_by_batch(rb["batch_id"])
             if tower and tower.get("total", 0) > 0:
                 in_flight_done  += slide_count * tower["done"]  / tower["total"]
                 in_flight_total += slide_count
@@ -117,8 +122,7 @@ def _build_handler(cfg: Config):
         with _db() as conn:
             rows = conn.execute("""
                 SELECT batch_id, status, slide_count, dispatched_at,
-                       completed_at, nextflow_exit, log_path,
-                       tasks_done, tasks_total, tasks_failed
+                       completed_at, nextflow_exit, log_path
                 FROM batches
                 ORDER BY dispatched_at DESC
                 LIMIT 30
@@ -143,17 +147,8 @@ def _build_handler(cfg: Config):
                 except Exception:
                     pass
             slurm_batch = jobs_by_batch.get(r["batch_id"], {})
-            # Tower shim is the sole source of live progress data.
-            tower = _tower_shim.get_progress(r["batch_id"])
-            # Fallback: use persisted task counts from DB when Tower state was lost.
-            if tower is None and r["tasks_total"]:
-                tower = {
-                    "done":        r["tasks_done"],
-                    "total":       r["tasks_total"],
-                    "pct":         round(r["tasks_done"] / r["tasks_total"] * 100) if r["tasks_total"] else 0,
-                    "task_counts": {"failed": r["tasks_failed"] or 0},
-                    "complete":    True,
-                }
+            # Registry is the sole source of progress data (hydrated from DB on restart).
+            tower = _registry.get_by_batch(r["batch_id"])
             # Enrich Tower processes with SLURM node/elapsed info.
             # Tower process names (e.g. "MUSSEL:EXTRACT_FEATURES:TESSELLATE_FEATURIZE_BATCH")
             # map to SLURM job name prefixes by replacing ":" with "_".
@@ -304,6 +299,9 @@ def _build_handler(cfg: Config):
                 "db_total_expected": db_total_expected}
 
     class Handler(BaseHTTPRequestHandler):
+        # Expose registry so tests and external callers can inspect Tower state.
+        tower_registry = _registry
+
         def log_message(self, fmt, *args):  # suppress default access log spam
             pass
 
@@ -407,21 +405,6 @@ def _build_handler(cfg: Config):
                     parts = path.strip("/").split("/")
                     action = parts[2] if len(parts) == 3 else ""
                     self.log_tower("PUT", path, status, action)
-                    # Dispatcher-specific hook: persist task counts to DB on complete.
-                    if action == "complete":
-                        workflow_id = parts[1]
-                        if workflow_id.startswith("dispatcher_"):
-                            batch_id = workflow_id.removeprefix("dispatcher_")
-                            progress = body.get("progress") or {}
-                            done   = progress.get("succeeded", 0) + progress.get("cached", 0)
-                            total  = sum(progress.get(k, 0) for k in
-                                        ("succeeded", "failed", "cached", "running", "pending"))
-                            failed = progress.get("failed", 0)
-                            try:
-                                cfg.state.record_batch_task_counts(batch_id, done, total, failed)
-                            except Exception as persist_exc:
-                                self.log_tower("PUT", path, 500,
-                                               f"task count persist error: {persist_exc}")
                     self._send_json(resp_body, status=status)
                 else:
                     self.send_response(404)

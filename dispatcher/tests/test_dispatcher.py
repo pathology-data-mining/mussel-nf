@@ -2710,13 +2710,10 @@ class TestTowerShimServerRoutes:
         return h, responses
 
     def setup_method(self):
-        import mussel_dispatcher.tower_shim as shim
-        with shim._lock:
-            shim._workflows.clear()
+        pass  # each test creates its own fresh registry via _make_server
 
     def test_user_info_route(self, tmp_path):
         import json
-        import mussel_dispatcher.tower_shim as shim
         Handler = self._make_server(tmp_path)
         h, responses = self._fake_request(Handler, "GET", "/user-info")
         assert h._response_code == 200
@@ -2725,7 +2722,6 @@ class TestTowerShimServerRoutes:
 
     def test_trace_create_route(self, tmp_path):
         import json
-        import mussel_dispatcher.tower_shim as shim
         Handler = self._make_server(tmp_path)
         h, responses = self._fake_request(
             Handler, "POST", "/trace/create",
@@ -2734,41 +2730,38 @@ class TestTowerShimServerRoutes:
         assert h._response_code == 200
         body = json.loads(responses[0])
         assert body["workflowId"] == "dispatcher_test99"
-        # State should now exist in the shim
-        state = shim.get_state("test99")
+        # State should now exist in the registry
+        state = Handler.tower_registry.get_by_batch("test99")
         assert state is not None
         assert state["batch_id"] == "test99"
 
     def test_trace_progress_route(self, tmp_path):
         import json
-        import mussel_dispatcher.tower_shim as shim
-        shim.register_workflow("dispatcher_test88", "test88", "dispatcher_test88")
         Handler = self._make_server(tmp_path)
+        Handler.tower_registry.register("dispatcher_test88", "test88", "dispatcher_test88")
         progress = {"succeeded": 3, "failed": 1, "cached": 0, "running": 2, "pending": 4}
         h, responses = self._fake_request(
             Handler, "PUT", "/trace/dispatcher_test88/progress",
             body={"progress": progress, "instant": 1234567890}
         )
         assert h._response_code == 200
-        prog = shim.get_progress("test88")
+        prog = Handler.tower_registry.get_by_batch("test88")
         assert prog["task_counts"]["succeeded"] == 3
         assert prog["task_counts"]["running"] == 2
 
     def test_trace_complete_route(self, tmp_path):
         import json
-        import mussel_dispatcher.tower_shim as shim
-        shim.register_workflow("dispatcher_test77", "test77", "dispatcher_test77")
         Handler = self._make_server(tmp_path)
+        Handler.tower_registry.register("dispatcher_test77", "test77", "dispatcher_test77")
         h, responses = self._fake_request(
             Handler, "PUT", "/trace/dispatcher_test77/complete",
             body={"progress": {"succeeded": 10}, "instant": 1234567890}
         )
         assert h._response_code == 200
-        state = shim.get_state("test77")
+        state = Handler.tower_registry.get_by_batch("test77")
         assert state["complete"] is True
 
     def test_trace_begin_route(self, tmp_path):
-        import mussel_dispatcher.tower_shim as shim
         Handler = self._make_server(tmp_path)
         h, responses = self._fake_request(
             Handler, "PUT", "/trace/dispatcher_test66/begin",

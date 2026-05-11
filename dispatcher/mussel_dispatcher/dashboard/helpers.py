@@ -159,7 +159,10 @@ _SACCT_TTL = 60   # seconds — sacct is slower
 
 
 def _parse_elapsed_s(elapsed: str) -> int | None:
-    """Parse sacct elapsed string (HH:MM:SS or D-HH:MM:SS) to seconds."""
+    """Parse an elapsed time string (HH:MM:SS, D-HH:MM:SS, or M:SS) to seconds.
+
+    Handles output from both sacct and squeue.
+    """
     try:
         if "-" in elapsed:
             days, rest = elapsed.split("-", 1)
@@ -174,6 +177,10 @@ def _parse_elapsed_s(elapsed: str) -> int | None:
     except Exception:
         pass
     return None
+
+# Alias kept for backward compatibility with any direct callers.
+_parse_elapsed_hms = _parse_elapsed_s
+
 
 
 def classify_task_failure(work_dir: str, exit_code: str, slurm_state: str = "") -> str:
@@ -280,22 +287,6 @@ def sacct_stats() -> dict:
     return result
 
 
-def _parse_elapsed_hms(elapsed: str) -> int | None:
-    """Parse squeue elapsed string (D-HH:MM:SS or HH:MM:SS or M:SS) to seconds."""
-    try:
-        if "-" in elapsed:
-            days, rest = elapsed.split("-", 1)
-            d = int(days)
-        else:
-            rest, d = elapsed, 0
-        parts = rest.split(":")
-        if len(parts) == 3:
-            return d * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-        if len(parts) == 2:
-            return d * 86400 + int(parts[0]) * 60 + int(parts[1])
-    except Exception:
-        pass
-    return None
 
 
 from nextflow_turret import tower_process_to_slurm_name  # noqa: F401 — re-exported here for backward compatibility

@@ -1,3 +1,5 @@
+include { resolvePrecision } from './utils'
+
 process FEATURIZE_BATCH {
     label "bigTask"
     label "gpuTask"
@@ -75,9 +77,7 @@ process FEATURIZE_BATCH {
         : (params.featurize.batch_size ?: 64)
 
     // Resolve embedding precision: per-model override takes precedence over global default
-    precision = (params.featurize.model_precision_overrides && params.featurize.model_precision_overrides[model_type])
-        ? params.featurize.model_precision_overrides[model_type]
-        : (params.featurize.embedding_precision ?: 'float32')
+    precision = resolvePrecision(model_type)
     embedding_precision_str = (precision != 'float32') ? "embedding_precision=${precision}" : ""
 
     """

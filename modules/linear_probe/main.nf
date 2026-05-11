@@ -72,24 +72,17 @@ process LINEAR_PROBE_BENCHMARK {
     tuple val(model_type), path("classification_report_test.csv"), emit: clf_report_test
 
     script:
-    def cv           = params.linear_probe.cv ?: 5
-    def C_values     = (params.linear_probe.C_values ?: [0.001, 0.01, 0.1, 1.0, 10.0]).join(",")
-    def penalties    = (params.linear_probe.penalties ?: ["l2"]).join(",")
-    def n_seeds      = params.linear_probe.n_seeds ?: 5
-    def n_bootstrap  = params.linear_probe.n_bootstrap ?: 1000
-    def random_state = params.linear_probe.random_state ?: 42
-    def pos_label    = params.linear_probe.positive_annotation_label ?: 1
-    def multiclass   = params.linear_probe.multiclass ? "true" : "false"
+    def multiclass = params.linear_probe.multiclass ? "true" : "false"
     """
     linear_probe_benchmark \
         features_annotation_parquet_path=${annotation_features} \
-        cv=${cv} \
-        'C_values=[${C_values}]' \
-        'penalties=[${penalties}]' \
-        n_seeds=${n_seeds} \
-        n_bootstrap=${n_bootstrap} \
-        random_state=${random_state} \
-        positive_annotation_label=${pos_label} \
+        cv=${params.linear_probe.cv} \
+        'C_values=[${params.linear_probe.C_values.join(",")}]' \
+        'penalties=[${params.linear_probe.penalties.join(",")}]' \
+        n_seeds=${params.linear_probe.n_seeds} \
+        n_bootstrap=${params.linear_probe.n_bootstrap} \
+        random_state=${params.linear_probe.random_state} \
+        positive_annotation_label=${params.linear_probe.positive_annotation_label} \
         multiclass=${multiclass}
     """
 
@@ -162,15 +155,19 @@ process SUMMARIZE_LINEAR_PROBE {
 
     triples_str = "${triples_str}"
 
+    def _safe(v):
+        return None if (isinstance(v, float) and (math.isnan(v) or math.isinf(v))) else v
+
+    def get_json_for_model(model):
+        path = next(token.split(":", 2)[1] for token in triples_str.split() if token.startswith(model + ":"))
+        return json.loads(pathlib.Path(path).read_text())
+
     # ── Parse inputs ──────────────────────────────────────────────────────────
     summary_rows = []
     clf_dfs = {}
     for token in triples_str.split():
         model_name, json_path, csv_path = token.split(":", 2)
         data = json.loads(pathlib.Path(json_path).read_text())
-
-        def _safe(v):
-            return None if (isinstance(v, float) and (math.isnan(v) or math.isinf(v))) else v
 
         row = {"model": model_name}
         for split in ("val", "test"):
@@ -342,9 +339,7 @@ process SUMMARIZE_LINEAR_PROBE {
     for m in all_models:
         if m not in clf_dfs:
             continue
-        rj = json.loads(pathlib.Path(
-            next(token.split(":", 2)[1] for token in triples_str.split() if token.startswith(m + ":"))
-        ).read_text())
+        rj = get_json_for_model(m)
         auc  = rj["test"]["tile_auc_roc"]["mean"]
         astd = rj["test"]["tile_auc_roc"]["std"]
         f1   = rj["test"]["tile_f1"]["mean"]
@@ -358,9 +353,7 @@ process SUMMARIZE_LINEAR_PROBE {
         badge_color = {"float32": "#2563eb", "float16": "#16a34a", "bfloat16": "#d97706"}[prec]
         base_m = m.replace("_float16", "").replace("_bfloat16", "")
         is_base = (m == base_m)
-        base_data = json.loads(pathlib.Path(
-            next(token.split(":", 2)[1] for token in triples_str.split() if token.startswith(base_m + ":"))
-        ).read_text())
+        base_data = get_json_for_model(base_m)
         base_auc = base_data["test"]["tile_auc_roc"]["mean"]
         base_f1  = base_data["test"]["tile_f1"]["mean"]
         delta_auc = "" if is_base else f"({auc - base_auc:+.4f})"

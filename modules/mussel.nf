@@ -12,6 +12,7 @@ include { CONVERT_FEATURES_PRECISION } from './convert_precision'
 
 include { WDS_SHARD } from './wds'
 include { MERGE_SAMPLE_FEATURES } from './sample_merge'
+include { resolvePrecision } from './utils'
 
 
 workflow EXTRACT_FEATURES {
@@ -290,9 +291,7 @@ workflow MUSSEL {
                 ch_lp_h5.combine(ch_benchmark_precisions)
                     .filter { meta, model_type, h5, target_precision ->
                         // Skip if target equals the source precision (no-op conversion)
-                        def source_precision = (params.featurize.model_precision_overrides && params.featurize.model_precision_overrides[model_type])
-                            ? params.featurize.model_precision_overrides[model_type]
-                            : (params.featurize.embedding_precision ?: 'float32')
+                        def source_precision = resolvePrecision(model_type)
                         target_precision != source_precision
                     }
             )

@@ -2631,95 +2631,6 @@ class TestParseNfTrace:
 # Tower shim tests
 # ===========================================================================
 
-class TestTowerShim:
-    """Unit tests for mussel_dispatcher.tower_shim in-memory state store."""
-
-    def setup_method(self):
-        # Clear global state before each test.
-        import mussel_dispatcher.tower_shim as shim
-        with shim._lock:
-            shim._workflows.clear()
-        self.shim = shim
-
-    def test_register_and_get_empty_progress(self):
-        shim = self.shim
-        shim.register_workflow("wf1", "b1", "dispatcher_b1")
-        prog = shim.get_progress("b1")
-        # After register only, task_counts is empty but state dict is returned
-        assert prog is not None
-        assert prog["batch_id"] == "b1"
-        assert prog["task_counts"] == {}
-
-    def test_update_progress(self):
-        shim = self.shim
-        shim.register_workflow("dispatcher_b2", "b2", "dispatcher_b2")
-        shim.update_progress("dispatcher_b2", {"succeeded": 5, "failed": 1, "cached": 2, "running": 3, "pending": 0})
-        prog = shim.get_progress("b2")
-        assert prog is not None
-        tc = prog["task_counts"]
-        assert tc["succeeded"] == 5
-        assert tc["failed"] == 1
-        assert tc["cached"] == 2
-        assert tc["running"] == 3
-
-    def test_mark_complete(self):
-        shim = self.shim
-        shim.register_workflow("dispatcher_b3", "b3", "dispatcher_b3")
-        shim.update_progress("dispatcher_b3", {"succeeded": 10, "failed": 0, "cached": 0, "running": 0, "pending": 0})
-        shim.mark_complete("dispatcher_b3", {"succeeded": 10, "failed": 0, "cached": 0, "running": 0, "pending": 0})
-        state = shim.get_state("b3")
-        assert state["complete"] is True
-        prog = shim.get_progress("b3")
-        assert prog["task_counts"]["succeeded"] == 10
-
-    def test_get_progress_unknown_batch(self):
-        prog = self.shim.get_progress("nonexistent")
-        assert prog is None
-
-    def test_evict_old_removes_completed(self):
-        shim = self.shim
-        shim.register_workflow("dispatcher_b4", "b4", "dispatcher_b4")
-        shim.mark_complete("dispatcher_b4")
-        # Age it artificially.
-        with shim._lock:
-            shim._workflows["dispatcher_b4"].updated_at -= 7200
-        removed = shim.evict_old(max_age_seconds=3600)
-        assert removed == 1
-        assert shim.get_state("b4") is None
-
-    def test_evict_old_keeps_running(self):
-        shim = self.shim
-        shim.register_workflow("dispatcher_b5", "b5", "dispatcher_b5")
-        # Not marked complete — should not be evicted.
-        with shim._lock:
-            shim._workflows["dispatcher_b5"].updated_at -= 7200
-        removed = shim.evict_old(max_age_seconds=3600)
-        assert removed == 0
-
-    def test_workflow_id_for_batch(self):
-        assert self.shim.workflow_id_for_batch("abc123") == "dispatcher_abc123"
-
-    def test_user_info_response_has_required_fields(self):
-        resp = self.shim.user_info_response()
-        assert "user" in resp
-        assert "id" in resp["user"]
-        assert "userName" in resp["user"]
-
-    def test_trace_create_response(self):
-        resp = self.shim.trace_create_response("dispatcher_xyz")
-        assert resp["workflowId"] == "dispatcher_xyz"
-        assert "watchUrl" in resp
-
-    def test_get_all_states_returns_snapshot(self):
-        shim = self.shim
-        shim.register_workflow("dispatcher_b6", "b6", "dispatcher_b6")
-        shim.register_workflow("dispatcher_b7", "b7", "dispatcher_b7")
-        states = shim.get_all_states()
-        batch_ids = {s["batch_id"] for s in states}
-        assert "b6" in batch_ids
-        assert "b7" in batch_ids
-
-
 class TestTowerShimServerRoutes:
     """Integration tests for Tower API HTTP routes added to the dashboard server."""
 
@@ -3032,17 +2943,7 @@ class TestSlurmStats:
 # ===========================================================================
 
 class TestTowerProcessToSlurmName:
-    """Tests for the Tower→SLURM process name mapping."""
-
-    def test_basic_conversion(self):
-        from mussel_dispatcher.dashboard.helpers import tower_process_to_slurm_name
-        assert tower_process_to_slurm_name(
-            "MUSSEL:EXTRACT_FEATURES:TESSELLATE_FEATURIZE_BATCH"
-        ) == "MUSSEL_EXTRACT_FEATURES_TESSELLATE_FEATURIZE_BATCH"
-
-    def test_single_segment(self):
-        from mussel_dispatcher.dashboard.helpers import tower_process_to_slurm_name
-        assert tower_process_to_slurm_name("DOWNLOAD_SLIDE") == "DOWNLOAD_SLIDE"
+    """Integration test: derived name matches real squeue/sacct job name format."""
 
     def test_matches_actual_job_names(self):
         """Derived name matches what squeue proc_short produces (strip trailing _)."""

@@ -498,7 +498,7 @@ class NextflowRunner:
                     log.info("Removed old log (batch %s): %s", row["batch_id"], old_log)
                 # Also remove the companion trace file written by -with-trace.
                 if old_log:
-                    from .dashboard.helpers import _trace_path_for_log
+                    from nextflow_turret import trace_path_for_log as _trace_path_for_log
                     old_trace = _trace_path_for_log(old_log)
                     if os.path.exists(old_trace):
                         os.unlink(old_trace)

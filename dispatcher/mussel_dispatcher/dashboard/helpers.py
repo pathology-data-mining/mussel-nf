@@ -13,11 +13,7 @@ import re
 import subprocess
 import time
 
-from nextflow_turret import (  # noqa: F401 — re-exported for backward compat
-    tower_process_to_slurm_name,
-    trace_path_for_log as _trace_path_for_log,
-    parse_nf_trace,
-    parse_nf_log,
+from nextflow_turret import (
     parse_elapsed_s as _parse_elapsed_s,
     classify_task_failure,
 )

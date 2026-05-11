@@ -29,13 +29,13 @@ from mussel_dispatcher.config import Config, WatcherConfig
 from mussel_dispatcher.dashboard import helpers as _helpers
 import nextflow_turret as _tower_shim
 from nextflow_turret import TowerRouter as _TowerRouter
+from nextflow_turret import TowerHandlerMixin as _TowerHandlerMixin
 from nextflow_turret import PersistentWorkflowRegistry as _PersistentRegistry
 from nextflow_turret import RunStore as _RunStore
+from nextflow_turret import tower_process_to_slurm_name
 
-parse_nf_log              = _helpers.parse_nf_log
-slurm_stats               = _helpers.slurm_stats
-s3_stats                  = _helpers.s3_stats
-tower_process_to_slurm_name = _helpers.tower_process_to_slurm_name
+slurm_stats   = _helpers.slurm_stats
+s3_stats      = _helpers.s3_stats
 _s3_cache     = _helpers._s3_cache
 _S3_CACHE_TTL = _helpers._S3_CACHE_TTL
 
@@ -345,9 +345,10 @@ def _build_handler(cfg: Config):
                 "db_succeeded": db_succeeded, "db_dispatched": db_dispatched,
                 "db_total_expected": db_total_expected}
 
-    class Handler(BaseHTTPRequestHandler):
-        # Expose registry so tests and external callers can inspect Tower state.
+    class Handler(_TowerHandlerMixin, BaseHTTPRequestHandler):
+        # Expose registry and router so tests and external callers can inspect Tower state.
         tower_registry = _registry
+        tower_router   = _router
 
         def log_message(self, fmt, *args):  # suppress default access log spam
             pass
@@ -419,48 +420,6 @@ def _build_handler(cfg: Config):
                 return json.loads(raw)
             except Exception:
                 return {}
-
-        def do_POST(self):
-            """Handle Tower trace API POST requests from Nextflow."""
-            path = self.path.split("?")[0]
-            try:
-                body = self._read_body()
-                result = _router.handle_post(path, body)
-                if result is not None:
-                    status, resp_body = result
-                    self.log_tower("POST", path, status,
-                                   f"run={body.get('runName','')} wid={resp_body.get('workflowId','')}")
-                    self._send_json(resp_body, status=status)
-                else:
-                    self.log_tower("POST", path, 404)
-                    self.send_response(404)
-                    self.end_headers()
-            except Exception as exc:
-                try:
-                    self._send_json({"error": str(exc)}, status=500)
-                except Exception:
-                    pass
-
-        def do_PUT(self):
-            """Handle Tower trace API PUT requests from Nextflow."""
-            path = self.path.split("?")[0]
-            try:
-                body = self._read_body()
-                result = _router.handle_put(path, body)
-                if result is not None:
-                    status, resp_body = result
-                    parts = path.strip("/").split("/")
-                    action = parts[2] if len(parts) == 3 else ""
-                    self.log_tower("PUT", path, status, action)
-                    self._send_json(resp_body, status=status)
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-            except Exception as exc:
-                try:
-                    self._send_json({"error": str(exc)}, status=500)
-                except Exception:
-                    pass
 
     return Handler
 

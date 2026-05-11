@@ -28,6 +28,7 @@ from pathlib import Path
 from mussel_dispatcher.config import Config, WatcherConfig
 from mussel_dispatcher.dashboard import helpers as _helpers
 import nextflow_turret as _tower_shim
+from nextflow_turret import TowerRouter as _TowerRouter
 
 parse_nf_log              = _helpers.parse_nf_log
 slurm_stats               = _helpers.slurm_stats
@@ -64,6 +65,9 @@ def _build_handler(cfg: Config):
         threading.Thread(
             target=s3_stats, args=(tcga_watcher, "wds"), daemon=True, name="s3-prewarm"
         ).start()
+
+    # Single TowerRouter instance shared across all requests in this handler.
+    _router = _TowerRouter()
 
     def _db():
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -327,6 +331,7 @@ def _build_handler(cfg: Config):
         def do_GET(self):
             path = self.path.split("?")[0]
             try:
+                # Dashboard API routes
                 if path in ("/", "/index.html"):
                     self._send_html(_HTML)
                 elif path == "/api/status":
@@ -344,14 +349,17 @@ def _build_handler(cfg: Config):
                     self._send_json(_api_wds())
                 elif path == "/api/slurm":
                     self._send_json(slurm_stats())
-                # Tower shim: GET /user-info (auth check NF makes on startup)
-                elif path == "/user-info":
-                    self.log_tower("GET", path, 200)
-                    self._send_json(_tower_shim.user_info_response())
                 else:
-                    self.log_tower("GET", path, 404)
-                    self.send_response(404)
-                    self.end_headers()
+                    # Delegate to TowerRouter (handles /user-info)
+                    result = _router.handle_get(path)
+                    if result is not None:
+                        status, body = result
+                        self.log_tower("GET", path, status)
+                        self._send_json(body, status=status)
+                    else:
+                        self.log_tower("GET", path, 404)
+                        self.send_response(404)
+                        self.end_headers()
             except Exception as exc:
                 try:
                     self._send_json({"error": str(exc)}, status=500)
@@ -371,15 +379,13 @@ def _build_handler(cfg: Config):
             """Handle Tower trace API POST requests from Nextflow."""
             path = self.path.split("?")[0]
             try:
-                if path == "/trace/create":
-                    body = self._read_body()
-                    run_name = body.get("runName", "")
-                    # run_name is "dispatcher_{batch_id}" — parse batch_id out
-                    batch_id = run_name.removeprefix("dispatcher_") if run_name.startswith("dispatcher_") else run_name
-                    workflow_id = _tower_shim.workflow_id_for_batch(batch_id)
-                    _tower_shim.register_workflow(workflow_id, batch_id, run_name)
-                    self.log_tower("POST", path, 200, f"run={run_name} wid={workflow_id}")
-                    self._send_json(_tower_shim.trace_create_response(workflow_id))
+                body = self._read_body()
+                result = _router.handle_post(path, body)
+                if result is not None:
+                    status, resp_body = result
+                    self.log_tower("POST", path, status,
+                                   f"run={body.get('runName','')} wid={resp_body.get('workflowId','')}")
+                    self._send_json(resp_body, status=status)
                 else:
                     self.log_tower("POST", path, 404)
                     self.send_response(404)
@@ -394,56 +400,29 @@ def _build_handler(cfg: Config):
             """Handle Tower trace API PUT requests from Nextflow."""
             path = self.path.split("?")[0]
             try:
-                # /trace/{workflowId}/begin|progress|heartbeat|complete
-                parts = path.strip("/").split("/")
-                if len(parts) == 3 and parts[0] == "trace":
-                    workflow_id = parts[1]
-                    action = parts[2]
-                    body = self._read_body()
-                    progress = body.get("progress") or {}
-                    if action in ("progress", "heartbeat"):
-                        tasks = body.get("tasks") or []
-                        # Auto-recover: workflow_id IS "dispatcher_{batch_id}" — register directly
-                        if not _tower_shim.is_registered(workflow_id):
-                            run_name = (body.get("workflow") or {}).get("runName", "") or workflow_id
-                            if workflow_id.startswith("dispatcher_"):
-                                batch_id = workflow_id.removeprefix("dispatcher_")
-                            elif run_name.startswith("dispatcher_"):
-                                batch_id = run_name.removeprefix("dispatcher_")
-                            else:
-                                batch_id = workflow_id
-                            _tower_shim.register_workflow(workflow_id, batch_id, run_name or workflow_id)
-                            self.log_tower("PUT", path, 200, f"auto-registered batch={batch_id}")
-                        _tower_shim.update_progress(workflow_id, progress, tasks)
-                        self.log_tower("PUT", path, 200, f"registered={_tower_shim.is_registered(workflow_id)}")
-                        self._send_json({})
-                    elif action == "complete":
-                        self.log_tower("PUT", path, 200, "complete")
-                        _tower_shim.mark_complete(workflow_id, progress)
-                        # Persist final task counts to DB so they survive restarts.
+                body = self._read_body()
+                result = _router.handle_put(path, body)
+                if result is not None:
+                    status, resp_body = result
+                    parts = path.strip("/").split("/")
+                    action = parts[2] if len(parts) == 3 else ""
+                    self.log_tower("PUT", path, status, action)
+                    # Dispatcher-specific hook: persist task counts to DB on complete.
+                    if action == "complete":
+                        workflow_id = parts[1]
                         if workflow_id.startswith("dispatcher_"):
                             batch_id = workflow_id.removeprefix("dispatcher_")
+                            progress = body.get("progress") or {}
                             done   = progress.get("succeeded", 0) + progress.get("cached", 0)
-                            total  = progress.get("succeeded", 0) + progress.get("failed", 0) + \
-                                     progress.get("cached", 0) + progress.get("running", 0) + \
-                                     progress.get("pending", 0)
+                            total  = sum(progress.get(k, 0) for k in
+                                        ("succeeded", "failed", "cached", "running", "pending"))
                             failed = progress.get("failed", 0)
                             try:
                                 cfg.state.record_batch_task_counts(batch_id, done, total, failed)
-                            except Exception as exc:
-                                self.log_tower("PUT", path, 500, f"task count persist error: {exc}")
-                        self._send_json({})
-                    elif action == "begin":
-                        # Auto-register on begin — NF sends runName here
-                        run_name = (body.get("workflow") or {}).get("runName", "")
-                        if run_name.startswith("dispatcher_") and not _tower_shim.is_registered(workflow_id):
-                            batch_id = run_name.removeprefix("dispatcher_")
-                            _tower_shim.register_workflow(workflow_id, batch_id, run_name)
-                        self.log_tower("PUT", path, 200, f"begin run={run_name}")
-                        self._send_json({"watchUrl": None})
-                    else:
-                        self.send_response(404)
-                        self.end_headers()
+                            except Exception as persist_exc:
+                                self.log_tower("PUT", path, 500,
+                                               f"task count persist error: {persist_exc}")
+                    self._send_json(resp_body, status=status)
                 else:
                     self.send_response(404)
                     self.end_headers()

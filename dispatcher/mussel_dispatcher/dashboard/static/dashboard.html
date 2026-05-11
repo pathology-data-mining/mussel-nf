@@ -403,8 +403,13 @@ async function loadBatches() {
       let progressCell = '--';
       if (t && t.total) {
         const fail = (t.task_counts||{}).failed || 0;
-        progressCell = '<span style="font-size:0.75rem">' + t.done + '/' + t.total + '</span>' +
-          '<div class="pbar-wrap" style="min-width:60px"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + t.pct + '%"></div></div>';
+        if (b.status === 'RUNNING') {
+          progressCell = '<span style="font-size:0.75rem">' + t.done + '/' + t.total + '</span>' +
+            '<div class="pbar-wrap" style="min-width:60px"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + t.pct + '%"></div></div>';
+        } else {
+          progressCell = '<span style="font-size:0.75rem;color:#' + (fail ? 'f87171' : '6ee7b7') + '">' +
+            (fail ? '&#x2716; ' + fail + ' failed &middot; ' : '&#x2714; ') + t.done + '/' + t.total + '</span>';
+        }
       } else if (b.slide_count) {
         progressCell = '<span style="color:#64748b">' + b.slide_count + ' slides</span>';
       }

@@ -355,28 +355,41 @@ def main():
     os.makedirs(cfg.state_dir, exist_ok=True)
     os.makedirs(cfg.log_dir, exist_ok=True)
 
-    # PID lockfile — prevent two dispatcher instances from running simultaneously
+    # PID lockfile — prevent two dispatcher instances from running simultaneously.
+    # Use O_CREAT|O_EXCL for the initial write to atomically detect races.
     pid_lock_path = os.path.join(cfg.state_dir, "dispatcher.pid")
-    try:
-        with open(pid_lock_path) as _fh:
-            old_pid = int(_fh.read().strip())
-        # Check if that process is still alive
-        os.kill(old_pid, 0)
-        log.error(
-            "Another dispatcher instance is already running (PID %d, lockfile %s). "
-            "Kill it first or delete the lockfile if it is stale.",
-            old_pid, pid_lock_path,
-        )
-        sys.exit(1)
-    except FileNotFoundError:
-        pass  # No lockfile yet — normal startup
-    except ProcessLookupError:
-        log.warning("Stale PID lockfile found (PID %d no longer running). Overwriting.", old_pid)
-    except (ValueError, OSError):
-        pass  # Unreadable lockfile — overwrite
 
-    with open(pid_lock_path, "w") as _fh:
-        _fh.write(str(os.getpid()))
+    def _write_pid_lock():
+        """Atomically create the lockfile, raising FileExistsError if it already exists."""
+        fd = os.open(pid_lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            os.write(fd, str(os.getpid()).encode())
+        finally:
+            os.close(fd)
+
+    while True:
+        try:
+            _write_pid_lock()
+            break  # acquired
+        except FileExistsError:
+            # Lockfile exists — check if holder is still alive
+            try:
+                with open(pid_lock_path) as _fh:
+                    old_pid = int(_fh.read().strip())
+                os.kill(old_pid, 0)
+                log.error(
+                    "Another dispatcher instance is already running (PID %d, lockfile %s). "
+                    "Kill it first or delete the lockfile if it is stale.",
+                    old_pid, pid_lock_path,
+                )
+                sys.exit(1)
+            except ProcessLookupError:
+                log.warning("Stale PID lockfile (PID %d no longer running). Removing.", old_pid)
+                os.unlink(pid_lock_path)
+                # Loop back to retry atomic create
+            except (FileNotFoundError, ValueError, OSError):
+                # Lockfile vanished or unreadable — retry
+                pass
     log.info("PID lockfile written: %s (PID=%d)", pid_lock_path, os.getpid())
 
     db_path = os.path.join(cfg.state_dir, "dispatcher.db")

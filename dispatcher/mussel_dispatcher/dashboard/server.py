@@ -49,6 +49,50 @@ _HTML = (Path(__file__).parent / "static" / "dashboard.html").read_text(encoding
 # HTTP request handler (stdlib — no FastAPI/uvicorn dependency)
 # ---------------------------------------------------------------------------
 
+def _seed_registry_from_db(registry, db_path: str) -> None:
+    """Seed registry from legacy tasks_done/total/failed columns in dispatcher.db.
+
+    Backfills any batch that has task count data in the old schema columns but
+    is not yet present in the persistent RunStore. Runs once at startup.
+    """
+    import nextflow_turret.state as _nt_state
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        # Check whether the legacy columns still exist
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(batches)")}
+        if not {"tasks_done", "tasks_total", "tasks_failed"}.issubset(cols):
+            return
+        rows = conn.execute(
+            "SELECT batch_id, tasks_done, tasks_total, tasks_failed "
+            "FROM batches WHERE tasks_total IS NOT NULL"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            batch_id = r["batch_id"]
+            wf_id = _nt_state.workflow_id_for_batch(batch_id)
+            if registry.get_by_id(wf_id) is not None:
+                continue  # already in registry
+            run_name = f"dispatcher_{batch_id}"
+            registry.register(wf_id, batch_id, run_name)
+            done   = r["tasks_done"] or 0
+            total  = r["tasks_total"] or 0
+            failed = r["tasks_failed"] or 0
+            progress = {
+                "succeeded": done,
+                "failed":    failed,
+                "cached":    0,
+                "running":   0,
+                "pending":   max(0, total - done - failed),
+            }
+            registry.mark_complete(wf_id, progress)
+    except Exception as exc:
+        import logging
+        logging.getLogger("mussel-dispatcher").warning(
+            "_seed_registry_from_db: %s", exc
+        )
+
+
 def _build_handler(cfg: Config):
     """Return a BaseHTTPRequestHandler subclass closed over cfg."""
 
@@ -71,6 +115,9 @@ def _build_handler(cfg: Config):
     # Persistent registry: Tower state survives dashboard restarts.
     _run_store = _RunStore(os.path.join(cfg.state_dir, "turret_runs.db"))
     _registry  = _PersistentRegistry(_run_store)
+    # Seed registry from legacy tasks_done/total/failed columns for batches
+    # that completed before the PersistentWorkflowRegistry was introduced.
+    _seed_registry_from_db(_registry, db_path)
     # Single TowerRouter instance shared across all requests in this handler.
     _router = _TowerRouter(registry=_registry)
 

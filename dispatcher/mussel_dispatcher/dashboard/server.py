@@ -29,8 +29,8 @@ from mussel_dispatcher.config import Config, WatcherConfig
 from mussel_dispatcher.dashboard import helpers as _helpers
 import nextflow_turret as _tower_shim
 from nextflow_turret import TowerRouter as _TowerRouter
-from nextflow_turret.server.registry import PersistentWorkflowRegistry as _PersistentRegistry
-from nextflow_turret.db.store import RunStore as _RunStore
+from nextflow_turret import PersistentWorkflowRegistry as _PersistentRegistry
+from nextflow_turret import RunStore as _RunStore
 
 parse_nf_log              = _helpers.parse_nf_log
 slurm_stats               = _helpers.slurm_stats

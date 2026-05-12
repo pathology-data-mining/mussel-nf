@@ -72,9 +72,9 @@ watchers:
     # NF caches downloads in params.download.local_dir (default: tcga-slides).
     # gdc_token_file: /path/to/gdc-user-token.txt
 
-    # When set, a append_wds.py post-batch hook is generated automatically
+    # When set, a mussel_dispatcher.wds post-batch hook is generated automatically
     # after each successful Nextflow run.  Supports s3:// and local paths.
-    # The destination is the base path; append_wds.py appends /{model_type}/
+    # The destination is the base path; mussel_dispatcher.wds appends /{model_type}/
     # automatically, so do NOT include the model name here.
     wds_destinations:
       hoptimus1: s3://reef-tcga-v2-0/wds

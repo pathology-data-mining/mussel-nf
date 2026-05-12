@@ -1323,7 +1323,7 @@ class TestAutoHooks:
         })
         assert len(cfg.post_batch_hooks) == 1
         hook = cfg.post_batch_hooks[0]
-        assert "append_wds" in hook["command"]
+        assert "mussel_dispatcher.wds" in hook["command"]
         args = " ".join(hook["args"])
         assert "ctranspath" in args
         assert "s3://bucket/wds/ctranspath" in args
@@ -1357,7 +1357,7 @@ class TestAutoHooks:
             extra_raw={"post_batch_hooks": explicit},
         )
         assert len(cfg.post_batch_hooks) == 2
-        assert "append_wds" in cfg.post_batch_hooks[0]["command"]
+        assert "mussel_dispatcher.wds" in cfg.post_batch_hooks[0]["command"]
         assert cfg.post_batch_hooks[1] == explicit[0]
 
     def test_one_auto_hook_per_watcher(self, tmp_path):

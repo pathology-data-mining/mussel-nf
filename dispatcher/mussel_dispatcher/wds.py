@@ -27,7 +27,7 @@ incremental progress is immediately visible on S3.
 Usage
 -----
     # Route by inventory CSV (e.g. TCGA project_id)
-    python append_wds.py \\
+    python -m mussel_dispatcher.wds \\
         --pt-dir /data/results/features/ctranspath/pt \\
         --h5-dir /data/results/features/ctranspath/h5 \\
         --inventory tcga_inventory.csv \\
@@ -35,7 +35,7 @@ Usage
         --model-type ctranspath
 
     # Route by column in batch CSV (e.g. oncotree_code from IMPACT dispatcher)
-    python append_wds.py \\
+    python -m mussel_dispatcher.wds \\
         --pt-dir /data/results/features/ctranspath/pt \\
         --slide-ids-csv batch.csv \\
         --project-id-column oncotree_code \\

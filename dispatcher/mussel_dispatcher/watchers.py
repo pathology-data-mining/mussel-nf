@@ -207,7 +207,7 @@ class DatabricksWatcher(threading.Thread):
         poll_interval_seconds  Seconds between polls. Defaults to 86400 (1 day) if
                                not set in config, since the IMPACT tables update infrequently.
         wds_destinations  Optional {model: s3_or_local_path} dict. When set, a
-                          append_wds.py hook is auto-generated for each model
+                          mussel_dispatcher.wds hook is auto-generated for each model
                           that routes slides by oncotree_code into per-cancer-type shards.
         wds_staging_dir   Local staging base dir for s3:// WDS destinations.
         wds_s3_max_concurrency  Boto3 multipart threads per S3 upload (default 4).

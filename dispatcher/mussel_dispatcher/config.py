@@ -181,7 +181,7 @@ class Config:
                         patch_enc = w.wds_patch_encoders.get(model)
                         if patch_enc:
                             args.append("--also-delete-pt-dirs={outdir}/features/" + patch_enc)
-                    hooks.append({"command": "python -m mussel_dispatcher.tcga.append_wds", "args": args})
+                    hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
             if w.type != "tcga":
                 continue
@@ -209,7 +209,7 @@ class Config:
                         patch_enc = w.wds_patch_encoders.get(model)
                         if patch_enc:
                             args.append("--also-delete-pt-dirs={outdir}/features/" + patch_enc)
-                    hooks.append({"command": "python -m mussel_dispatcher.tcga.append_wds", "args": args})
+                    hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
             if w.databricks_volume_folder or w.databricks_volume_path:
                 args = ["--inventory=" + w.inventory_csv, "--status=" + w.status_csv]

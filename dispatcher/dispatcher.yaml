@@ -73,7 +73,7 @@ watchers:
   #   download_dir: /path/to/downloads
   #   download_concurrency: 4
   #   # gdc_token_file: /path/to/gdc-user-token.txt
-  #   # Per-model WDS destinations (one append_wds.py hook auto-generated each):
+  #   # Per-model WDS destinations (one mussel_dispatcher.wds hook auto-generated each):
   #   # wds_destinations:
   #   #   ctranspath: s3://your-bucket/wds/ctranspath
   #   #   uni2h: s3://your-bucket/wds/uni2h
@@ -94,7 +94,7 @@ watchers:
   #   source_filter: [ECS2]              # limit to slide_inventory.source values; [] = all
   #   # additional_where: "m.IS_HNE = 1"  # optional extra SQL WHERE clause
   #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
-  #   # Per-model WDS destinations; a append_wds.py hook is auto-generated for each.
+  #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).
   #   # wds_destinations:
   #   #   ctranspath: s3://your-bucket/wds/impact/ctranspath

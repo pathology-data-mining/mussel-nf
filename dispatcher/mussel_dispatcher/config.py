@@ -183,6 +183,21 @@ class Config:
                             args.append("--also-delete-pt-dirs={outdir}/features/" + patch_enc)
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
+            # IMPACT Databricks sync hook
+            if w.type == "databricks" and (w.databricks_volume_folder or w.databricks_volume_path):
+                db_path = os.path.join(self.state_dir, "dispatcher.db")
+                extra_args = [
+                    "--db=" + db_path,
+                    "--wds-manifest={outdir}/wds_manifest.csv",
+                ]
+                if w.wds_destinations:
+                    extra_args.append(
+                        "--model-types=" + ",".join(w.wds_destinations.keys())
+                    )
+                db_hooks.append(
+                    _build_db_sync_hook(w, "mussel_dispatcher.impact.sync_databricks", extra_args)
+                )
+
             if w.type != "tcga":
                 continue
 
@@ -212,21 +227,30 @@ class Config:
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
             if w.databricks_volume_folder or w.databricks_volume_path:
-                args = ["--inventory=" + w.inventory_csv, "--status=" + w.status_csv]
-                if w.databricks_volume_folder:
-                    args.append("--volume-folder=" + w.databricks_volume_folder)
-                else:
-                    args.append("--volume-path=" + w.databricks_volume_path)
-                if w.databricks_table:
-                    args.append("--table=" + w.databricks_table)
-                if w.databricks_job_id:
-                    args.append("--job-id=" + w.databricks_job_id)
-                db_hooks.append({
-                    "command": "python -m mussel_dispatcher.tcga.sync_databricks",
-                    "args": args,
-                })
+                extra_args = ["--inventory=" + w.inventory_csv, "--status=" + w.status_csv]
+                db_hooks.append(
+                    _build_db_sync_hook(w, "mussel_dispatcher.tcga.sync_databricks", extra_args)
+                )
 
         return hooks + db_hooks
+
+
+def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str]) -> dict:
+    """Build a post-batch hook dict for a Databricks sync script.
+
+    Appends the common volume-folder/path, table, and job-id args from
+    *w* to *extra_args* and returns a hook dict.
+    """
+    args = list(extra_args)
+    if w.databricks_volume_folder:
+        args.append("--volume-folder=" + w.databricks_volume_folder)
+    else:
+        args.append("--volume-path=" + w.databricks_volume_path)
+    if w.databricks_table:
+        args.append("--table=" + w.databricks_table)
+    if w.databricks_job_id:
+        args.append("--job-id=" + w.databricks_job_id)
+    return {"command": f"python -m {module}", "args": args}
 
 
 def _load_secrets_env(path: str, watcher: WatcherConfig) -> None:

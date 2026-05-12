@@ -2951,3 +2951,235 @@ class TestTowerProcessToSlurmName:
         derived = tower_process_to_slurm_name(tower_name)
         # derived strips trailing _, squeue proc_short has trailing _
         assert proc_short.rstrip("_") == derived
+
+
+# ===========================================================================
+# Shared Databricks utilities (databricks_sync.py)
+# ===========================================================================
+
+class TestResolveCredentials:
+    def test_resolve_credentials_from_env(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_HOST", "https://host.example.com")
+        monkeypatch.setenv("DATABRICKS_TOKEN", "dapi_test_token")
+        from mussel_dispatcher.databricks_sync import resolve_credentials
+        host, token = resolve_credentials("", "")
+        assert host == "https://host.example.com"
+        assert token == "dapi_test_token"
+
+    def test_resolve_credentials_explicit_args_take_priority(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_HOST", "https://env-host.example.com")
+        monkeypatch.setenv("DATABRICKS_TOKEN", "env_token")
+        from mussel_dispatcher.databricks_sync import resolve_credentials
+        host, token = resolve_credentials("https://explicit-host.example.com", "explicit_token")
+        assert host == "https://explicit-host.example.com"
+        assert token == "explicit_token"
+
+
+class TestUploadAndTrigger:
+    def test_upload_and_trigger_dry(self, tmp_path, monkeypatch):
+        """upload_and_trigger calls PUT to the correct URL and optionally POST for job trigger."""
+        import argparse
+        from unittest.mock import MagicMock, patch
+        import pandas as pd
+        from mussel_dispatcher.databricks_sync import upload_and_trigger
+
+        df = pd.DataFrame({"slide_id": ["s1", "s2"], "status": ["SUCCEEDED", "PENDING"]})
+
+        args = argparse.Namespace(
+            databricks_host="https://test.databricks.com",
+            token="test_token",
+            volume_folder="/Volumes/test/schema/folder",
+            volume_path=None,
+            table=None,
+            job_id=None,
+            output_parquet=None,
+        )
+
+        put_resp = MagicMock()
+        put_resp.raise_for_status = MagicMock()
+
+        with patch("mussel_dispatcher.databricks_sync.requests.put", return_value=put_resp) as mock_put:
+            upload_and_trigger(df, args, filename_prefix="test_inventory_")
+
+        assert mock_put.called
+        call_url = mock_put.call_args[0][0]
+        assert call_url.startswith("https://test.databricks.com/api/2.0/fs/files/Volumes/test/schema/folder/test_inventory_")
+        assert call_url.endswith(".parquet")
+
+    def test_upload_and_trigger_with_job(self, monkeypatch):
+        """When --job-id is set, trigger_job is also called."""
+        import argparse
+        from unittest.mock import MagicMock, patch
+        import pandas as pd
+        from mussel_dispatcher.databricks_sync import upload_and_trigger
+
+        df = pd.DataFrame({"slide_id": ["s1"], "status": ["SUCCEEDED"]})
+
+        args = argparse.Namespace(
+            databricks_host="https://test.databricks.com",
+            token="test_token",
+            volume_folder="/Volumes/test/schema/folder",
+            volume_path=None,
+            table="catalog.schema.table",
+            job_id="99",
+            output_parquet=None,
+        )
+
+        put_resp = MagicMock()
+        put_resp.raise_for_status = MagicMock()
+
+        post_resp = MagicMock()
+        post_resp.raise_for_status = MagicMock()
+        post_resp.json.return_value = {"run_id": 42}
+
+        with patch("mussel_dispatcher.databricks_sync.requests.put", return_value=put_resp), \
+             patch("mussel_dispatcher.databricks_sync.requests.post", return_value=post_resp) as mock_post:
+            upload_and_trigger(df, args, filename_prefix="test_inventory_")
+
+        assert mock_post.called
+        body = mock_post.call_args[1]["json"]
+        assert body["job_id"] == 99
+        assert body["notebook_params"]["target_table"] == "catalog.schema.table"
+
+
+# ===========================================================================
+# IMPACT build_export
+# ===========================================================================
+
+class TestImpactBuildExport:
+    def test_impact_build_export_basic(self, tmp_path):
+        """build_export fans out to one row per (slide_id, model) with correct status."""
+        import csv
+        from mussel_dispatcher.state import StateStore
+        from mussel_dispatcher.impact.sync_databricks import build_export
+
+        db_path = str(tmp_path / "test.db")
+        store = StateStore(db_path)
+
+        store.add_slide("s3://bucket/slide1.svs", "slide1", oncotree_code="IDC")
+        store.add_slide("s3://bucket/slide2.svs", "slide2", oncotree_code="LUAD")
+        store.add_slide("s3://bucket/slide3.svs", "slide3", oncotree_code="PRAD")
+
+        # Mark slide1 succeeded, slide3 failed
+        store.add_batch("batch1", str(tmp_path / "batch.csv"), str(tmp_path), 2, str(tmp_path / "nf.log"))
+        store._conn().execute(
+            "UPDATE slides SET status='DISPATCHED', batch_id='batch1' WHERE slide_id IN ('slide1', 'slide3')"
+        )
+        store._conn().commit()
+        store.mark_slides_complete("batch1", succeeded=False, per_slide_status={
+            "s3://bucket/slide1.svs": True,
+            "s3://bucket/slide3.svs": False,
+        })
+        # slide3 failure reason
+        store._conn().execute(
+            "UPDATE slides SET error_msg='OOM' WHERE slide_id='slide3'"
+        )
+        store._conn().commit()
+
+        # wds_manifest: slide1 has a wds entry, slide2 does not
+        manifest_path = str(tmp_path / "wds_manifest.csv")
+        with open(manifest_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
+            writer.writeheader()
+            writer.writerow({"slide_id": "slide1", "model": "titan_slide",
+                             "wds_path": "s3://bucket/wds/titan_slide/IDC/000000.tar"})
+
+        df = build_export(db_path, manifest_path, ["titan_slide"])
+
+        assert set(df.columns) >= {"slide_id", "model", "status", "wds_path", "oncotree_code", "failure_reason"}
+        assert len(df) == 3
+
+        s1 = df[df["slide_id"] == "slide1"].iloc[0]
+        assert s1["status"] == "SUCCEEDED"
+        assert s1["wds_path"] == "s3://bucket/wds/titan_slide/IDC/000000.tar"
+        assert s1["oncotree_code"] == "IDC"
+
+        s2 = df[df["slide_id"] == "slide2"].iloc[0]
+        assert s2["status"] == "PENDING"
+        assert s2["wds_path"] is None
+
+        s3 = df[df["slide_id"] == "slide3"].iloc[0]
+        assert s3["status"] == "FAILED"
+        assert s3["failure_reason"] == "OOM"
+
+    def test_impact_build_export_missing_manifest(self, tmp_path):
+        """build_export works gracefully when wds_manifest.csv doesn't exist."""
+        from mussel_dispatcher.state import StateStore
+        from mussel_dispatcher.impact.sync_databricks import build_export
+
+        db_path = str(tmp_path / "test.db")
+        store = StateStore(db_path)
+        store.add_slide("s3://bucket/slide1.svs", "slide1", oncotree_code="IDC")
+
+        df = build_export(db_path, str(tmp_path / "nonexistent.csv"), ["titan_slide"])
+        assert len(df) == 1
+        assert df.iloc[0]["wds_path"] is None
+
+
+# ===========================================================================
+# StateStore oncotree_code
+# ===========================================================================
+
+class TestStateOncotree:
+    def test_state_oncotree_stored(self, tmp_path):
+        """add_slide with oncotree_code stores and retrieves correctly."""
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("s3://bucket/slide1.svs", "slide1", oncotree_code="IDC")
+        slides = store.get_all_slides()
+        assert len(slides) == 1
+        assert slides[0]["oncotree_code"] == "IDC"
+
+    def test_state_oncotree_default_empty(self, tmp_path):
+        """add_slide without oncotree_code stores empty string."""
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("s3://bucket/slide2.svs", "slide2")
+        slides = store.get_all_slides()
+        assert slides[0]["oncotree_code"] == ""
+
+    def test_state_oncotree_migration(self, tmp_path):
+        """StateStore migrates an existing DB that lacks the oncotree_code column."""
+        import sqlite3
+        db_path = str(tmp_path / "old.db")
+        # Create old-schema DB without oncotree_code column
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE slides (
+                slide_path    TEXT PRIMARY KEY,
+                slide_id      TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'PENDING',
+                batch_id      TEXT,
+                download_path TEXT,
+                fail_count    INTEGER NOT NULL DEFAULT 0,
+                first_seen_at TEXT,
+                dispatched_at TEXT,
+                completed_at  TEXT,
+                error_msg     TEXT,
+                file_id       TEXT,
+                file_name     TEXT,
+                needs_download INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute(
+            "INSERT INTO slides (slide_path, slide_id, status) VALUES ('s3://b/s.svs', 'legacy_slide', 'SUCCEEDED')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Opening StateStore should migrate without error
+        store = StateStore(db_path)
+        slides = store.get_all_slides()
+        assert any(s["slide_id"] == "legacy_slide" for s in slides)
+        # The migrated column should exist and default to ''
+        legacy = next(s for s in slides if s["slide_id"] == "legacy_slide")
+        assert legacy["oncotree_code"] == ""
+
+    def test_get_all_slides_returns_expected_columns(self, tmp_path):
+        """get_all_slides returns rows with all expected columns."""
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("s3://bucket/s.svs", "s1", oncotree_code="LUAD")
+        rows = store.get_all_slides()
+        assert rows
+        row = rows[0]
+        for col in ("slide_path", "slide_id", "oncotree_code", "status",
+                    "error_msg", "first_seen_at", "completed_at"):
+            assert col in row, f"Missing column: {col}"

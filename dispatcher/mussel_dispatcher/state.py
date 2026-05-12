@@ -32,6 +32,7 @@ class StateStore:
             CREATE TABLE IF NOT EXISTS slides (
                 slide_path    TEXT PRIMARY KEY,
                 slide_id      TEXT NOT NULL,
+                oncotree_code TEXT NOT NULL DEFAULT '',
                 status        TEXT NOT NULL DEFAULT 'PENDING',
                 batch_id      TEXT,
                 download_path TEXT,
@@ -59,6 +60,12 @@ class StateStore:
             );
             CREATE TABLE IF NOT EXISTS _schema_migrations (name TEXT PRIMARY KEY);
         """)
+        # Migrate existing DBs that predate the oncotree_code column.
+        has_col = conn.execute(
+            "SELECT name FROM pragma_table_info('slides') WHERE name='oncotree_code'"
+        ).fetchone()
+        if not has_col:
+            conn.execute("ALTER TABLE slides ADD COLUMN oncotree_code TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
     # -----------------------------------------------------------------------
@@ -66,15 +73,16 @@ class StateStore:
     # -----------------------------------------------------------------------
 
     def add_slide(self, slide_path: str, slide_id: str, *,
+                  oncotree_code: str = "",
                   file_id: str = "", file_name: str = "",
                   needs_download: bool = False) -> bool:
         """Insert a new slide. Returns True if inserted, False if already known."""
         try:
             self._conn().execute(
-                """INSERT INTO slides (slide_path, slide_id, status, first_seen_at,
+                """INSERT INTO slides (slide_path, slide_id, oncotree_code, status, first_seen_at,
                    file_id, file_name, needs_download)
-                   VALUES (?, ?, 'PENDING', ?, ?, ?, ?)""",
-                (slide_path, slide_id,
+                   VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?)""",
+                (slide_path, slide_id, oncotree_code,
                  datetime.now(timezone.utc).isoformat(),
                  file_id, file_name, int(needs_download)),
             )
@@ -120,6 +128,19 @@ class StateStore:
                         s["file_id"] = rest[:slash]
                         s["file_name"] = rest[slash + 1:]
         return slides
+
+    def get_all_slides(self) -> list[dict]:
+        """Return all slide rows with a standard set of columns.
+
+        Columns: slide_path, slide_id, oncotree_code, status, error_msg,
+                 first_seen_at, completed_at
+        """
+        rows = self._conn().execute(
+            """SELECT slide_path, slide_id, oncotree_code, status, error_msg,
+                      first_seen_at, completed_at
+               FROM slides"""
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def mark_dispatched(self, slide_paths: list, batch_id: str) -> int:
         """Atomically claim PENDING slides for a batch.

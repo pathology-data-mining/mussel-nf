@@ -327,7 +327,7 @@ WHERE i.path IS NOT NULL
                         continue
 
                     log.info("DatabricksWatcher: new slide %s → %s", slide_id, slide_path)
-                    self.state.add_slide(slide_path, slide_id)
+                    self.state.add_slide(slide_path, slide_id, oncotree_code=oncotree_code)
                     self.pending.append({
                         "slide_id": slide_id,
                         "slide_path": slide_path,

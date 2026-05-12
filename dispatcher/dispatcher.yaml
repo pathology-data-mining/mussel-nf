@@ -100,3 +100,7 @@ watchers:
   #   #   ctranspath: s3://your-bucket/wds/impact/ctranspath
   #   #   uni2h: s3://your-bucket/wds/impact/uni2h
   #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
+  #   # Sync results back to Databricks after each batch:
+  #   # databricks_volume_folder: /Volumes/cdsi_prod/pathology_data_mining/impact_dispatcher
+  #   # databricks_table: cdsi_prod.pathology_data_mining.impact_slide_embeddings_v2
+  #   # databricks_job_id: "12345"

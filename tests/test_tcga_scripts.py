@@ -660,7 +660,7 @@ class TestAppendWds:
         return tmp_path, model, pt_dir, h5_dir
 
     def test_shards_created_per_cancer_type(self, tmp_path, results_dir):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -682,7 +682,7 @@ class TestAppendWds:
         assert luad_shard.exists(), "LUAD shard not created"
 
     def test_index_has_correct_entries(self, tmp_path, results_dir):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -704,7 +704,7 @@ class TestAppendWds:
         assert index["TCGA-LU-A5YX-01Z-00-DX1"]["project_id"] == "TCGA-LUAD"
 
     def test_index_json_persisted(self, tmp_path, results_dir):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -725,7 +725,7 @@ class TestAppendWds:
         assert len(saved) == 3
 
     def test_shard_contains_features_npy(self, tmp_path, results_dir):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -748,7 +748,7 @@ class TestAppendWds:
         assert len(feature_entries) == 2  # 2 BRCA slides
 
     def test_h5_coords_embedded_in_shard(self, tmp_path, results_dir):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -773,7 +773,7 @@ class TestAppendWds:
 
     def test_idempotent_second_run(self, tmp_path, results_dir):
         """Running append_wds twice must not duplicate entries."""
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         res_dir, model, pt_dir, h5_dir = results_dir
         wds_dest = str(tmp_path / "wds")
@@ -801,7 +801,7 @@ class TestDeleteLocal:
     """append_wds() with delete_local=True removes source files after WDS flush."""
 
     def test_delete_local_removes_pt_and_h5(self, tmp_path):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -828,7 +828,7 @@ class TestDeleteLocal:
         assert not h5_file.exists(), ".patch.h5 should be deleted after WDS flush"
 
     def test_delete_local_false_keeps_files(self, tmp_path):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -855,7 +855,7 @@ class TestDeleteLocal:
         assert h5_file.exists(), ".patch.h5 should be kept when delete_local=False"
 
     def test_delete_local_dry_run_keeps_files(self, tmp_path):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -885,7 +885,7 @@ class TestWdsManifest:
 
     def test_manifest_csv_written_with_full_path(self, tmp_path):
         import pandas as pd
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
         wds_dest = str(tmp_path / "wds")
@@ -915,7 +915,7 @@ class TestWdsManifest:
 
     def test_manifest_csv_appends_across_runs(self, tmp_path):
         import pandas as pd
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
         wds_dest = str(tmp_path / "wds")
@@ -938,7 +938,7 @@ class TestWdsManifest:
         assert set(df["slide_id"]) == {"TCGA-BR-A44T-01Z-00-DX1", "TCGA-BR-A44U-01Z-00-DX1"}
 
     def test_manifest_csv_not_written_on_dry_run(self, tmp_path):
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
         pt_dir = tmp_path / "pt"
@@ -966,7 +966,7 @@ class TestEndToEnd:
     def test_full_pipeline(self, tmp_path):
         from mussel_dispatcher.tcga.update_status import build_status
         from mussel_dispatcher.tcga.prepare_samples import prepare_samples
-        from mussel_dispatcher.tcga.append_wds import append_wds
+        from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
         inventory = make_inventory()

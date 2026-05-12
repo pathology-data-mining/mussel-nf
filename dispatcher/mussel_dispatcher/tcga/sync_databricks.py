@@ -11,8 +11,10 @@ always pick up the latest file:
 
     <volume_folder>/tcga_inventory_<YYYYMMDDTHHMMSS>.parquet
 
-Credentials are read from the DATABRICKS_HOST and DATABRICKS_TOKEN environment
-variables, or passed as CLI flags.
+Credentials are resolved in order:
+1. CLI flags ``--databricks-host`` / ``--token``
+2. Environment variables ``DATABRICKS_HOST`` / ``DATABRICKS_TOKEN``
+3. ``~/.databrickscfg`` ``[DEFAULT]`` section (``host`` and ``token`` keys)
 
 Usage
 -----
@@ -138,7 +140,7 @@ def _load_databrickscfg(host: str, token: str) -> tuple[str, str]:
     if not token:
         token = cfg.get(section, "token", fallback="")
     if host or token:
-        log.debug("Loaded Databricks credentials from %s", cfg_path)
+        log.info("Loaded Databricks credentials from %s", cfg_path)
     return host, token
 
 

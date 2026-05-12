@@ -90,7 +90,7 @@ watchers:
     # After each successful batch, status + inventory are joined into a timestamped
     # Parquet file uploaded to the volume folder, then the Databricks job is triggered
     # to MERGE it into the Delta table.
-    # Credentials: set DATABRICKS_HOST and DATABRICKS_TOKEN env vars before starting.
+    # Credentials: resolved in order: DATABRICKS_HOST/TOKEN env vars → ~/.databrickscfg [DEFAULT].
     # See databricks/README.md for setup instructions (create volume, import notebook, create job).
     databricks_volume_folder: /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
     databricks_table: cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2

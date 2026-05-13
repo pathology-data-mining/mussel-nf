@@ -66,6 +66,15 @@ class StateStore:
         ).fetchone()
         if not has_col:
             conn.execute("ALTER TABLE slides ADD COLUMN oncotree_code TEXT NOT NULL DEFAULT ''")
+        # Migrate existing DBs where batches column was named nf_session_id instead of session_id.
+        has_session_id = conn.execute(
+            "SELECT name FROM pragma_table_info('batches') WHERE name='session_id'"
+        ).fetchone()
+        has_nf_session_id = conn.execute(
+            "SELECT name FROM pragma_table_info('batches') WHERE name='nf_session_id'"
+        ).fetchone()
+        if has_nf_session_id and not has_session_id:
+            conn.execute("ALTER TABLE batches RENAME COLUMN nf_session_id TO session_id")
         conn.commit()
 
     # -----------------------------------------------------------------------

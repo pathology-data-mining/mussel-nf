@@ -5,7 +5,8 @@ Called directly by Nextflow processes. For incremental, routed, S3-aware
 sharding (dispatcher post-batch hooks), see mussel_dispatcher/wds.py.
 
 Each shard is a standard tar archive where every sample consists of:
-  - ``{slide_id}.features.npy``  — float32 [N_tiles, D] feature array
+  - ``{slide_id}.features.npy``  — feature array preserving source dtype:
+                                    float32, float16, or uint16 (bfloat16 raw bits)
   - ``{slide_id}.coords.npy``    — int64  [N_tiles, 2] tile coords (optional)
 
 The format matches the paladin training pipeline and is directly readable by
@@ -99,13 +100,18 @@ def create_shards(
             for i in range(start, end):
                 slide_id = slide_ids[i]
 
-                # features.npy — convert .pt tensor to float32 numpy.
-                # Use .to(float32) before .numpy() so bfloat16/float16 tensors
-                # are handled safely (numpy has no native bfloat16 type).
+                # features.npy — preserve native tensor dtype for storage efficiency.
+                # float32/float16: stored as-is (numpy supports both).
+                # bfloat16: numpy has no native bfloat16; store raw bits as uint16.
+                # Paladin's WDS loader decodes uint16 back to bfloat16 automatically.
                 tensor = torch.load(pt_files[i], weights_only=True)
                 if tensor.ndim == 1:
                     tensor = tensor.unsqueeze(0)
-                _add_npy(tar, f"{slide_id}.features.npy", _npy_bytes(tensor.to(torch.float32).numpy()))
+                if tensor.dtype == torch.bfloat16:
+                    feat_arr = tensor.view(torch.int16).numpy().view(np.uint16)
+                else:
+                    feat_arr = tensor.numpy()
+                _add_npy(tar, f"{slide_id}.features.npy", _npy_bytes(feat_arr))
 
                 # coords.npy — extract tile coordinates from .h5 (optional)
                 if h5_files is not None:

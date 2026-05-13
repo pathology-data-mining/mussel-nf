@@ -105,6 +105,11 @@ process TESSELLATE_FEATURIZE_BATCH {
         ? params.featurize.model_batch_sizes[model_type.toUpperCase()]
         : (params.featurize.batch_size ?: 64)
 
+    // Resolve per-model embedding precision override, falling back to global default (float32)
+    embedding_precision = (params.featurize.model_embedding_precision && params.featurize.model_embedding_precision[model_type])
+        ? params.featurize.model_embedding_precision[model_type]
+        : (params.featurize.embedding_precision ?: "float32")
+
     // Use seg_config group if specified, otherwise use individual parameters
     seg_config_str = params.tiling.seg_config_group ? "seg_config=${params.tiling.seg_config_group}" : ""
 
@@ -139,6 +144,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         model_type=${model_type.toUpperCase()} ${mpath_str} \
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
         batch_size=${batch_size} \
+        embedding_precision=${embedding_precision} \
         slide_batch_size=${slide_batch_size} \
         ${slide_max_patches_str} \
         ${slide_model_str} \

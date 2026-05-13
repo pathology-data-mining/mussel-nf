@@ -6,9 +6,9 @@ process FEATURIZE_BATCH {
     secret 'HF_TOKEN'
 
     // Publish slide encoder features (always created)
-    publishDir path: "${params.outdir}/features/${model_type_name}", mode: "${params.publish_mode}", pattern: "*.features.{pt,h5}"
+    publishDir path: { def prefix = post_filter ? '' : 'prefilter_'; "${params.outdir}/features/${prefix}${model_type_input}" }, mode: "${params.publish_mode}", pattern: "*.features.{pt,h5}"
     // Publish patch encoder features (only created when using slide-level model)
-    publishDir path: "${params.outdir}/features/${patch_encoder_name}", mode: "${params.publish_mode}", pattern: "*.patch_features.{pt,h5}"
+    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; def prefix = post_filter ? '' : 'prefilter_'; "${params.outdir}/features/${prefix}${mt}" }, mode: "${params.publish_mode}", pattern: "*.patch_features.{pt,h5}"
 
     input:
     tuple val(slide_batch), path(slides), path(patch_h5s)

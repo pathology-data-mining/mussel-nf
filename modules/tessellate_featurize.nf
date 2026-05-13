@@ -6,11 +6,11 @@ process TESSELLATE_FEATURIZE_BATCH {
     secret 'HF_TOKEN'
 
     // Publish slide encoder features (always created)
-    publishDir path: "${params.outdir}/features/${model_type_name}", mode: "${params.publish_mode}", pattern: "pt/*.features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
-    publishDir path: "${params.outdir}/features/${model_type_name}", mode: "${params.publish_mode}", pattern: "h5/*.features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
+    publishDir path: { "${params.outdir}/features/${model_type_input}" }, mode: "${params.publish_mode}", pattern: "pt/*.features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
+    publishDir path: { "${params.outdir}/features/${model_type_input}" }, mode: "${params.publish_mode}", pattern: "h5/*.features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
     // Publish patch encoder features (only created when using slide-level model)
-    publishDir path: "${params.outdir}/features/${patch_encoder_name}", mode: "${params.publish_mode}", pattern: "pt/*.patch_features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
-    publishDir path: "${params.outdir}/features/${patch_encoder_name}", mode: "${params.publish_mode}", pattern: "h5/*.patch_features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
+    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; "${params.outdir}/features/${mt}" }, mode: "${params.publish_mode}", pattern: "pt/*.patch_features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
+    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; "${params.outdir}/features/${mt}" }, mode: "${params.publish_mode}", pattern: "h5/*.patch_features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
     publishDir path: "${params.outdir}/tiles", mode: "${params.publish_mode}", pattern: "tile_h5/*.h5", saveAs: { fn -> fn.replaceFirst("tile_h5/", "") }
 
     input:
@@ -21,11 +21,11 @@ process TESSELLATE_FEATURIZE_BATCH {
                           // When using slide encoders, the required patch encoder is automatically inferred from params.featurize.slide_to_patch_mapping
 
     output:
-    tuple val(batch_metadata), val(model_type_input), path("pt/*.features.pt"), emit: pt
+    tuple val(batch_metadata), val(model_type_input), path("pt/*.features.pt"), optional: true, emit: pt
     tuple val(batch_metadata), val(model_type_input), path("h5/*.features.h5"), optional: true, emit: h5
     tuple val(batch_metadata), val(model_type), path("pt/*.patch_features.pt"), optional: true, emit: patch_pt
     tuple val(batch_metadata), val(model_type), path("h5/*.patch_features.h5"), optional: true, emit: patch_h5
-    tuple val(batch_metadata), path("tile_h5/*.patch.h5"), emit: tile_h5
+    tuple val(batch_metadata), path("tile_h5/*.patch.h5"), optional: true, emit: tile_h5
 
     script:
     // Determine if this is a slide-level model and infer the patch encoder
@@ -93,6 +93,13 @@ process TESSELLATE_FEATURIZE_BATCH {
     // This is the batch size passed to the slide encoder model.
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
+    // SLIDE PATCH LIMIT: Subsample patches before slide-level aggregation if a slide
+    // exceeds this count. Prevents CUDA OOM for TITAN_SLIDE (O(N²) alibi attention).
+    // Default null = no limit. Recommended: 4096 for V100 GPUs, 8192 for A100.
+    slide_max_patches_str = (params.featurize.slide_max_patches != null)
+        ? "max_slide_patches=${params.featurize.slide_max_patches}"
+        : ""
+
     // Resolve per-model batch size override, falling back to global default
     batch_size = (params.featurize.model_batch_sizes && params.featurize.model_batch_sizes[model_type.toUpperCase()])
         ? params.featurize.model_batch_sizes[model_type.toUpperCase()]
@@ -133,6 +140,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
         batch_size=${batch_size} \
         slide_batch_size=${slide_batch_size} \
+        ${slide_max_patches_str} \
         ${slide_model_str} \
         ${aggregation_str} \
         ${prefilter_model_str} \
@@ -144,6 +152,29 @@ process TESSELLATE_FEATURIZE_BATCH {
         ${output_thumbnail_suffix_str} \
         ${output_png_dir_suffix_str} \
         ${save_h5_param}
+
+    # When a slide encoder is used, the Mussel CLI writes outputs into model-named
+    # subdirs (e.g. TITAN_SLIDE/pt/, CONCH1_5/pt/) instead of flat pt/.
+    # Normalize to the flat structure that NF publishDir patterns expect.
+    if [[ -d "${model_type_name.toUpperCase()}" ]]; then
+        mkdir -p pt h5 tile_h5
+        # Slide-level features → flat pt/ and h5/
+        [[ -d "${model_type_name.toUpperCase()}/pt" ]] && mv ${model_type_name.toUpperCase()}/pt/*.features.pt pt/ 2>/dev/null || true
+        [[ -d "${model_type_name.toUpperCase()}/h5" ]] && mv ${model_type_name.toUpperCase()}/h5/*.features.h5 h5/ 2>/dev/null || true
+        # Patch encoder features → rename to *.patch_features.* so NF can tell them apart
+        if [[ -d "${patch_encoder_name.toUpperCase()}/pt" ]]; then
+            for f in ${patch_encoder_name.toUpperCase()}/pt/*.features.pt; do
+                [[ -f "\$f" ]] && mv "\$f" pt/\$(basename "\${f%.features.pt}").patch_features.pt
+            done
+        fi
+        if [[ -d "${patch_encoder_name.toUpperCase()}/h5" ]]; then
+            for f in ${patch_encoder_name.toUpperCase()}/h5/*.features.h5; do
+                [[ -f "\$f" ]] && mv "\$f" h5/\$(basename "\${f%.features.h5}").patch_features.h5
+            done
+        fi
+        # Tile coordinates live under patch encoder subdir
+        [[ -d "${patch_encoder_name.toUpperCase()}/tile_h5" ]] && mv ${patch_encoder_name.toUpperCase()}/tile_h5/* tile_h5/ 2>/dev/null || true
+    fi
     """
 
     stub:
@@ -152,6 +183,7 @@ process TESSELLATE_FEATURIZE_BATCH {
     model_type = (params.featurize.slide_to_patch_mapping && params.featurize.slide_to_patch_mapping[model_type_input]) ? params.featurize.slide_to_patch_mapping[model_type_input] : model_type_input
     model_type_name = model_type_input
     patch_encoder_name = model_type
+    is_slide_model = model_type_input != model_type
     """
     #!/usr/bin/env python3
     import os, torch, h5py, numpy as np
@@ -159,11 +191,18 @@ process TESSELLATE_FEATURIZE_BATCH {
     os.makedirs("h5", exist_ok=True)
     os.makedirs("tile_h5", exist_ok=True)
     n_feat = 8
+    is_slide_model = ${is_slide_model ? "True" : "False"}
     for sid in "${stub_slide_ids}".split(","):
         torch.save(torch.zeros(1, n_feat), f"pt/{sid}.features.pt")
         with h5py.File(f"h5/{sid}.features.h5", "w") as f:
             f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
+        if is_slide_model:
+            torch.save(torch.zeros(1, n_feat), f"pt/{sid}.patch_features.pt")
+            with h5py.File(f"h5/{sid}.patch_features.h5", "w") as f:
+                f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
         with h5py.File(f"tile_h5/{sid}.patch.h5", "w") as f:
-            f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+            ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+            ds.attrs["native_mpp"] = 0.5
+            ds.attrs["mpp_is_fallback"] = False
     """
 }

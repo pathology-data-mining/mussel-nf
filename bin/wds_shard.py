@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Create paladin-compatible WebDataset tar shards from feature files.
 
+Called directly by Nextflow processes. For incremental, routed, S3-aware
+sharding (dispatcher post-batch hooks), see mussel_dispatcher/wds.py.
+
 Each shard is a standard tar archive where every sample consists of:
   - ``{slide_id}.features.npy``  — float32 [N_tiles, D] feature array
   - ``{slide_id}.coords.npy``    — int64  [N_tiles, 2] tile coords (optional)

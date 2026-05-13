@@ -1,0 +1,101 @@
+# tcga_dispatcher.yaml — streaming TCGA feature extraction via mussel-dispatcher
+#
+# Usage:
+#   python dispatcher/mussel-dispatcher.py dispatcher/tcga_dispatcher.yaml
+#
+# Directory defaults (relative to this file's location):
+#   repo_dir      → ../          (mussel-nf root)
+#   work_base_dir → work/
+#   dispatch_dir  → batches/
+#   state_dir     → state/
+#   log_dir       → logs/
+work_base_dir: /gpfs/cdsi_ess/limr/nf/tcga-dispatch/work
+
+nextflow_profiles: cluster,slurm,conda
+outdir: tcga-results
+#nextflow_config: tcga_nextflow.config
+nextflow_params_file: ../tcga_params.yaml
+nextflow_version: "26.04.0"
+tower_endpoint: "http://localhost:8050"  # local Tower shim — NF pushes real-time progress here
+
+# Run up to 2 Nextflow jobs simultaneously
+max_concurrent_runs: 3
+
+# Dispatch when 50 slides have accumulated, or after 10 minutes
+batch_size: 500
+min_batch_size: 1
+max_wait_seconds: 600
+
+retry_failed: true
+max_slide_retries: 10  # permanently skip slides that fail this many times (was 3, raised to tolerate infra kills)
+cleanup_work_dir: true        # delete NF work/ dir after each batch (success or failure)
+cleanup_downloads: false      # NF storeDir caches downloads — keep them for future runs
+cleanup_batch_csv: false      # set true to delete per-batch samples CSV after success
+cleanup_logs_after_days: 30   # delete NF log files for batches older than 30 days (0 = keep forever)
+cleanup_results: true        # set true to delete local .pt / .patch.h5 after WDS push to S3
+
+watchers:
+  - type: tcga
+    # CSV files managed by the TCGA scripts
+    inventory_csv: tcga_inventory.csv
+    status_csv: tcga_status.csv
+
+    # Feature models to extract — auto-detected from nextflow.config (model_types).
+    # Override here only if you need a different set from what nextflow.config specifies.
+    # models: [hoptimus1, titan_slide]
+
+    # Slide source — at least one of local_slides_dir or s3_base must be set.
+    # Slides are resolved: local disk → S3 → needs_download (in that order).
+    #local_slides_dir: /path/to/slides
+    s3_base: s3://pathology/TCGA
+    s3_endpoint: http://pmindecs.mskcc.org:9020
+    # s3_access_key: ...   # or set ECS_ACCESS_KEY env var
+    # s3_secret_key: ...   # or set ECS_SECRET_KEY env var
+    # secrets_env_file: /path/to/secrets.env  # shell env file with ECS_ACCESS_KEY / ECS_SECRET_KEY
+    secrets_env_file: /gpfs/mskmind_ess/limr/repos/Mussel-3/secrets.env
+    nextflow_secrets:         # fallback: load from `nextflow secrets get` if not set above
+      - ECS_ACCESS_KEY
+      - ECS_SECRET_KEY
+
+    # Optional: restrict to a single project or slide/sample type
+    # project: TCGA-BRCA
+    slide_type: DX         # DX = all diagnostic slides (DX1, DX2, …); or DX1 for primary only
+    sample_type: all  # GDC sample_type filter; "tumor" also matches Metastatic + Recurrent
+
+    # How often to poll the GDC inventory (seconds)
+    poll_interval_seconds: 3600
+
+    # Skip re-fetching the GDC inventory if it is younger than this many hours
+    gdc_max_age_hours: 24.0
+
+    # Slides not found on S3 are routed through NF's DOWNLOAD_SLIDE process.
+    # NF caches downloads in params.download.local_dir (default: tcga-slides).
+    # gdc_token_file: /path/to/gdc-user-token.txt
+
+    # When set, a mussel_dispatcher.wds post-batch hook is generated automatically
+    # after each successful Nextflow run.  Supports s3:// and local paths.
+    # The destination is the base path; mussel_dispatcher.wds appends /{model_type}/
+    # automatically, so do NOT include the model name here.
+    wds_destinations:
+      hoptimus1: s3://reef-tcga-v2-0/wds
+      titan_slide: s3://reef-tcga-v2-0/wds
+      # uni2h: s3://your-bucket/wds
+    # Maps slide encoder → patch encoder whose .pt files can be deleted after
+    # the slide encoder is safely written to WDS (cleanup_results: true required).
+    wds_patch_encoders:
+      titan_slide: conch1_5
+    wds_staging_dir: tcga-results/wds-staging   # local staging base for S3 uploads; each model uses {staging}/{model}/
+
+    # When set, a tcga_sync_databricks.py post-batch hook is generated automatically.
+    # After each successful batch, status + inventory are joined into a timestamped
+    # Parquet file uploaded to the volume folder, then the Databricks job is triggered
+    # to MERGE it into the Delta table.
+    # Credentials: resolved in order: DATABRICKS_HOST/TOKEN env vars → ~/.databrickscfg [DEFAULT].
+    # See databricks/README.md for setup instructions (create volume, import notebook, create job).
+    databricks_volume_folder: /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
+    databricks_table: cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
+    # databricks_job_id: "12345"   # set to the job ID from: databricks jobs create --json @databricks/jobs/tcga_metadata_sync_job.json
+    databricks_job_id: "256343305142135"
+
+# Any explicit post_batch_hooks run after the auto-generated ones above.
+# post_batch_hooks: []

@@ -22,7 +22,6 @@
       "slide_path": {
         "type": "string",
         "pattern": "^[^\n]+\\.(svs|tiff|tif|ndpi|scn)$",
-        "format": "file-path",
         "errorMessage": "Path to slide must be provided and must have extension '.svs', '.tiff', '.tif', '.ndpi', or '.scn'"
       },
       "oncotree_code": {
@@ -30,6 +29,21 @@
         "pattern": "^\\S+$",
         "errorMessage": "Oncotree code cannot contain spaces",
         "meta": ["oncotree_code"]
+      },
+      "file_id": {
+        "type": "string",
+        "description": "GDC file UUID; required when needs_download=true so DOWNLOAD_SLIDE can fetch the file.",
+        "meta": ["file_id"]
+      },
+      "file_name": {
+        "type": "string",
+        "description": "Original GDC filename (e.g. TCGA-BR-A44T-01Z-00-DX1.<uuid>.svs); used by DOWNLOAD_SLIDE.",
+        "meta": ["file_name"]
+      },
+      "needs_download": {
+        "type": "boolean",
+        "description": "Set to true when slide_path does not yet exist and must be fetched via DOWNLOAD_SLIDE.",
+        "meta": ["needs_download"]
       }
     },
     "required": ["slide_id", "slide_path"]

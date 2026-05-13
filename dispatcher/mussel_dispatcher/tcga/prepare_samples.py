@@ -139,13 +139,17 @@ def _resolve_s3_credentials(
     return key, secret, endpoint
 
 
-def _list_s3_file_ids(
+def _list_s3_files(
     s3_base: str,
     endpoint_url: str | None = None,
     access_key: str | None = None,
     secret_key: str | None = None,
 ) -> set[str]:
-    """Return the set of file_id prefixes that exist under s3_base."""
+    """Return the set of '{file_id}/{file_name}' keys that exist under s3_base.
+
+    Lists actual object keys (not just directory prefixes) so that the caller
+    can verify both the directory AND the specific file exist on S3.
+    """
     try:
         import boto3
     except ImportError:
@@ -171,20 +175,28 @@ def _list_s3_file_ids(
         client_kwargs["aws_access_key_id"] = key
         client_kwargs["aws_secret_access_key"] = secret
 
+    from botocore.config import Config
+    client_kwargs["config"] = Config(
+        connect_timeout=10,
+        read_timeout=30,
+        retries={"max_attempts": 3, "mode": "standard"},
+    )
     s3 = boto3.client("s3", **client_kwargs)
 
     existing: set[str] = set()
     paginator = s3.get_paginator("list_objects_v2")
     try:
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
-            for cp in page.get("CommonPrefixes") or []:
-                part = cp["Prefix"].rstrip("/").split("/")[-1]
-                existing.add(part)
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents") or []:
+                # Key format: <prefix>/<file_id>/<file_name>
+                # Strip the prefix to get '<file_id>/<file_name>'
+                relative = obj["Key"][len(prefix):]
+                existing.add(relative)
     except Exception as exc:
         log.warning("S3 listing failed (%s) — will flag slides as needs_download", exc)
         return set()
 
-    log.info("S3 listing found %d existing file_id prefixes under %s", len(existing), s3_base)
+    log.info("S3 listing found %d existing file keys under %s", len(existing), s3_base)
     return existing
 
 
@@ -194,6 +206,7 @@ def prepare_samples(
     *,
     model: str | None = None,
     slide_type_filter: str | None = None,
+    sample_type_filter: str | None = None,
     project_filter: str | None = None,
     skip_done: bool = True,
     local_slides_dir: Path | None = None,
@@ -218,6 +231,17 @@ def prepare_samples(
         df = df[mask]
         log.info("slide_type filter '%s' matched %d slides", slide_type_filter, mask.sum())
 
+    if sample_type_filter and sample_type_filter.lower() != "all":
+        # Comma-separated substrings matched case-insensitively against the
+        # GDC sample_type field (e.g. "Primary Tumor", "Metastatic").
+        # Use "tumor" to match "Primary Tumor" + "Metastatic" + "Recurrent Tumor".
+        parts = [p.strip().lower() for p in sample_type_filter.split(",") if p.strip()]
+        mask = df["sample_type"].apply(
+            lambda st: any(p in st.lower() for p in parts)
+        )
+        df = df[mask]
+        log.info("sample_type filter '%s' matched %d slides", sample_type_filter, mask.sum())
+
     if project_filter:
         projects = {p.strip() for p in project_filter.split(",")}
         df = df[df["project_id"].isin(projects)]
@@ -237,11 +261,13 @@ def prepare_samples(
         df = df.head(limit)
         log.info("Limited to first %d slides", limit)
 
-    # Pre-fetch S3 listing once (fast batch check) instead of per-file head_object
+    # Pre-fetch S3 listing once (fast batch check) instead of per-file head_object.
+    # Lists actual object keys ('{file_id}/{file_name}') so we verify the specific
+    # file exists, not just the directory prefix.
     s3_existing: set[str] | None = None
     if check_s3_exists and s3_base:
-        log.info("Fetching S3 file_id listing from %s …", s3_base)
-        s3_existing = _list_s3_file_ids(
+        log.info("Fetching S3 file listing from %s …", s3_base)
+        s3_existing = _list_s3_files(
             s3_base,
             endpoint_url=s3_endpoint,
             access_key=s3_access_key,
@@ -275,8 +301,11 @@ def prepare_samples(
         if slide_path is None and s3_base:
             candidate = f"{s3_base.rstrip('/')}/{file_id}/{file_name}"
             if check_s3_exists:
-                if s3_existing is not None and file_id in s3_existing:
+                # Check exact file key ('{file_id}/{file_name}'), not just directory prefix
+                if s3_existing is not None and f"{file_id}/{file_name}" in s3_existing:
                     slide_path = candidate
+                elif s3_existing is None:
+                    slide_path = candidate  # listing failed, assume present
             else:
                 slide_path = candidate  # assume present
 
@@ -327,6 +356,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--slide-type", default="all",
                         help="Slide type filter. Prefix matching and comma-separated supported. "
                              "e.g. 'DX1', 'DX' (all diagnostic), 'DX1,TS1', or 'all' (default: all)")
+    parser.add_argument("--sample-type", default="Primary Tumor",
+                        help="GDC sample_type filter (case-insensitive substring, comma-separated). "
+                             "e.g. 'Primary Tumor', 'tumor' (matches Primary Tumor + Metastatic + "
+                             "Recurrent Tumor), 'all' to disable. Default: 'Primary Tumor'")
     parser.add_argument("--project", default=None,
                         help="Comma-separated project filter, e.g. TCGA-BRCA,TCGA-GBM")
     parser.add_argument("--skip-done", action="store_true", default=True,
@@ -353,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
         status_df,
         model=args.model,
         slide_type_filter=args.slide_type,
+        sample_type_filter=args.sample_type,
         project_filter=args.project,
         skip_done=args.skip_done,
         local_slides_dir=Path(args.local_slides_dir) if args.local_slides_dir else None,

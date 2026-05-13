@@ -1,0 +1,13 @@
+outdir: "validation/results"
+publish_slide_prefix: false
+
+tiling:
+  seg_config_group: "biopsy"
+  seg_model: "neural"
+  remove_artifacts: false
+  remove_penmarks: true
+  artifact_exclude_classes: [4, 7]  # conservative: pen marks only
+
+featurize:
+  model_types:
+    - "titan_slide"

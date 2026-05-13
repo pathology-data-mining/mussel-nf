@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""Sync TCGA slide inventory from the GDC API.
+
+Queries the GDC API for all TCGA slide images and writes (or updates)
+tcga_inventory.csv. On subsequent runs it diffs against the existing file
+and reports what changed.
+
+Usage
+-----
+    python tcga_sync_inventory.py --output tcga_inventory.csv
+    python tcga_sync_inventory.py --output tcga_inventory.csv --project TCGA-BRCA
+    python tcga_sync_inventory.py --output tcga_inventory.csv --show-diff
+
+Exit codes
+----------
+    0  -- success, at least one new / updated slide found
+    1  -- error
+    2  -- success, no changes detected (useful for cron skip logic)
+
+Output columns (tcga_inventory.csv)
+------------------------------------
+File identity
+    file_id             GDC file UUID (unique primary key)
+    file_name           Original filename, e.g. TCGA-BR-A44T-01Z-00-DX1.<uuid>.svs
+    slide_type          Slide type code parsed from filename (DX1, DX2, BS1, TS1, …)
+    file_size           File size in bytes
+    md5sum              MD5 checksum as reported by GDC
+    updated_datetime    ISO-8601 timestamp of last GDC metadata update
+
+Case / project
+    case_submitter_id   TCGA case barcode (e.g. TCGA-BR-A44T)
+    project_id          TCGA project (e.g. TCGA-BRCA, TCGA-LUAD)
+    primary_site        Organ / tissue of origin (e.g. Breast, Lung)
+    disease_type        Disease classification (e.g. Breast Invasive Carcinoma)
+
+Patient demographics
+    gender              Reported sex (female / male)
+    age_at_index        Age in years at the time of diagnosis
+    vital_status        Last known vital status (Alive / Dead)
+    race                Self-reported race (white, black or african american, …)
+    ethnicity           Self-reported ethnicity (hispanic or latino / not hispanic or latino)
+
+Diagnosis
+    primary_diagnosis   Histological diagnosis free-text (ICD-O-3 description)
+    morphology          ICD-O-3 morphology code (e.g. 8500/3)
+    ajcc_pathologic_stage  AJCC pathological stage (Stage I – Stage IV with sub-stages)
+    tumor_grade         Histological grade (G1–G4), often absent for many projects
+
+Sample
+    sample_type         Sample type (Primary Tumor, Metastatic, Blood Derived Normal, …)
+    tissue_type         Tissue category (Tumor / Normal)
+    tumor_descriptor    Tumor context (Primary, Recurrence, Metastatic, …)
+
+Slide-level pathology estimates  (frequently absent/null; estimated by pathologist)
+    section_location    Section position on the block (TOP / BOTTOM)
+    percent_tumor_cells Estimated % of slide area occupied by tumor cells
+    percent_stromal_cells  Estimated % stromal cells
+    percent_necrosis    Estimated % necrotic tissue
+    percent_normal_cells   Estimated % normal cells
+
+Provenance / temporal tracking
+    first_seen_date     ISO date (YYYY-MM-DD) when this file_id first appeared in the GDC
+    removed_date        ISO date when the file_id disappeared from GDC, or empty if still present
+
+    To query new samples since a given sync: filter first_seen_date == <date>
+    To query samples available at time T:    filter first_seen_date <= T
+                                                AND (removed_date == "" OR removed_date > T)
+"""
+
+import argparse
+import json
+import logging
+import re
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+import requests
+
+log = logging.getLogger(__name__)
+
+GDC_FILES_ENDPOINT = "https://api.gdc.cancer.gov/files"
+GDC_FIELDS = ",".join([
+    "file_id",
+    "file_name",
+    "file_size",
+    "md5sum",
+    "updated_datetime",
+    # Case / project
+    "cases.submitter_id",
+    "cases.project.project_id",
+    "cases.project.primary_site",
+    "cases.project.disease_type",
+    # Demographics
+    "cases.demographic.gender",
+    "cases.demographic.age_at_index",
+    "cases.demographic.vital_status",
+    "cases.demographic.race",
+    "cases.demographic.ethnicity",
+    # Diagnosis
+    "cases.diagnoses.primary_diagnosis",
+    "cases.diagnoses.morphology",
+    "cases.diagnoses.ajcc_pathologic_stage",
+    "cases.diagnoses.tumor_grade",
+    # Sample / slide pathology
+    "cases.samples.sample_type",
+    "cases.samples.tissue_type",
+    "cases.samples.tumor_descriptor",
+    "cases.samples.portions.slides.section_location",
+    "cases.samples.portions.slides.percent_tumor_cells",
+    "cases.samples.portions.slides.percent_stromal_cells",
+    "cases.samples.portions.slides.percent_necrosis",
+    "cases.samples.portions.slides.percent_normal_cells",
+])
+
+INVENTORY_COLUMNS = [
+    # File identity
+    "file_id",
+    "file_name",
+    "slide_type",
+    "file_size",
+    "md5sum",
+    "updated_datetime",
+    # Case / project
+    "case_submitter_id",
+    "project_id",
+    "primary_site",
+    "disease_type",
+    # Demographics
+    "gender",
+    "age_at_index",
+    "vital_status",
+    "race",
+    "ethnicity",
+    # Diagnosis
+    "primary_diagnosis",
+    "morphology",
+    "ajcc_pathologic_stage",
+    "tumor_grade",
+    # Sample
+    "sample_type",
+    "tissue_type",
+    "tumor_descriptor",
+    # Slide-level pathology estimates
+    "section_location",
+    "percent_tumor_cells",
+    "percent_stromal_cells",
+    "percent_necrosis",
+    "percent_normal_cells",
+    # Provenance / temporal tracking
+    "first_seen_date",
+    "removed_date",
+]
+
+# Columns fetched from GDC — excludes the two temporal tracking columns
+# that are managed locally by merge_inventory().
+GDC_COLUMNS = [c for c in INVENTORY_COLUMNS if c not in ("first_seen_date", "removed_date")]
+
+_SLIDE_TYPE_RE = re.compile(r"-([A-Z]{2}\d+)\.")
+
+
+def _slide_type(file_name: str) -> str:
+    """Extract slide type (DX1, DX2, BS1, TS1 …) from a TCGA filename.
+
+    Example: TCGA-BR-A44T-01Z-00-DX1.1A2B3C4D.svs → 'DX1'
+    """
+    m = _SLIDE_TYPE_RE.search(file_name)
+    return m.group(1) if m else ""
+
+
+def _fetch_page(filters: dict, from_: int, size: int, retries: int = 3) -> dict:
+    params = {
+        "filters": json.dumps(filters),
+        "fields": GDC_FIELDS,
+        "size": size,
+        "from": from_,
+        "format": "json",
+    }
+    for attempt in range(retries):
+        try:
+            resp = requests.get(GDC_FILES_ENDPOINT, params=params, timeout=60)
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            if attempt == retries - 1:
+                raise
+            wait = 2 ** attempt
+            log.warning("GDC API error (attempt %d/%d): %s — retrying in %ds",
+                        attempt + 1, retries, exc, wait)
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
+
+
+def _first(lst: list, key: str, default="") -> str:
+    """Return the first non-null value of *key* from a list of dicts."""
+    for item in lst or []:
+        v = item.get(key)
+        if v is not None:
+            return v
+    return default
+
+
+def _parse_hit(hit: dict) -> dict:
+    cases = hit.get("cases") or [{}]
+    case = cases[0]
+    project = case.get("project") or {}
+    demographic = case.get("demographic") or {}
+    diagnoses = case.get("diagnoses") or [{}]
+    samples = case.get("samples") or [{}]
+    sample = samples[0]
+    portions = sample.get("portions") or [{}]
+    slides = (portions[0] or {}).get("slides") or [{}]
+    slide_path = slides[0] or {}
+
+    return {
+        # File identity
+        "file_id":        hit.get("file_id", ""),
+        "file_name":      hit.get("file_name", ""),
+        "slide_type":     _slide_type(hit.get("file_name", "")),
+        "file_size":      hit.get("file_size", 0),
+        "md5sum":         hit.get("md5sum", ""),
+        "updated_datetime": hit.get("updated_datetime", ""),
+        # Case / project
+        "case_submitter_id": case.get("submitter_id", ""),
+        "project_id":     project.get("project_id", ""),
+        "primary_site":   project.get("primary_site", ""),
+        "disease_type":   project.get("disease_type", ""),
+        # Demographics
+        "gender":         demographic.get("gender", ""),
+        "age_at_index":   demographic.get("age_at_index", ""),
+        "vital_status":   demographic.get("vital_status", ""),
+        "race":           demographic.get("race", ""),
+        "ethnicity":      demographic.get("ethnicity", ""),
+        # Diagnosis (first entry that has the field)
+        "primary_diagnosis":    _first(diagnoses, "primary_diagnosis"),
+        "morphology":           _first(diagnoses, "morphology"),
+        "ajcc_pathologic_stage": _first(diagnoses, "ajcc_pathologic_stage"),
+        "tumor_grade":          _first(diagnoses, "tumor_grade"),
+        # Sample
+        "sample_type":     sample.get("sample_type", ""),
+        "tissue_type":     sample.get("tissue_type", ""),
+        "tumor_descriptor": sample.get("tumor_descriptor", ""),
+        # Slide-level pathology estimates
+        "section_location":       slide_path.get("section_location", ""),
+        "percent_tumor_cells":    slide_path.get("percent_tumor_cells", ""),
+        "percent_stromal_cells":  slide_path.get("percent_stromal_cells", ""),
+        "percent_necrosis":       slide_path.get("percent_necrosis", ""),
+        "percent_normal_cells":   slide_path.get("percent_normal_cells", ""),
+    }
+
+
+def fetch_inventory(project_filter: str | None = None, page_size: int = 500) -> pd.DataFrame:
+    """Fetch the full TCGA slide inventory from the GDC API."""
+    filters: dict = {
+        "op": "and",
+        "content": [
+            {"op": "=", "content": {"field": "data_type", "value": "Slide Image"}},
+            {"op": "=", "content": {"field": "cases.project.program.name", "value": "TCGA"}},
+        ],
+    }
+    if project_filter:
+        filters["content"].append(
+            {"op": "=", "content": {"field": "cases.project.project_id", "value": project_filter}}
+        )
+
+    records: list[dict] = []
+    from_ = 0
+    total: int | None = None
+
+    while True:
+        data = _fetch_page(filters, from_=from_, size=page_size)
+        hits = data["data"]["hits"]
+        if total is None:
+            total = data["data"]["pagination"]["total"]
+            log.info("GDC: %d slides to fetch", total)
+        for hit in hits:
+            records.append(_parse_hit(hit))
+        from_ += len(hits)
+        log.info("  fetched %d / %d", from_, total)
+        if not hits or from_ >= total:
+            break
+
+    df = pd.DataFrame(records, columns=GDC_COLUMNS)
+    df = df.drop_duplicates("file_id").sort_values("file_id").reset_index(drop=True)
+    return df
+
+
+def merge_inventory(
+    old: pd.DataFrame,
+    new: pd.DataFrame,
+    sync_date: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Merge a freshly-fetched *new* snapshot into the existing *old* inventory.
+
+    Returns (merged, added, removed, updated) where each is a DataFrame.
+
+    Temporal tracking logic
+    -----------------------
+    - Rows new to GDC:          first_seen_date = sync_date, removed_date = ""
+    - Rows gone from GDC:       removed_date    = sync_date  (first_seen_date unchanged)
+    - Rows re-appearing:        removed_date    = ""         (first_seen_date unchanged)
+    - Unchanged/updated rows:   first_seen_date preserved,   removed_date preserved
+    """
+    old_ids = set(old["file_id"])
+    new_ids = set(new["file_id"])
+
+    added_ids   = new_ids - old_ids
+    removed_ids = old_ids - new_ids
+    common_ids  = old_ids & new_ids
+
+    # Detect updates among rows present in both snapshots
+    old_common = old[old["file_id"].isin(common_ids)].set_index("file_id")
+    new_common = new[new["file_id"].isin(common_ids)].set_index("file_id")
+    updated_ids = set(new_common.index[
+        new_common["updated_datetime"] != old_common["updated_datetime"]
+    ])
+
+    # Build the merged rows for common file_ids: take new GDC data, preserve temporal cols
+    temporal = old.set_index("file_id")[["first_seen_date", "removed_date"]]
+    new_indexed = new.set_index("file_id")
+    merged_common = new_indexed.loc[list(common_ids)].copy()
+    merged_common["first_seen_date"] = temporal.loc[list(common_ids), "first_seen_date"]
+    # Clear removed_date if a previously-removed slide has re-appeared
+    was_removed = temporal.loc[list(common_ids), "removed_date"].ne("")
+    merged_common["removed_date"] = temporal.loc[list(common_ids), "removed_date"]
+    merged_common.loc[was_removed, "removed_date"] = ""
+    merged_common = merged_common.reset_index()
+
+    # New rows from GDC
+    new_rows = new[new["file_id"].isin(added_ids)].copy()
+    new_rows["first_seen_date"] = sync_date
+    new_rows["removed_date"] = ""
+
+    # Rows that disappeared: keep old data, stamp removed_date if not already set
+    removed_rows = old[old["file_id"].isin(removed_ids)].copy()
+    already_removed = removed_rows["removed_date"].ne("")
+    removed_rows.loc[~already_removed, "removed_date"] = sync_date
+
+    merged = (
+        pd.concat([merged_common, new_rows, removed_rows], ignore_index=True)
+        .sort_values("file_id")
+        .reset_index(drop=True)
+    )[INVENTORY_COLUMNS]
+
+    return (
+        merged,
+        new_rows,
+        removed_rows[~already_removed],  # only newly-removed this run
+        new[new["file_id"].isin(updated_ids)],
+    )
+
+
+def _inventory_age_hours(path: Path) -> float | None:
+    """Return age of *path* in hours, or None if it doesn't exist."""
+    if not path.exists():
+        return None
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    now = datetime.now(tz=timezone.utc)
+    return (now - mtime).total_seconds() / 3600.0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--output", default="tcga_inventory.csv",
+                        help="Output CSV path (default: tcga_inventory.csv)")
+    parser.add_argument("--project", default=None,
+                        help="Filter to a single GDC project, e.g. TCGA-BRCA")
+    parser.add_argument("--page-size", type=int, default=500,
+                        help="GDC API page size (default: 500)")
+    parser.add_argument("--show-diff", action="store_true",
+                        help="Print file_id/name of newly added slides")
+    parser.add_argument("--max-age-hours", type=float, default=24.0,
+                        help="Skip API fetch if inventory CSV is younger than this many hours "
+                             "(default: 24). Set to 0 to always fetch.")
+    parser.add_argument("--force", action="store_true",
+                        help="Force re-fetch even if the cache is still fresh")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s %(message)s",
+    )
+
+    output_path = Path(args.output)
+
+    # ------------------------------------------------------------------
+    # Cache check: skip API if inventory is fresh enough
+    # ------------------------------------------------------------------
+    if not args.force and args.max_age_hours > 0:
+        age = _inventory_age_hours(output_path)
+        if age is not None and age < args.max_age_hours:
+            log.info(
+                "Inventory is %.1f h old (limit %.1f h) — skipping GDC fetch. "
+                "Use --force to override.",
+                age, args.max_age_hours,
+            )
+            return 2
+
+    log.info("Fetching TCGA slide inventory from GDC API…")
+    new_df = fetch_inventory(project_filter=args.project, page_size=args.page_size)
+    log.info("GDC returned %d slides", len(new_df))
+
+    sync_date = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    has_changes = True
+
+    if output_path.exists():
+        old_df = pd.read_csv(output_path, dtype=str).fillna("")
+        # Back-fill temporal columns if loading a pre-temporal inventory
+        if "first_seen_date" not in old_df.columns:
+            old_df["first_seen_date"] = ""
+            old_df["removed_date"] = ""
+        merged_df, added, removed, updated = merge_inventory(old_df, new_df, sync_date)
+        n_add, n_rem, n_upd = len(added), len(removed), len(updated)
+        print(f"Diff: +{n_add} new, -{n_rem} removed, ~{n_upd} updated (total active: "
+              f"{len(merged_df[merged_df['removed_date'] == ''])})")
+        if args.show_diff and n_add:
+            print("\nAdded:")
+            print(added[["file_id", "file_name", "project_id"]].to_string(index=False))
+        has_changes = n_add > 0 or n_rem > 0 or n_upd > 0
+    else:
+        new_df["first_seen_date"] = sync_date
+        new_df["removed_date"] = ""
+        merged_df = new_df[INVENTORY_COLUMNS]
+        print(f"No existing inventory — writing {len(merged_df)} slides")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    merged_df.to_csv(output_path, index=False)
+    log.info("Wrote %s", output_path)
+
+    return 0 if has_changes else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

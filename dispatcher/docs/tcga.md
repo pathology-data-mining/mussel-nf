@@ -28,9 +28,9 @@ slide it:
 4. Appends outputs to per-cancer-type [WebDataset](https://webdataset.github.io/webdataset/)
    shards for use in training
 
-The orchestrator (`tcga_run.py`) is cron-friendly: re-running it picks up
-where it left off. A `--initial-run` flag loops in configurable chunks
-(default 500 slides) until all pending slides are processed.
+The **dispatcher** (`dispatcher/mussel-dispatcher.py`) is the primary
+orchestrator. It watches for slides, batches them, runs Nextflow concurrently,
+pushes results to WDS shards, and resumes automatically after restarts.
 
 ---
 
@@ -49,7 +49,7 @@ TCGA-{TSS}-{Patient}-{SampleType}{Vial}-{Portion}-{SlideType}{Seq}.<UUID>.svs
 | Prefix | Full name       | Description                                         | Count  | On S3 |
 |--------|-----------------|-----------------------------------------------------|--------|-------|
 | `DX`   | Diagnostic      | H&E-stained diagnostic glass slide; primary imaging modality for computational pathology | 11,848 | ✅ Yes |
-| `TS`   | Top Section     | Frozen section from the top of the tissue block     | 8,997  | ❌ No |
+| `TS`   | Top Section     | Frozen section from the top of the tissue block     | 8,997  | b�� No |
 | `BS`   | Bottom Section  | Frozen section from the bottom of the tissue block  | 4,941  | ❌ No |
 | `MS`   | Middle Section  | Frozen section from the middle of the tissue block  | 77     | ❌ No |
 
@@ -58,30 +58,28 @@ frozen sections used for intraoperative diagnosis and have more artifacts.
 
 Within each type, the sequence number (DX1, DX2, …, DX17) distinguishes
 multiple physical slides prepared from the same tumor block. Many patients
-have only DX1; some have DX1+DX2; a small number have up to 17 slides.
+have only DX1; a subset have DX1+DX2 or more.
 
-> **Important:** 882 patient-samples in DX slides alone have 2+ slides
-> (DX1 and DX2+). Using only the 4-part barcode `TCGA-BR-A44T-01` as the
-> slide identifier would silently collapse these into one record. All scripts
-> use the **full slide barcode** (`TCGA-BR-A44T-01Z-00-DX1`) as `slide_id`.
+### Sample Types
 
-### Sample Type Codes
+TCGA encodes tissue sample origin in the barcode's sample-type field:
 
-The two-digit number after the patient ID encodes the tissue type:
+| Code | Description                       |
+|------|-----------------------------------|
+| `01` | Primary Solid Tumor               |
+| `02` | Recurrent Solid Tumor             |
+| `06` | Metastatic                        |
+| `11` | Solid Tissue Normal               |
+| …    | Others (blood, cell-line, etc.)   |
 
-| Code | Sample type                  | Count  |
-|------|------------------------------|--------|
-| `01` | Primary Solid Tumor          | 26,854 |
-| `11` | Solid Tissue Normal          | 2,789  |
-| `06` | Metastatic                   | 566    |
-| `02` | Recurrent Solid Tumor        | 89     |
-| `05` | Additional New Primary       | 26     |
-| `07` | Additional Metastatic        | 2      |
+The `sample_type` config key (and `--sample-type` CLI arg) filters which
+samples are included. Use `all` (default) or a comma-separated list of codes:
 
-Normal adjacent tissue (`11`) is available for a subset of projects and can
-be useful for self-supervised or contrastive learning tasks.
-
-### Slide Type Filter
+```yaml
+sample_type: "01"       # primary solid tumors only
+sample_type: "01,06"    # primary + metastatic
+sample_type: all        # no filtering (default)
+```
 
 The `slides.slide_type` config key (and `--slide-type` CLI arg) controls
 which slide types are included. Supports prefix matching and comma-separated
@@ -99,27 +97,28 @@ slide_type: DX1,DX2  # first two diagnostic slides per sample
 ## Architecture
 
 ```
-tcga_run.py              ← orchestrator; runs phases 1–7 in order
+dispatcher/mussel-dispatcher.py        ← primary orchestrator (streaming)
   │
-  ├─ Phase 1: tcga_sync_inventory.py   ← GDC API → inventory CSV (cached, TTL 24h)
-  ├─ Phase 2: tcga_update_status.py    ← scan results dir → status CSV
-  ├─ Phase 3: tcga_prepare_samples.py  ← path resolution → samples CSV
-  ├─ Phase 4a: nextflow (ready slides) ← slides on disk or S3 run immediately
-  ├─ Phase 4b: gdc-client download     ← download slides not on S3/disk
-  ├─ Phase 4c: nextflow (downloaded)   ← run nextflow on freshly downloaded slides
-  ├─ Phase 5: tcga_append_wds.py       ← append .pt → per-cancer WDS shards
-  └─ Phase 6: tcga_sync_databricks.py  ← upload status table to Databricks (optional)
+  ├─ TcgaWatcher:
+  │    ├─ mussel_dispatcher.tcga.sync_inventory   ← GDC API → inventory CSV (cached, TTL 24h)
+  │    ├─ mussel_dispatcher.tcga.update_status    ← scan results dir → status CSV
+  │    └─ mussel_dispatcher.tcga.prepare_samples  ← path resolution, S3 check, gdc-client download
+  │
+  ├─ BatchScheduler → nextflow run     ← parallel Nextflow batches (SLURM)
+  │
+  └─ Post-batch hooks:
+       └─ mussel_dispatcher.tcga.append_wds  ← append .pt/.h5 → per-group WDS shards (S3)
 ```
 
-### Path Resolution (Phase 3)
+### Path Resolution
 
-For each pending slide, `tcga_prepare_samples.py` resolves `slide_path`
+For each pending slide, `prepare_samples` resolves `slide_path`
 using this priority chain:
 
 ```
 1. Local disk   <local_slides_dir>/<file_id>/<file_name>   (size-validated)
 2. S3           s3://<s3_base>/<file_id>/<file_name>       (batch listing)
-3. Download     needs_download = True  → Phase 4b
+3. Download     needs_download = True  → gdc-client
 ```
 
 S3 availability is determined by a single paginated `ListObjectsV2` call
@@ -144,50 +143,32 @@ The S3 endpoint URL is resolved from:
 Setting the endpoint in `nextflow.config` means both the pipeline and the
 TCGA scripts share a single source of truth.
 
-### Initial Run vs Incremental
-
-| Mode | Usage | Behaviour |
-|------|-------|-----------|
-| **Incremental** (default) | cron, `tcga_run.py --config cfg.yaml` | One pass: sync inventory, update status, prepare up to `chunk_size` slides, run nextflow, append WDS |
-| **Initial run** | `--initial-run` | Loops phases 3–5 with `--chunk-size` slides per iteration until all pending slides are done. After first chunk, `--skip-sync` is set automatically. Databricks sync runs once at the end. |
-
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Copy and edit the config
-cp scripts/tcga/tcga_run_config.yaml /data/tcga/config.yaml
-$EDITOR /data/tcga/config.yaml
+# 1. Copy and edit the dispatcher config
+cp dispatcher/tcga_dispatcher.yaml /data/tcga/tcga_dispatcher.yaml
+$EDITOR /data/tcga/tcga_dispatcher.yaml
 
 # 2. Store ECS credentials in the nextflow secrets store (once)
 nextflow secrets set ECS_ACCESS_KEY <key>
 nextflow secrets set ECS_SECRET_KEY <secret>
 
-# 3. Dry-run to verify commands
-python scripts/tcga/tcga_run.py --config /data/tcga/config.yaml --dry-run
+# 3. Run the dispatcher (streams slides, dispatches parallel Nextflow batches)
+python dispatcher/mussel-dispatcher.py /data/tcga/tcga_dispatcher.yaml
 
-# 4. Initial load of all TCGA DX slides, 500 at a time
-python scripts/tcga/tcga_run.py --config /data/tcga/config.yaml \
-    --initial-run --chunk-size 500
-
-# 5. Incremental updates (add to cron)
-python scripts/tcga/tcga_run.py --config /data/tcga/config.yaml
-
-# Run a single project first (e.g. to validate end-to-end)
-python scripts/tcga/tcga_run.py --config /data/tcga/config.yaml \
-    --initial-run --project TCGA-BRCA --chunk-size 50
-
-# Skip specific phases
-python scripts/tcga/tcga_run.py --config /data/tcga/config.yaml \
-    --skip-sync --skip-download
+# Ctrl+C to gracefully stop (waits for in-flight batches to finish)
+# Ctrl+C again to force-exit immediately
+# Restart: automatically resumes interrupted batches with -resume
 ```
 
 ---
 
 ## Scripts
 
-### `tcga_sync_inventory.py` — GDC Inventory
+### `sync_inventory` — GDC Inventory
 
 Fetches the full TCGA slide inventory from the GDC API and writes
 `tcga_inventory.csv`. Subsequent calls within `max_age_hours` (default 24h)
@@ -199,7 +180,7 @@ Columns: file_id, file_name, case_submitter_id, project_id,
 ```
 
 ```bash
-python tcga_sync_inventory.py \
+python -m mussel_dispatcher.tcga.sync_inventory \
     --output tcga_inventory.csv \
     [--project TCGA-BRCA]       \  # filter to one project
     [--max-age-hours 24]        \  # cache TTL (0 = always fetch)
@@ -210,7 +191,7 @@ Exit codes: `0` = updated, `2` = no changes (cache still fresh), `1` = error.
 
 ---
 
-### `tcga_update_status.py` — Status Tracking
+### `update_status` — Status Tracking
 
 Scans a nextflow results directory for completed outputs (`.features.pt` and
 `.patch.h5` files) and writes `tcga_status.csv`.
@@ -221,7 +202,7 @@ Columns: file_id, slide_id, project_id, slide_type, model,
 ```
 
 ```bash
-python tcga_update_status.py \
+python -m mussel_dispatcher.tcga.update_status \
     --inventory tcga_inventory.csv \
     --results-dir /data/tcga-results \
     --output tcga_status.csv \
@@ -230,14 +211,14 @@ python tcga_update_status.py \
 
 ---
 
-### `tcga_prepare_samples.py` — Path Resolution
+### `prepare_samples` — Path Resolution
 
 Resolves the filesystem or S3 path for each pending slide and writes a
 nextflow-compatible `samples_to_run.csv`. Also writes a `.meta.csv` sidecar
-with `needs_download` flags used by the orchestrator.
+with `needs_download` flags used by the dispatcher.
 
 ```bash
-python tcga_prepare_samples.py \
+python -m mussel_dispatcher.tcga.prepare_samples \
     --inventory tcga_inventory.csv \
     --status tcga_status.csv \
     --output samples_to_run.csv \
@@ -245,6 +226,7 @@ python tcga_prepare_samples.py \
     --local-slides-dir /data/tcga-slides \
     [--model ctranspath]           \  # skip slides done for this model
     [--slide-type DX]              \  # filter by type prefix
+    [--sample-type 01]             \  # filter by sample type code
     [--project TCGA-BRCA]          \  # filter by project
     [--limit 500]                  \  # cap number of output rows
     [--check-s3-exists]               # verify S3 paths via ListObjectsV2
@@ -254,23 +236,23 @@ Exit codes: `0` = success, `2` = no pending slides, `1` = error.
 
 ---
 
-### `tcga_append_wds.py` — WDS Shard Building
+### `append_wds` — WDS Shard Building
 
 Appends `.features.pt` (and optionally `.patch.h5` coords) to
 [WebDataset](https://webdataset.github.io/webdataset/) tar shards, grouped
-by cancer type. Maintains a `wds_index.json` for idempotency — re-running
+by a routing key. Maintains a `wds_index.json` for idempotency — re-running
 never duplicates entries.
 
 ```bash
-# Via results dir (auto-discovers models):
-python tcga_append_wds.py \
+# Via results dir (auto-discovers models), routing by TCGA inventory:
+python -m mussel_dispatcher.tcga.append_wds \
     --results-dir /data/tcga-results \
     --inventory tcga_inventory.csv \
     --wds-dest s3://pathology/tcga-features/wds \
     --staging-dir /data/wds-staging
 
 # Explicit model and dirs:
-python tcga_append_wds.py \
+python -m mussel_dispatcher.tcga.append_wds \
     --pt-dir /data/tcga-results/features/ctranspath/pt \
     --h5-dir /data/tcga-results/features/ctranspath/tile_h5 \
     --model-type ctranspath \
@@ -278,37 +260,18 @@ python tcga_append_wds.py \
     --wds-dest /data/wds \
     [--slide-ids-csv samples_to_run.csv]  # restrict to current chunk's slides
     [--max-shard-bytes 2147483648]        # 2 GB per shard (default)
+    [--s3-max-concurrency 4]              # boto3 multipart thread limit
 ```
 
 ---
 
-### `tcga_run.py` — Orchestrator
-
-Chains all phases end-to-end. See [Quick Start](#quick-start) above.
-
-```
-Flags:
-  --config PATH            Required. Path to tcga_run_config.yaml
-  --initial-run            Loop phases 3–5 until no slides remain
-  --chunk-size N           Slides per chunk (default: 500 from config)
-  --project PROJ           Comma-separated project filter override
-  --delete-slides          Delete downloaded SVS after each chunk
-  --dry-run                Print commands without executing
-  --force-sync             Re-fetch GDC inventory even if cache is fresh
-  --skip-sync/status/prepare/download/run/append-wds/databricks
-                           Skip individual phases
-  -v / --verbose           Debug logging
-```
-
----
-
-### `tcga_sync_databricks.py` — Databricks Sync
+### `sync_databricks` — Databricks Sync
 
 Uploads the status CSV as Parquet to a Databricks Unity Catalog volume and
 optionally triggers a Databricks job to refresh a Delta table.
 
 ```bash
-python tcga_sync_databricks.py \
+python -m mussel_dispatcher.tcga.sync_databricks \
     --status tcga_status.csv \
     --inventory tcga_inventory.csv \
     --volume-path /Volumes/catalog/schema/vol/tcga_status.parquet \
@@ -321,61 +284,47 @@ python tcga_sync_databricks.py \
 
 ## Configuration Reference
 
-See [`tcga_run_config.yaml`](tcga_run_config.yaml) for a fully annotated
-example. Key sections:
+See [`dispatcher/tcga_dispatcher.yaml`](../../dispatcher/tcga_dispatcher.yaml)
+for a fully annotated example. Key sections:
 
 ```yaml
-inventory_csv: /data/tcga/tcga_inventory.csv
-status_csv:    /data/tcga/tcga_status.csv
-samples_csv:   /data/tcga/samples_to_run.csv
+watchers:
+  - type: tcga
+    inventory_csv: /data/tcga/tcga_inventory.csv
+    status_csv: /data/tcga/tcga_status.csv
+    slide_type: DX
+    sample_type: "01"
+    s3_base: s3://pathology/TCGA
+    check_s3_exists: true
+    wds_destinations:
+      hoptimus1: s3://pathology/tcga-features/wds/hoptimus1
+      titan_slide: s3://pathology/tcga-features/wds/titan_slide
+    wds_staging_dir: /data/wds-staging
+    wds_s3_max_concurrency: 4
+    cleanup_results: true
 
-gdc:
-  token_file: ~/.gdc-token      # required for controlled-access data
-  client_bin: gdc-client
-  max_age_hours: 24             # inventory cache TTL
-
-download:
-  local_dir: /data/tcga-slides
-
-slides:
-  slide_type: DX                # 'all', 'DX', 'DX1', 'DX1,TS1', …
-  local_slides_dir: /data/tcga-slides
-  s3_base: s3://pathology/TCGA
-  # Endpoint auto-read from nextflow.config aws.client.endpoint if omitted
-  s3_endpoint: http://pmindecs.mskcc.org:9020
-  check_s3_exists: true
-
-initial_run:
-  chunk_size: 500
-  delete_slides_after_chunk: true
-
-nextflow:
-  profile: cluster,slurm,apptainer
-  outdir: /data/tcga-results
-  params_file: /data/tcga/params.yaml   # source of truth for model_types
-
-wds:
-  dest: s3://pathology/tcga-features/wds
-  staging_dir: /data/wds-staging
-  max_shard_bytes: 2147483648
+batch_size: 50
+max_concurrent_runs: 2
+outdir: /data/tcga-results
+nextflow_profiles: cluster,slurm,conda
 ```
 
 ---
 
 ## WDS Output Format
 
-Shards are written under `<wds_dest>/<model>/<project_id>/`:
+Shards are written under `<wds_dest>/<project_id>/`:
 
 ```
 wds/
-  ctranspath/
+  hoptimus1/
     TCGA-BRCA/
       000000.tar     ← up to max_shard_bytes of slide entries
       000001.tar
     TCGA-LUAD/
       000000.tar
     wds_index.json   ← {slide_id: {project_id, shard_file}} for O(1) lookup
-  uni2h/
+  titan_slide/
     ...
 ```
 
@@ -392,7 +341,7 @@ Each tar entry contains:
 import webdataset as wds
 import numpy as np
 
-ds = wds.WebDataset("s3://pathology/tcga-features/wds/ctranspath/TCGA-BRCA/000000.tar")
+ds = wds.WebDataset("s3://pathology/tcga-features/wds/hoptimus1/TCGA-BRCA/000000.tar")
 for sample in ds:
     features = np.load(io.BytesIO(sample["features.npy"]))
     coords   = np.load(io.BytesIO(sample["coords.npy"])) if "coords.npy" in sample else None
@@ -416,16 +365,10 @@ cancer type without reading irrelevant data, enables per-cancer-type
 stratified sampling in WebDataset's `ResampledShards`, and makes partial
 ingestion safe (incomplete cancer types are easy to identify).
 
-**Launch before downloads complete.** Slides available on S3 or local disk
-run through nextflow immediately (Phase 4a) while slides that need
-downloading via `gdc-client` are handled in parallel (Phase 4b → 4c). This
-avoids waiting hours for downloads before any GPU work starts.
-
-**Single nextflow params source of truth.** `model_types` and all tiling
-parameters come from the user's `params_file` (a standard nextflow params
-YAML). `tcga_run.py` deep-merges TCGA-specific overrides
-(`samples_csv`, `outdir`, `wds.enabled=false`) on top of that file before
-passing it to nextflow as a single `-params-file` argument.
+**Dispatcher resumes on restart.** When the dispatcher restarts, if a
+batch's Nextflow work dir is still on disk the run is re-submitted with
+`-resume` so already-completed SLURM tasks are skipped (no wasted GPU
+recompute). Batches whose work dirs were deleted fall back to full re-dispatch.
 
 **S3 existence check via batch listing.** Rather than one `HeadObject` call
 per slide, `tcga_prepare_samples.py` does a single paginated

@@ -2,7 +2,7 @@
 process MERGE_ANNOTATION_FEATURES {
     label "bigTask"
 
-    publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/annotation_features/${model_type}/" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(meta), val(model_type), path(features_h5), path(annotation_bmp)
@@ -27,7 +27,7 @@ process MERGE_ANNOTATION_FEATURES {
 process STACK_ANNOTATION_FEATURES {
     label "bigTask"
 
-    publishDir "${params.outdir}/annotation_features/${model_type}/", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/annotation_features/${model_type}/" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(model_type), path(annotation_features)
@@ -50,7 +50,7 @@ process STACK_ANNOTATION_FEATURES {
 process LINEAR_PROBE_BENCHMARK {
     label "bigTask"
 
-    publishDir "${params.outdir}/linear_probe_benchmark/${model_type}/", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/linear_probe_benchmark/${model_type}/" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(model_type), path(annotation_features)
@@ -99,35 +99,31 @@ workflow LINEAR_PROBE {
 
     main:
         if (params.linear_probe.annotations_csv) {
-            if (!params.linear_probe.annotation_class_mapping_yaml) {
-                log.warn "params.linear_probe.annotation_class_mapping_yaml is not set — linear probe benchmarking will be skipped"
-            } else {
-                // Broadcast each annotation BMP to all model types for that slide using combine(by: slide_id).
-                // combine (not join) is used because ch_h5_features has one row per (slide, model_type).
-                ch_features_ann = ch_h5_features
-                    .map { meta, model_type, h5 -> tuple(meta.slide_id, meta, model_type, h5) }
-                    .combine(
-                        ch_annotations.map { meta, bmp -> tuple(meta.slide_id, bmp) },
-                        by: 0
-                    )
-                    .map { _id, meta, model_type, h5, bmp -> tuple(meta, model_type, h5, bmp) }
-
-                MERGE_ANNOTATION_FEATURES(
-                    ch_features_ann,
-                    params.linear_probe.annotation_class_mapping_yaml
-                        ? file(params.linear_probe.annotation_class_mapping_yaml)
-                        : file("NO_FILE", checkIfExists: false)
+            // Broadcast each annotation BMP to all model types for that slide using combine(by: slide_id).
+            // combine (not join) is used because ch_h5_features has one row per (slide, model_type).
+            ch_features_ann = ch_h5_features
+                .map { meta, model_type, h5 -> tuple(meta.slide_id, meta, model_type, h5) }
+                .combine(
+                    ch_annotations.map { meta, bmp -> tuple(meta.slide_id, bmp) },
+                    by: 0
                 )
+                .map { _id, meta, model_type, h5, bmp -> tuple(meta, model_type, h5, bmp) }
 
-                MERGE_ANNOTATION_FEATURES.out.parquet \
-                    | groupTuple \
-                    | STACK_ANNOTATION_FEATURES \
-                    | LINEAR_PROBE_BENCHMARK
+            MERGE_ANNOTATION_FEATURES(
+                ch_features_ann,
+                params.linear_probe.annotation_class_mapping_yaml
+                    ? file(params.linear_probe.annotation_class_mapping_yaml)
+                    : file("NO_FILE", checkIfExists: false)
+            )
 
-                LINEAR_PROBE_BENCHMARK.out.results_json \
-                    | collect(flat: false) \
-                    | SUMMARIZE_LINEAR_PROBE
-            }
+            MERGE_ANNOTATION_FEATURES.out.parquet \
+                | groupTuple \
+                | STACK_ANNOTATION_FEATURES \
+                | LINEAR_PROBE_BENCHMARK
+
+            LINEAR_PROBE_BENCHMARK.out.results_json \
+                | collect(flat: false) \
+                | SUMMARIZE_LINEAR_PROBE
         }
 
 }

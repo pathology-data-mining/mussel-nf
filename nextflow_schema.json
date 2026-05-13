@@ -49,7 +49,7 @@
                     "description": "watch this path for sample svs files"
                 },
                 "publish_slide_prefix": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "description": "include first 4 digits of the slide ID in the publish dir",
                     "default": true
                 },
@@ -75,7 +75,7 @@
             "default": "reef"
         },
         "use_one_step_workflow": {
-            "type": "boolean",
+            "type": ["boolean", "string"],
             "description": "Use one-step tessellation and featurization workflow",
             "help_text": "When true, uses TESSELLATE_FEATURIZE_BATCH for combined tessellation and feature extraction. When false, uses separate TESSELLATE and FEATURIZE_BATCH processes.",
             "default": false
@@ -100,7 +100,7 @@
                     "description": "Confidence threshold for the legacy tile classifier (0\u20131). Tiles below this score are discarded."
                 },
                 "filter_tiles": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Enable legacy classifier-based tile filtering. After tessellation, extracts patch features with filter_model_type and applies a .pkl classifier to discard non-tissue tiles."
                 },
@@ -170,12 +170,12 @@
                     "description": "Minimum fraction of a patch that must be tissue to be retained. Default 0.0 (keep all). Requires Mussel v1.2.0+."
                 },
                 "remove_artifacts": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Use GrandQC neural artifact remover to exclude artifact regions from the tissue mask during tessellation. Does not require a separate classifier model. Requires Mussel v1.2.0+."
                 },
                 "remove_penmarks": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Detect and exclude pen mark regions before tessellation. Requires Mussel v1.2.0+."
                 },
@@ -193,17 +193,17 @@
                     "description": "If set, use this value (\u00b5m/px) as the slide's native MPP instead of reading from slide metadata. Use when a slide lacks MPP tags and the metadata-based fallback produces incorrect results."
                 },
                 "save_slide_thumbnail": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "save slide thumbnails"
                 },
                 "save_tile_png": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "save tiles as png"
                 },
                 "stitch_tiles": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "generate stitched tiles"
                 }
@@ -263,7 +263,7 @@
                     }
                 },
                 "use_gpu": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": true,
                     "description": "use the GPU for feature extraction"
                 },
@@ -281,6 +281,14 @@
                     "type": "integer",
                     "default": 8,
                     "description": "Number of slides to process together in a batch (controls both Type 2 and Type 3 batching)"
+                },
+                "slide_max_patches": {
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "description": "Maximum number of patches passed to slide-level encoders (e.g. gigapath_slide, titan_slide) per slide. Null keeps all patches. Useful to cap memory usage and prevent OOM for very large slides."
                 },
                 "max_tiles_per_sample": {
                     "type": [
@@ -325,6 +333,41 @@
                     "additionalProperties": {
                         "type": "string"
                     }
+                },
+                "save_features_to_h5": {
+                    "type": ["boolean", "string"],
+                    "default": true,
+                    "description": "Save patch-level features to HDF5 (.h5) in addition to .pt slide tensors."
+                },
+                "slide_to_patch_mapping": {
+                    "type": "object",
+                    "description": "Maps slide-level encoder names to the required patch encoder.",
+                    "properties": {
+                        "gigapath_slide": {
+                            "type": "string",
+                            "default": "gigapath"
+                        },
+                        "titan_slide": {
+                            "type": "string",
+                            "default": "conch1_5"
+                        },
+                        "prism_slide": {
+                            "type": "string",
+                            "default": "virchow"
+                        },
+                        "feather_slide": {
+                            "type": "string",
+                            "default": "conch1_5"
+                        },
+                        "chief_slide": {
+                            "type": "string",
+                            "default": "ctranspath"
+                        },
+                        "madeleine_slide": {
+                            "type": "string",
+                            "default": "clip"
+                        }
+                    }
                 }
             }
         },
@@ -356,7 +399,7 @@
                     "schema": "assets/schema_oncotree_map.json"
                 },
                 "skip_tile_caching": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "description": "skip the tile caching",
                     "default": true
                 }
@@ -375,7 +418,7 @@
                 },
                 "annotation_class_mapping_yaml": {
                     "type": "string",
-                    "description": "mapping of annotation bmp IDs to class"
+                    "description": "Optional YAML mapping BMP pixel values to remapped class IDs. When omitted, raw non-zero BMP pixel values are used directly as class labels."
                 },
                 "cv": {
                     "type": "integer",
@@ -414,6 +457,16 @@
                     "type": "integer",
                     "default": 1,
                     "description": "Annotation value treated as the positive class. Default 1 for class-mapped 0/1 annotations; set to 2 for raw (unmapped) BMP annotation values."
+                },
+                "random_state": {
+                    "type": "integer",
+                    "default": 42,
+                    "description": "Random seed for linear probe cross-validation."
+                },
+                "multiclass": {
+                    "type": ["boolean", "string"],
+                    "default": false,
+                    "description": "Enable multiclass mode (>=3 classes) for linear probe benchmarking."
                 }
             }
         },
@@ -423,17 +476,17 @@
             "type": "object",
             "properties": {
                 "enabled": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Enable WebDataset shard output. When true, per-slide .pt (and optionally .h5) feature files are collected and packed into .tar shards after extraction."
                 },
                 "group_by_oncotree": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "When true, produce separate shard sets per oncotree_code from the sample sheet. Requires oncotree_code column in samples_csv. When false, all slides are sharded together under the group 'all'."
                 },
                 "shard_h5": {
-                    "type": "boolean",
+                    "type": ["boolean", "string"],
                     "default": false,
                     "description": "Extract tile coordinates from .h5 patch-feature files and store as .coords.npy in the shard alongside .features.npy. Note: .h5 files are large."
                 },
@@ -447,6 +500,44 @@
                     "type": "string",
                     "default": "",
                     "description": "Filename prefix for shard tar files. Default '' produces 000000.tar (paladin-compatible naming)."
+                }
+            }
+        },
+        "download": {
+            "title": "GDC slide download options",
+            "description": "Settings for the DOWNLOAD_SLIDE process, which fetches TCGA slides via gdc-client when slides are not yet on disk or S3.",
+            "type": "object",
+            "properties": {
+                "local_dir": {
+                    "type": "string",
+                    "default": "tcga-slides",
+                    "description": "Root directory where downloaded slides are cached. Files land at <local_dir>/<file_id>/<file_name>. Shared across pipeline runs via storeDir."
+                },
+                "gdc_token_file": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to GDC user token file for controlled-access data. Leave empty for open-access TCGA slides."
+                },
+                "n_connections": {
+                    "type": "integer",
+                    "default": 8,
+                    "minimum": 1,
+                    "description": "Number of parallel connections per gdc-client download invocation."
+                },
+                "gdc_client_bin": {
+                    "type": "string",
+                    "default": "gdc-client",
+                    "description": "Path or name of the gdc-client binary."
+                },
+                "max_concurrent": {
+                    "type": "integer",
+                    "default": 16,
+                    "description": "Max parallel DOWNLOAD_SLIDE tasks per batch (maxForks)."
+                },
+                "jitter_seconds": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": "Random sleep 0-N seconds before gdc-client to stagger API calls."
                 }
             }
         }

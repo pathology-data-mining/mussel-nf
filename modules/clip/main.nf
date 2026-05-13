@@ -35,7 +35,7 @@ process CREATE_CLASS_EMBEDDINGS {
 process ANNOTATE {
     label "cpuTask"
 
-    publishDir path: "${params.outdir}/${publish_path}", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/annotate/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(meta), val(model_type), path(features_pt), val(oncotree_code), path(class_embedding)
@@ -43,11 +43,10 @@ process ANNOTATE {
 
     output:
     tuple val(meta), val(model_type), val(oncotree_code), path("${meta.slide_id}.annotation.csv"), emit: csv
-    tuple val(meta), val("${model_type}_annotation_csv_path"), val("${publish_path}/${meta.slide_id}.annotation.csv"), topic: meta_out
+    tuple val(meta), val("${model_type}_annotation_csv_path"), val("annotate/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.annotation.csv"), topic: meta_out
 
     script:
-    publish_path = "annotate/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
-    classes = class_map[oncotree_code] ?: params.clip.default_classes
+    def classes = class_map[oncotree_code] ?: params.clip.default_classes
     """
     annotate \
         features_pt_path=$features_pt \
@@ -57,7 +56,6 @@ process ANNOTATE {
     """
 
     stub:
-    publish_path = "annotate/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     echo "class,score" > ${meta.slide_id}.annotation.csv
     echo "stub,1.0"   >> ${meta.slide_id}.annotation.csv
@@ -68,7 +66,7 @@ process CACHE_TILES {
     label "cpuTask"
     label "parallelTask"
 
-    publishDir path: "${params.outdir}/cache_tiles/${publish_path}", mode: "${params.publish_mode}"
+    publishDir path: { "${params.outdir}/cache_tiles/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}" }, mode: "${params.publish_mode}"
 
     input:
     tuple val(meta), val(model_type), val(oncotree_code), path(annotation_csv), path(slide), path(patch_h5)
@@ -77,12 +75,11 @@ process CACHE_TILES {
     output:
     path "${meta.slide_id}.indices.json"
     path "${meta.slide_id}.cache.pt"
-    tuple val(meta), val("${model_type}_tile_cache_indices_json_path"), val("${publish_path}/${meta.slide_id}.indices.json"), topic: meta_out
-    tuple val(meta), val("${model_type}_tile_cache_tensor_path"), val("${publish_path}/${meta.slide_id}.cache.pt"), topic: meta_out
+    tuple val(meta), val("${model_type}_tile_cache_indices_json_path"), val("cache_tiles/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.indices.json"), topic: meta_out
+    tuple val(meta), val("${model_type}_tile_cache_tensor_path"), val("cache_tiles/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}/${meta.slide_id}.cache.pt"), topic: meta_out
 
     script:
-    publish_path = "cache_tiles/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
-    classes = class_map[oncotree_code] ?: params.clip.default_classes
+    def classes = class_map[oncotree_code] ?: params.clip.default_classes
     """
     cache_tiles \
         patch_h5_path=${patch_h5} \
@@ -95,7 +92,6 @@ process CACHE_TILES {
     """
 
     stub:
-    publish_path = "cache_tiles/${model_type}/${params.publish_slide_prefix ? meta.slide_id.toString()[0..3] : ''}"
     """
     #!/usr/bin/env python3
     import json, torch
@@ -115,7 +111,7 @@ workflow CLIP {
     main:
         ch_oncotree_slide = ch_samples.map {
             meta, slide ->
-                oncotree_code = "default"
+                def oncotree_code = "default"
                 if ("oncotree_code" in meta) {
                     oncotree_code = meta["oncotree_code"]
                 }
@@ -139,7 +135,7 @@ workflow CLIP {
         
         // Create a channel with model types and their paths as tuples
         ch_clip_model_configs = Channel.fromList(params.clip.model_types).map { model_type ->
-            model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
+            def model_path = params.featurize.model_paths && params.featurize.model_paths[model_type] ? params.featurize.model_paths[model_type] : null
             [model_type, model_path]
         }
         
@@ -158,7 +154,7 @@ workflow CLIP {
             }
         ch_annotations = ANNOTATE(ch_annot_input, oncotree_class_map).csv
 
-        ch_tile_cache = params.clip.skip_tile_caching ? Channel.empty() : CACHE_TILES(ch_annotations.join(ch_slides).join(ch_patches), oncotree_class_map)
+        ch_tile_cache = params.clip.skip_tile_caching ? Channel.empty() : CACHE_TILES(ch_annotations.join(ch_samples).join(ch_patches), oncotree_class_map)
 
     emit:
         annotations = ch_annotations

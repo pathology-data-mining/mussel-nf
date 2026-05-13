@@ -13,8 +13,8 @@ process MERGE_SAMPLE_FEATURES {
     label "bigTask"
     label "cpuTask"
 
-    publishDir path: "${params.outdir}/features/${model_type_input}", mode: "${params.publish_mode}", pattern: "*.features.pt"
-    publishDir path: "${params.outdir}/features/${model_type_input}", mode: "${params.publish_mode}", pattern: "*.features.h5"
+    publishDir path: { "${params.outdir}/features/${model_type_input}" }, mode: "${params.publish_mode}", pattern: "*.features.pt"
+    publishDir path: { "${params.outdir}/features/${model_type_input}" }, mode: "${params.publish_mode}", pattern: "*.features.h5"
 
     input:
     tuple val(sample_id), val(slide_metas), val(model_type_input), path(feature_h5s)

@@ -23,7 +23,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy pandas pytest webdataset h5py
+          pip install numpy pandas pytest webdataset h5py requests boto3
+          pip install -e dispatcher/
 
       - name: Run pytest
         run: pytest tests/ -v --ignore=tests/testdata
@@ -179,3 +180,52 @@ jobs:
             tests/pipeline_stub_wds_grouped.nf.test \
             tests/pipeline_stub_clip.nf.test \
             tests/pipeline_stub_multi_slide.nf.test
+
+  # ── TCGA scripts integration: stub pipeline output → append_wds ────────
+  nf-test-stub-tcga:
+    name: nf-test — TCGA scripts integration (stub)
+    runs-on: ubuntu-latest
+
+    env:
+      NXF_ANSI_LOG: false
+      NXF_OPTS: "-Xmx2g"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install h5py numpy pandas webdataset
+          pip install -e dispatcher/
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          nextflow -version
+
+      - uses: nf-core/setup-nf-test@v2
+        with:
+          version: "0.9.5"
+
+      - name: Generate tests/test.csv
+        run: |
+          echo "slide_id,slide_path" > tests/test.csv
+          echo "948176,${GITHUB_WORKSPACE}/tests/testdata/948176.svs" >> tests/test.csv
+
+      - name: Set dummy HF_TOKEN secret for stub run
+        run: nextflow secrets set HF_TOKEN "stub_ci_token_not_real"
+
+      - name: Run TCGA integration stub test
+        run: nf-test test tests/pipeline_stub_tcga.nf.test --profile test_stub

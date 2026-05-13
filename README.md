@@ -1,6 +1,6 @@
 # Mussel-NF pipeline
 
-A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel) (pinned to v1.3.2).
+A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel).
 
 ## Requirements
 
@@ -17,7 +17,7 @@ Two environment files are provided depending on which models you need:
 |---|---|---|
 | `mussel_env.yaml` | `torch-gpu` | All models **except** `googlepath`, `gigapath`, `gigapath_slide` |
 | `mussel_env_tf.yaml` | `tensorflow-gpu` | `googlepath` (Google Path Foundation, TensorFlow-based) |
-| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn + torch 2.11) |
+| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn) |
 
 The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive — they cannot be installed together. Use `-profile conda` with the default `mussel_env.yaml` for most workflows, and switch to the appropriate env file when running `googlepath` or `gigapath`.
 
@@ -46,6 +46,26 @@ The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive 
 
 3. When the execution completes, results will be in `params.outdir` (default: `results/`).
 
+## Continuous Processing (Dispatcher)
+
+For large-scale cohorts (e.g. all TCGA slides, MSK IMPACT), use the **mussel-dispatcher** rather than invoking Nextflow directly. The dispatcher:
+
+- Streams slides from multiple sources (TCGA GDC API, Databricks SQL warehouse, local directories, S3 buckets)
+- Batches slides and dispatches parallel Nextflow runs up to a configurable concurrency limit
+- Tracks all slides and batches in SQLite — safe to kill and restart at any time
+- Runs post-batch hooks to append outputs to [WebDataset](https://github.com/webdataset/webdataset) shards after each batch
+
+```bash
+# Start the dispatcher (streams TCGA slides → Nextflow → WDS shards)
+cd dispatcher/
+python -m mussel_dispatcher tcga_dispatcher.yaml
+
+# Monitor via dashboard
+python -m mussel_dispatcher.dashboard tcga_dispatcher.yaml --port 8050
+```
+
+See [`dispatcher/README.md`](dispatcher/README.md) for full configuration reference, watcher types, and deployment notes. For TCGA-specific details (slide types, GDC inventory, path resolution) see [`dispatcher/docs/tcga.md`](dispatcher/docs/tcga.md).
+
 ## Supported Models
 
 **Patch encoders** (`params.featurize.model_types`):
@@ -61,7 +81,6 @@ The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive 
 | `feather_slide` | `conch1_5` |
 | `chief_slide` | `ctranspath` |
 | `madeleine_slide` | `clip` |
-| `abmil_slide` | (encoder-agnostic — specify patch encoder separately) |
 
 See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 
@@ -112,14 +131,48 @@ Requires a pre-trained `.pkl` classifier. Set `filter_tiles = true` to enable.
 
 #### Segmentation-integrated artifact removal (`params.tiling.remove_artifacts` / `remove_penmarks`)
 
-These options remove artifacts **during tessellation** by refining the tissue mask before patches are extracted. No separate classifier model is needed.
+These options remove artifacts **during tessellation** by refining the tissue mask before patches are extracted. No separate classifier model is needed. Powered by [GrandQC](https://www.nature.com/articles/s41467-024-54769-y) (U-Net, EfficientNet-B0 encoder), which classifies each pixel of the slide thumbnail into 8 tissue categories.
 
-- **`remove_artifacts`**: runs the GrandQC neural artifact remover to exclude ink, air bubbles, and other slide artifacts from the tissue mask
-- **`remove_penmarks`**: detects and excludes pen mark regions before tessellation
-- **`seg_model`**: tissue segmentation backend — `'classic'` (HSV + fixed threshold, default), `'otsu'` (HSV + Otsu automatic threshold), or `'neural'` (DeepLabV3 neural network)
-- **`min_tissue_proportion`**: drop patches where less than this fraction of pixels are tissue (default `0.0`)
-- **`overlap`**: extract overlapping patches (pixels, default `0`)
-- **`slide_mpp_override`**: override the slide's MPP value when metadata is missing or incorrect
+| Parameter | Default | Description |
+|---|---|---|
+| `remove_penmarks` | `true` | Remove pen markings (class 4) and background (class 7). Conservative — safe for all tissue types. |
+| `remove_artifacts` | `false` | **Aggressive mode** — also remove blood (2), necrosis (3), folds (5), and holes (6). May over-remove tissue in CNS or sarcoma slides. |
+| `artifact_exclude_classes` | _(unset)_ | **Override**: explicit list of GrandQC class IDs to remove. Takes precedence over the flags above. |
+| `seg_model` | `'neural'` | Tissue segmentation backend: `'classic'` (HSV + fixed threshold), `'otsu'` (HSV + Otsu), or `'neural'` (DeepLabV3). |
+| `min_tissue_proportion` | `0.0` | Drop patches where less than this fraction of pixels are tissue. |
+| `overlap` | `0` | Extract overlapping patches (pixels). |
+| `slide_mpp_override` | _(unset)_ | Override the slide's MPP when metadata is missing or incorrect. |
+
+**GrandQC class IDs** (for `artifact_exclude_classes`):
+
+| ID | Class | Removed by `remove_penmarks` | Removed by `remove_artifacts` |
+|---|---|---|---|
+| 0 | Glass / clear-slide background | ✗ | ✗ |
+| 1 | Normal tissue | ✗ | ✗ |
+| 2 | Blood / haemorrhage | ✗ | ✓ |
+| 3 | Necrosis | ✗ | ✓ |
+| 4 | Pen marking | ✓ | ✓ |
+| 5 | Fold | ✗ | ✓ |
+| 6 | Hole / physical damage | ✗ | ✓ |
+| 7 | Background | ✓ | ✓ |
+
+**Preset examples** — set in `nextflow.config` or a `--params-file` YAML:
+
+```yaml
+tiling:
+  seg_model: neural
+  remove_penmarks: true            # conservative (default): pen marks + background only
+
+  # remove_artifacts: true         # aggressive: all non-normal-tissue classes
+
+  # artifact_exclude_classes:      # custom: pen marks, folds, holes, background (moderate)
+  #   - 4
+  #   - 5
+  #   - 6
+  #   - 7
+```
+
+**Resilience**: if GrandQC removes more than 90% of tissue (e.g. out-of-distribution slides), the pre-removal mask is used automatically and a warning is logged.
 
 These options can be combined with legacy tile filtering or used independently.
 
@@ -143,7 +196,12 @@ automatically when `params.linear_probe.annotations_csv` is set.
 | Parameter | Description |
 |---|---|
 | `params.linear_probe.annotations_csv` | CSV with `slide_id` and `annotation_bmp_path` columns. Each row maps a slide to a BMP mask where pixel values are annotation class IDs. |
-| `params.linear_probe.annotation_class_mapping_yaml` | YAML mapping BMP pixel values (integers) to class names. Without this, the benchmark is skipped. |
+
+#### Optional inputs
+
+| Parameter | Description |
+|---|---|
+| `params.linear_probe.annotation_class_mapping_yaml` | YAML mapping BMP pixel values (integers) to remapped class IDs. When omitted, raw non-zero BMP pixel values are used directly as class labels — sufficient for most multiclass cases where BMP values already represent the desired class IDs. |
 
 #### Annotation CSV format
 
@@ -154,19 +212,28 @@ TCGA-XX-1234-01Z-00-DX1,/path/to/TCGA-XX-1234.bmp
 
 #### Class mapping YAML format
 
-Pixel values in the BMP map to integer class IDs. The YAML remaps those IDs to named classes.
-Background pixels (value 0) are always excluded.
+Use this when you need to remap BMP pixel values (e.g. collapse multiple classes, exclude specific
+values, or create binary labels). Background pixels (value 0) are always excluded regardless.
 
 ```yaml
-# Binary example: tumour vs. stroma
+# Binary example: remap BMP values 1→class 0, 2→class 1
 1: 0   # annotation ID 1 → class 0 (negative / background)
 2: 1   # annotation ID 2 → class 1 (positive / tumour)
 ```
 
-For multiclass, set `params.linear_probe.multiclass = true` and emit ≥ 3 distinct non-zero class IDs:
+For multiclass with identity mapping (BMP values used as-is), omit the YAML and set
+`params.linear_probe.multiclass = true`:
+
+```bash
+nextflow run main.nf ... \
+  --linear_probe.annotations_csv annotations.csv \
+  --linear_probe.multiclass
+```
+
+Or provide an explicit mapping if you need to remap values:
 
 ```yaml
-# Multiclass example
+# Multiclass example with explicit mapping
 1: 1   # tumour
 2: 2   # stroma
 3: 3   # necrosis
@@ -344,12 +411,25 @@ nextflow run main.nf \
 Integration tests use [nf-test](https://www.nf-test.com) and are run via `make`:
 
 ```bash
-make test                  # run all tests
+make test                  # run all tests (requires GPU)
 make test-standard         # one-step workflow
 make test-two-step         # two-step workflow
 make test-wds              # WebDataset flat sharding
 make test-wds-grouped      # WebDataset grouped sharding (by oncotree_code)
 make test-multi-slide      # multi-slide sample aggregation
+```
+
+Stub tests run without a GPU and are used in CI:
+
+```bash
+make test-stub             # one-step stub
+make test-stub-two-step    # two-step stub
+make test-stub-filter      # two-step + tile filtering stub
+make test-stub-wds         # WebDataset stub
+make test-stub-wds-grouped # WebDataset grouped stub
+make test-stub-clip        # CLIP annotation stub
+make test-stub-multi-slide # multi-slide aggregation stub
+make test-stub-all         # all stubs in one pass
 ```
 
 Extra Nextflow profiles (e.g. `conda`, `slurm,cluster`) can be composed:

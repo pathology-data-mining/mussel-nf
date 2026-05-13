@@ -3,5 +3,5 @@ dependencies:
   - python=3.11.*
   - pip
   - pip:
-    - mussel[torch-gpu] @ git+ssh://git@github.com/pathology-data-mining/Mussel.git@v1.4.0
+    - mussel[torch-gpu] @ git+ssh://git@github.com/pathology-data-mining/Mussel.git@v1.4.1
     - pytest

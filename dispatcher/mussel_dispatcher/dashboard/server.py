@@ -157,12 +157,48 @@ def _build_handler(cfg: Config):
             effective_done = succeeded + in_flight_done
             pct = round(effective_done / total * 100, 1)
 
+        with _db() as conn:
+            tp = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt,
+                       MIN(completed_at) AS oldest,
+                       MAX(completed_at) AS newest
+                FROM slides
+                WHERE status = 'SUCCEEDED'
+                  AND completed_at IS NOT NULL
+                  AND completed_at >= datetime('now', '-6 hours')
+                """
+            ).fetchone()
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM slides WHERE status IN ('PENDING','DISPATCHED')"
+            ).fetchone()[0]
+
+        throughput_per_hour = None
+        eta_seconds = None
+        completed_in_window = tp["cnt"] or 0
+        if completed_in_window >= 2 and tp["oldest"] and tp["newest"]:
+            try:
+                from datetime import datetime as _dt
+                fmt = "%Y-%m-%d %H:%M:%S"
+                t0 = _dt.strptime(tp["oldest"][:19], fmt)
+                t1 = _dt.strptime(tp["newest"][:19], fmt)
+                elapsed = (t1 - t0).total_seconds()
+                if elapsed > 60:
+                    throughput_per_hour = round(completed_in_window / (elapsed / 3600), 1)
+                    eta_seconds = round(remaining / throughput_per_hour * 3600)
+            except Exception:
+                pass
+
         return {
             "counts": counts,
             "total": total,
             "pct_done": pct,
             "running_batches": n_running,
             "blacklisted": n_blacklisted,
+            "throughput_per_hour": throughput_per_hour,
+            "eta_seconds": eta_seconds,
+            "remaining": remaining,
+            "completed_in_window": completed_in_window,
         }
 
     def _api_batches():

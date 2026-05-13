@@ -131,14 +131,48 @@ Requires a pre-trained `.pkl` classifier. Set `filter_tiles = true` to enable.
 
 #### Segmentation-integrated artifact removal (`params.tiling.remove_artifacts` / `remove_penmarks`)
 
-These options remove artifacts **during tessellation** by refining the tissue mask before patches are extracted. No separate classifier model is needed.
+These options remove artifacts **during tessellation** by refining the tissue mask before patches are extracted. No separate classifier model is needed. Powered by [GrandQC](https://www.nature.com/articles/s41467-024-54769-y) (U-Net, EfficientNet-B0 encoder), which classifies each pixel of the slide thumbnail into 8 tissue categories.
 
-- **`remove_artifacts`**: runs the GrandQC neural artifact remover to exclude ink, air bubbles, and other slide artifacts from the tissue mask
-- **`remove_penmarks`**: detects and excludes pen mark regions before tessellation
-- **`seg_model`**: tissue segmentation backend — `'classic'` (HSV + fixed threshold, default), `'otsu'` (HSV + Otsu automatic threshold), or `'neural'` (DeepLabV3 neural network)
-- **`min_tissue_proportion`**: drop patches where less than this fraction of pixels are tissue (default `0.0`)
-- **`overlap`**: extract overlapping patches (pixels, default `0`)
-- **`slide_mpp_override`**: override the slide's MPP value when metadata is missing or incorrect
+| Parameter | Default | Description |
+|---|---|---|
+| `remove_penmarks` | `true` | Remove pen markings (class 4) and background (class 7). Conservative — safe for all tissue types. |
+| `remove_artifacts` | `false` | **Aggressive mode** — also remove blood (2), necrosis (3), folds (5), and holes (6). May over-remove tissue in CNS or sarcoma slides. |
+| `artifact_exclude_classes` | _(unset)_ | **Override**: explicit list of GrandQC class IDs to remove. Takes precedence over the flags above. |
+| `seg_model` | `'neural'` | Tissue segmentation backend: `'classic'` (HSV + fixed threshold), `'otsu'` (HSV + Otsu), or `'neural'` (DeepLabV3). |
+| `min_tissue_proportion` | `0.0` | Drop patches where less than this fraction of pixels are tissue. |
+| `overlap` | `0` | Extract overlapping patches (pixels). |
+| `slide_mpp_override` | _(unset)_ | Override the slide's MPP when metadata is missing or incorrect. |
+
+**GrandQC class IDs** (for `artifact_exclude_classes`):
+
+| ID | Class | Removed by `remove_penmarks` | Removed by `remove_artifacts` |
+|---|---|---|---|
+| 0 | Glass / clear-slide background | ✗ | ✗ |
+| 1 | Normal tissue | ✗ | ✗ |
+| 2 | Blood / haemorrhage | ✗ | ✓ |
+| 3 | Necrosis | ✗ | ✓ |
+| 4 | Pen marking | ✓ | ✓ |
+| 5 | Fold | ✗ | ✓ |
+| 6 | Hole / physical damage | ✗ | ✓ |
+| 7 | Background | ✓ | ✓ |
+
+**Preset examples** — set in `nextflow.config` or a `--params-file` YAML:
+
+```yaml
+tiling:
+  seg_model: neural
+  remove_penmarks: true            # conservative (default): pen marks + background only
+
+  # remove_artifacts: true         # aggressive: all non-normal-tissue classes
+
+  # artifact_exclude_classes:      # custom: pen marks, folds, holes, background (moderate)
+  #   - 4
+  #   - 5
+  #   - 6
+  #   - 7
+```
+
+**Resilience**: if GrandQC removes more than 90% of tissue (e.g. out-of-distribution slides), the pre-removal mask is used automatically and a warning is logged.
 
 These options can be combined with legacy tile filtering or used independently.
 

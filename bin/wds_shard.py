@@ -99,11 +99,13 @@ def create_shards(
             for i in range(start, end):
                 slide_id = slide_ids[i]
 
-                # features.npy — convert .pt tensor to float32 numpy
+                # features.npy — convert .pt tensor to float32 numpy.
+                # Use .to(float32) before .numpy() so bfloat16/float16 tensors
+                # are handled safely (numpy has no native bfloat16 type).
                 tensor = torch.load(pt_files[i], weights_only=True)
                 if tensor.ndim == 1:
                     tensor = tensor.unsqueeze(0)
-                _add_npy(tar, f"{slide_id}.features.npy", _npy_bytes(tensor.numpy().astype(np.float32)))
+                _add_npy(tar, f"{slide_id}.features.npy", _npy_bytes(tensor.to(torch.float32).numpy()))
 
                 # coords.npy — extract tile coordinates from .h5 (optional)
                 if h5_files is not None:

@@ -83,7 +83,11 @@ def _load_features(pt_path: Path) -> np.ndarray:
     tensor = torch.load(pt_path, weights_only=True)
     if tensor.ndim == 1:
         tensor = tensor.unsqueeze(0)
-    return tensor.numpy().astype(np.float32)
+    if tensor.dtype == torch.bfloat16:
+        # numpy has no native bfloat16; store raw bits as uint16
+        # Paladin's WDS loader detects uint16 and reinterprets as bfloat16
+        return tensor.view(torch.int16).numpy().view(np.uint16)
+    return tensor.numpy()
 
 
 def _load_coords(h5_path: Path) -> np.ndarray | None:

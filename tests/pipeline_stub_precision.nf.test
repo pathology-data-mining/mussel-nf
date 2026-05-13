@@ -1,0 +1,45 @@
+nextflow_pipeline {
+    name   "MUSSEL pipeline — precision benchmarking stub"
+    script "../main.nf"
+    profile "test_stub_precision"
+
+    options "-stub"
+
+    test("benchmark_precisions triggers CONVERT_FEATURES_PRECISION and publishes suffixed dirs") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            // Canonical float32 output still published under original model name
+            assert path("${outputDir}/features/resnet50/948176.features.h5").exists()
+
+            // Converted precision variants published under suffixed dirs
+            assert path("${outputDir}/features/resnet50_float16/948176.features.h5").exists()
+            assert path("${outputDir}/features/resnet50_bfloat16/948176.features.h5").exists()
+        }
+    }
+
+    test("production precision override publishes only to canonical model dir") {
+        when {
+            params {
+                outdir = "${outputDir}"
+                featurize {
+                    benchmark_precisions = null
+                    embedding_precision  = "float16"
+                }
+            }
+        }
+        then {
+            assert workflow.success
+
+            // With embedding_precision="float16" and no benchmark_precisions,
+            // only the canonical dir should be present — no suffixed variant.
+            assert path("${outputDir}/features/resnet50/948176.features.h5").exists()
+            assert !path("${outputDir}/features/resnet50_float16/948176.features.h5").exists()
+        }
+    }
+}

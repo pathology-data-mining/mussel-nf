@@ -1,3 +1,5 @@
+include { resolvePrecision } from './utils'
+
 process FEATURIZE_BATCH {
     label "bigTask"
     label "gpuTask"
@@ -74,6 +76,10 @@ process FEATURIZE_BATCH {
         ? params.featurize.model_batch_sizes[mtype.toUpperCase()]
         : (params.featurize.batch_size ?: 64)
 
+    // Resolve embedding precision: per-model override takes precedence over global default
+    precision = resolvePrecision(model_type)
+    embedding_precision_str = (precision != 'float32') ? "embedding_precision=${precision}" : ""
+
     """
     extract_features \
         patch_h5_paths='[${patch_h5_paths_str}]' \
@@ -86,7 +92,8 @@ process FEATURIZE_BATCH {
         batch_size=${batch_size} \
         slide_batch_size=${slide_batch_size} \
         ${slide_model_str} \
-        ${aggregation_str}
+        ${aggregation_str} \
+        ${embedding_precision_str}
     """
 
     stub:

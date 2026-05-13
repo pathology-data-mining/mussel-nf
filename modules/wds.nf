@@ -17,7 +17,7 @@
  * WDS format (paladin-compatible)
  * --------------------------------
  *   Each tar entry consists of:
- *     {slide_id}.features.npy  — float32 feature array (converted from .pt)
+ *     {slide_id}.features.npy  — feature array at source dtype: float32, float16, or uint16 (bfloat16 raw bits)
  *     {slide_id}.coords.npy    — int64 tile coords extracted from .h5 (when shard_h5=true)
  *   Shards are deterministically ordered by slide_id within each group.
  *   Directly consumable by paladin and the `webdataset` Python library.

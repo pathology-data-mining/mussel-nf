@@ -105,6 +105,12 @@ process TESSELLATE_FEATURIZE_BATCH {
         ? params.featurize.model_batch_sizes[model_type.toUpperCase()]
         : (params.featurize.batch_size ?: 64)
 
+    // Resolve embedding precision: per-model override takes precedence over global default
+    precision = (params.featurize.model_precision_overrides && params.featurize.model_precision_overrides[model_type])
+        ? params.featurize.model_precision_overrides[model_type]
+        : (params.featurize.embedding_precision ?: 'float32')
+    embedding_precision_str = (precision != 'float32') ? "embedding_precision=${precision}" : ""
+
     // Use seg_config group if specified, otherwise use individual parameters
     seg_config_str = params.tiling.seg_config_group ? "seg_config=${params.tiling.seg_config_group}" : ""
 
@@ -151,7 +157,8 @@ process TESSELLATE_FEATURIZE_BATCH {
         ${output_grid_mask_suffix_str} \
         ${output_thumbnail_suffix_str} \
         ${output_png_dir_suffix_str} \
-        ${save_h5_param}
+        ${save_h5_param} \
+        ${embedding_precision_str}
 
     # When a slide encoder is used, the Mussel CLI writes outputs into model-named
     # subdirs (e.g. TITAN_SLIDE/pt/, CONCH1_5/pt/) instead of flat pt/.
@@ -196,10 +203,15 @@ process TESSELLATE_FEATURIZE_BATCH {
         torch.save(torch.zeros(1, n_feat), f"pt/{sid}.features.pt")
         with h5py.File(f"h5/{sid}.features.h5", "w") as f:
             f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
+            if not is_slide_model:
+                ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+                ds.attrs["patch_size"] = 512
         if is_slide_model:
             torch.save(torch.zeros(1, n_feat), f"pt/{sid}.patch_features.pt")
             with h5py.File(f"h5/{sid}.patch_features.h5", "w") as f:
                 f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
+                ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
+                ds.attrs["patch_size"] = 512
         with h5py.File(f"tile_h5/{sid}.patch.h5", "w") as f:
             ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
             ds.attrs["native_mpp"] = 0.5

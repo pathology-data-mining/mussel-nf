@@ -185,6 +185,63 @@ Default annotation classes are set via `params.clip.default_classes`, or per onc
 `params.clip.oncotree_class_csv` (two columns: `oncotree_code`, `class`). The sample sheet
 `oncotree_code` column is used to look up classes per slide.
 
+### Precision configuration
+
+By default, features are saved as `float32`. Lower precisions halve storage size and can accelerate downstream inference.
+
+#### Production precision
+
+Set a global dtype for all models:
+
+```bash
+nextflow run main.nf ... --featurize.embedding_precision float16
+```
+
+Or override per model in `nextflow.config`:
+
+```groovy
+featurize {
+    embedding_precision = "float32"    // global default
+    model_precision_overrides {
+        optimus  = "float16"
+        virchow2 = "bfloat16"
+    }
+}
+```
+
+Supported values: `"float32"` (default), `"float16"`, `"bfloat16"`.
+
+> **Note:** Multi-slide sample aggregation (`MERGE_SAMPLE_FEATURES`) currently requires `float32`. Non-float32 production precision is unsupported for samples with multiple slides.
+
+#### Precision benchmarking
+
+To measure how lower precision affects linear probe accuracy without re-running GPU inference, use `benchmark_precisions`. The pipeline casts existing `float32` features to each listed precision via a CPU-only conversion step, then feeds all variants into the linear probe workflow for side-by-side comparison.
+
+```bash
+nextflow run main.nf \
+  -profile cluster,apptainer \
+  --samples_csv samples.csv \
+  --linear_probe.annotations_csv annotations.csv \
+  --linear_probe.annotation_class_mapping_yaml class_mapping.yaml \
+  --featurize.model_types "optimus" \
+  --featurize.benchmark_precisions '["float16", "bfloat16"]'
+```
+
+This produces three sets of linear probe results:
+
+```
+results/
+  features/optimus/           # Original float32 features
+  features/optimus_float16/   # Cast to float16
+  features/optimus_bfloat16/  # Cast to bfloat16
+  linear_probe_benchmark/
+    optimus/                  # float32 baseline
+    optimus_float16/          # float16 comparison
+    optimus_bfloat16/         # bfloat16 comparison
+    summary.csv               # All variants side-by-side
+    summary.png
+```
+
 ### Linear probe benchmarking
 
 Linear probe benchmarking trains logistic regression classifiers on top of frozen patch-level

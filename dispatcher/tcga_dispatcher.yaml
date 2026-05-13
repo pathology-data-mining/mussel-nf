@@ -18,10 +18,10 @@ nextflow_params_file: ../tcga_params.yaml
 nextflow_version: "26.04.0"
 tower_endpoint: "http://localhost:8050"  # local Tower shim — NF pushes real-time progress here
 
-# Run up to 2 Nextflow jobs simultaneously
+# Run up to 3 Nextflow jobs simultaneously
 max_concurrent_runs: 3
 
-# Dispatch when 50 slides have accumulated, or after 10 minutes
+# Dispatch when 500 slides have accumulated, or after 10 minutes
 batch_size: 500
 min_batch_size: 1
 max_wait_seconds: 600

@@ -6,7 +6,7 @@ tiling:
   seg_model: "neural"
   remove_artifacts: false
   remove_penmarks: true
-  artifact_exclude_classes: [4, 5, 6, 7]  # moderate: pen marks, folds, holes, background
+  artifact_exclude_classes: [4, 7]  # conservative: pen marks only
 
 featurize:
   model_types:

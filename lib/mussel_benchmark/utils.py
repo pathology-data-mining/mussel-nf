@@ -1,11 +1,4 @@
-#!/usr/bin/env python3
-"""Shared utilities for mussel-nf benchmark summarisation scripts.
-
-Importable from any script in bin/ via:
-    import sys, pathlib
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-    from benchmark_utils import _safe, extract_metrics
-"""
+"""Common helpers shared across benchmark summarisation scripts."""
 
 import math
 

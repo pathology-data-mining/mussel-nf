@@ -203,7 +203,16 @@ def _s3_download(s3_uri: str, local_path: Path, max_concurrency: int = 4) -> boo
         )
         return True
     except ClientError as exc:
-        if exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
+        code = exc.response["Error"]["Code"]
+        if code in ("404", "NoSuchKey"):
+            return False
+        # Some S3-compatible endpoints (e.g. ECS) return 403/AccessDenied for
+        # non-existent objects when the bucket exists but the key does not.
+        # Treat it as "not found" so _load_index returns {} and the upload
+        # proceeds — the upload will fail with a proper error if creds are wrong.
+        if code in ("403", "AccessDenied"):
+            log.warning("Got %s on %s — treating as not found (may indicate wrong credentials)",
+                        code, s3_uri)
             return False
         raise
 

@@ -1,6 +1,6 @@
 {
   "name": "impact-metadata-sync",
-  "description": "Merge IMPACT slide inventory + feature extraction status Parquet into the cdsi_prod.pathology_data_mining.impact_slide_embeddings_v2 Delta table. Triggered by mussel_dispatcher.impact.sync_databricks after each dispatcher batch.",
+  "description": "Merge IMPACT slide inventory + feature extraction status Parquet into the your_catalog.your_schema.impact_slide_embeddings Delta table. Triggered by mussel_dispatcher.impact.sync_databricks after each dispatcher batch.",
   "tasks": [
     {
       "task_key": "merge_metadata",
@@ -8,8 +8,8 @@
       "notebook_task": {
         "notebook_path": "/Users/limr@mskcc.org/mussel-nf/notebooks/metadata_sync",
         "base_parameters": {
-          "volume_folder": "/Volumes/cdsi_prod/pathology_data_mining/impact_dispatcher",
-          "target_table": "cdsi_prod.pathology_data_mining.impact_slide_embeddings_v2",
+          "volume_folder": "/Volumes/your_catalog/your_schema/impact_dispatcher",
+          "target_table": "your_catalog.your_schema.impact_slide_embeddings",
           "merge_key": "slide_id",
           "filename_prefix": "impact_inventory_"
         },

@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # Reads the latest TCGA metadata Parquet from a Unity Catalog volume and
 # MERGEs it into the Delta table
-#   cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
+#   your_catalog.your_schema.tcga_slide_embeddings_v2
 #
 # One row per (file_id, model) — slides appear once per feature model
 # (e.g. hoptimus1, titan_slide, uni2h) so the model column is part of the
@@ -14,9 +14,9 @@
 #
 # Parameters (Databricks job widgets / task values):
 #   volume_folder   UC volume folder containing Parquet files
-#                   e.g. /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
+#                   e.g. /Volumes/your_catalog/your_schema/tcga_dispatcher
 #   target_table    Delta table to MERGE INTO
-#                   default: cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
+#                   default: your_catalog.your_schema.tcga_slide_embeddings_v2
 # ---------------------------------------------------------------------------
 
 # COMMAND ----------
@@ -37,12 +37,12 @@ from datetime import datetime, timezone
 
 dbutils.widgets.text(  # noqa: F821
     "volume_folder",
-    "/Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher",
+    "/Volumes/your_catalog/your_schema/tcga_dispatcher",
     "UC volume folder (Parquet files)",
 )
 dbutils.widgets.text(  # noqa: F821
     "target_table",
-    "cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2",
+    "your_catalog.your_schema.tcga_slide_embeddings",
     "Target Delta table",
 )
 

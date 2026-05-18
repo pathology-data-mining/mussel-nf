@@ -8,15 +8,15 @@ Sync TCGA slide metadata and feature extraction status to Databricks for downstr
 [mussel-dispatcher: batch succeeds]
     → post_batch_hook: tcga_sync_databricks.py
         1. joins tcga_status.csv + tcga_inventory.csv → Parquet
-        2. uploads  /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher/
+        2. uploads  /Volumes/your_catalog/your_schema/tcga_dispatcher/
                         tcga_inventory_<YYYYMMDDTHHMMSS>.parquet
         3. triggers Databricks job → notebooks/tcga_metadata_sync.py
-                MERGE INTO cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
+                MERGE INTO your_catalog.your_schema.tcga_slide_embeddings_v2
 ```
 
 ## Delta Table
 
-**Target:** `cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2`  
+**Target:** `your_catalog.your_schema.tcga_slide_embeddings_v2`  
 **MERGE key:** `(file_id, model)` — one row per slide × feature model (e.g. `hoptimus1`, `titan_slide`)
 
 Schema is inferred from the Parquet on first run (table auto-created if absent). Key columns:
@@ -38,7 +38,7 @@ Schema is inferred from the Parquet on first run (table auto-created if absent).
 | `sample_type` | inventory | `Primary Tumor`, `Solid Tissue Normal`, … |
 | *(+ other clinical columns)* | inventory | gender, age, vital_status, morphology, … |
 
-An audit table `cdsi_prod.pathology_data_mining.tcga_sync_audit` is automatically maintained with one row per sync run (source file, row counts, timestamp).
+An audit table `your_catalog.your_schema.tcga_sync_audit` is automatically maintained with one row per sync run (source file, row counts, timestamp).
 
 ## Setup
 
@@ -47,7 +47,7 @@ An audit table `cdsi_prod.pathology_data_mining.tcga_sync_audit` is automaticall
 In Databricks SQL or a notebook:
 
 ```sql
-CREATE VOLUME IF NOT EXISTS cdsi_prod.pathology_data_mining.tcga_dispatcher;
+CREATE VOLUME IF NOT EXISTS your_catalog.your_schema.tcga_dispatcher;
 ```
 
 ### 2. Import the notebook
@@ -78,9 +78,9 @@ Update `notebook_path` in the JSON if your workspace import path differs.
 In `dispatcher/tcga_dispatcher.yaml`, set:
 
 ```yaml
-databricks_volume_path: /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
+databricks_volume_path: /Volumes/your_catalog/your_schema/tcga_dispatcher
 databricks_job_id: "<job-id-from-step-3>"
-databricks_table: cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
+databricks_table: your_catalog.your_schema.tcga_slide_embeddings_v2
 ```
 
 Export credentials before starting the dispatcher:
@@ -98,7 +98,7 @@ After the next successful batch, check the table in Databricks SQL:
 
 ```sql
 SELECT status, COUNT(*) AS n
-FROM cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
+FROM your_catalog.your_schema.tcga_slide_embeddings_v2
 GROUP BY status
 ORDER BY status;
 ```
@@ -109,8 +109,8 @@ ORDER BY status;
 python scripts/tcga/tcga_sync_databricks.py \
     --status  dispatcher/tcga_status.csv \
     --inventory dispatcher/tcga_inventory.csv \
-    --volume-folder /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher \
-    --table cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2 \
+    --volume-folder /Volumes/your_catalog/your_schema/tcga_dispatcher \
+    --table your_catalog.your_schema.tcga_slide_embeddings_v2 \
     --job-id <job-id> \
     --verbose
 ```
@@ -122,7 +122,7 @@ The Databricks notebook (`notebooks/tcga_metadata_sync.py`) accepts two paramete
 
 | Parameter | Default | Description |
 |---|---|---|
-| `volume_folder` | `/Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher` | UC volume folder containing Parquet files |
-| `target_table` | `cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2` | Delta table to MERGE INTO |
+| `volume_folder` | `/Volumes/your_catalog/your_schema/tcga_dispatcher` | UC volume folder containing Parquet files |
+| `target_table` | `your_catalog.your_schema.tcga_slide_embeddings_v2` | Delta table to MERGE INTO |
 
 The notebook always picks the **lexicographically latest** `tcga_inventory_*.parquet` file in the folder.

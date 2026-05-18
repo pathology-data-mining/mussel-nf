@@ -13,7 +13,7 @@
 #
 # Parameters (Databricks job widgets / task values):
 #   volume_folder     UC volume folder containing Parquet files
-#                     e.g. /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
+#                     e.g. /Volumes/your_catalog/your_schema/tcga_dispatcher
 #   target_table      Delta table to MERGE INTO
 #   merge_key         Column used as the row identifier in the MERGE condition
 #                     default: "slide_id"
@@ -39,12 +39,12 @@ from datetime import datetime, timezone
 
 dbutils.widgets.text(  # noqa: F821
     "volume_folder",
-    "/Volumes/cdsi_prod/pathology_data_mining/dispatcher",
+    "/Volumes/your_catalog/your_schema/dispatcher",
     "UC volume folder (Parquet files)",
 )
 dbutils.widgets.text(  # noqa: F821
     "target_table",
-    "cdsi_prod.pathology_data_mining.slide_embeddings",
+    "your_catalog.your_schema.slide_embeddings",
     "Target Delta table",
 )
 dbutils.widgets.text(  # noqa: F821

@@ -191,7 +191,7 @@ class DatabricksWatcher(threading.Thread):
 
     Produces slide records with:
         slide_id      → m.image_id
-        slide_path    → i.path  (S3 URI, e.g. s3://mskmind-bkt/reef-slides/1234.svs)
+        slide_path    → i.path  (S3 URI, e.g. s3://your-bucket/slides/1234.svs)
         oncotree_code → m.ONCOTREE_CODE
 
     Credentials are resolved by the Databricks SDK in priority order:

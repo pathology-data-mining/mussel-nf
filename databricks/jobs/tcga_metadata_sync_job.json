@@ -1,6 +1,6 @@
 {
   "name": "tcga-metadata-sync",
-  "description": "Merge TCGA slide inventory + feature extraction status Parquet into the cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2 Delta table. Triggered by tcga_sync_databricks.py after each dispatcher batch.",
+  "description": "Merge TCGA slide inventory + feature extraction status Parquet into the your_catalog.your_schema.tcga_slide_embeddings Delta table. Triggered by tcga_sync_databricks.py after each dispatcher batch.",
   "tasks": [
     {
       "task_key": "merge_metadata",
@@ -8,8 +8,8 @@
       "notebook_task": {
         "notebook_path": "/Users/limr@mskcc.org/mussel-nf/notebooks/metadata_sync",
         "base_parameters": {
-          "volume_folder": "/Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher",
-          "target_table": "cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2",
+          "volume_folder": "/Volumes/your_catalog/your_schema/tcga_dispatcher",
+          "target_table": "your_catalog.your_schema.tcga_slide_embeddings",
           "merge_key": "file_id",
           "filename_prefix": "tcga_inventory_"
         },

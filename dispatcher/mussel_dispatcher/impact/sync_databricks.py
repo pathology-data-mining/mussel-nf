@@ -29,7 +29,7 @@ Usage
         --wds-manifest /path/to/wds_manifest.csv \\
         --model-types titan_slide,hoptimus1 \\
         --volume-folder /Volumes/catalog/schema/impact_dispatcher \\
-        [--table cdsi_prod.pathology_data_mining.impact_slide_embeddings_v2] \\
+        [--table your_catalog.your_schema.impact_slide_embeddings_v2] \\
         [--job-id 12345]
 """
 

@@ -30,3 +30,4 @@ dispatcher/__pycache__
 dispatcher/mussel_dispatcher/**/__pycache__
 dispatcher/tests/__pycache__
 lib/mussel_benchmark/__pycache__/
+tcga_params.yaml

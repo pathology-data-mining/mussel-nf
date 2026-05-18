@@ -2148,6 +2148,147 @@ class TestVerifyWdsCoverage:
 
 
 # ===========================================================================
+# append_wds manifest write — already-indexed slides
+# ===========================================================================
+
+class TestAppendWdsManifest:
+    """Tests for the manifest write path in append_wds().
+
+    These cover the bug where slides already present in the WDS S3 index were
+    silently omitted from the local manifest CSV when n_appended == 0.  After
+    the fix, batch slides confirmed in the index are always written to the
+    manifest so that _verify_wds_coverage does not reset them to PENDING.
+    """
+
+    def _fake_index(self, slide_ids, project="PROJ"):
+        return {
+            sid: {"project_id": project, "shard_file": f"{project}/000000.tar",
+                  "native_mpp": None, "mpp_is_fallback": None}
+            for sid in slide_ids
+        }
+
+    def test_already_indexed_slides_written_to_manifest(self, tmp_path, monkeypatch):
+        """When all batch slides are already in the WDS index (n_appended==0),
+        they must still be recorded in manifest_csv."""
+        import pandas as pd
+        from mussel_dispatcher import wds as wds_mod
+
+        slide_ids = {"A", "B"}
+        fake_index = self._fake_index(slide_ids)
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: dict(fake_index))
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        # No .pt files — slides are already indexed, nothing to append.
+
+        inv = pd.DataFrame({"file_name": ["A.svs", "B.svs"], "project_id": ["PROJ", "PROJ"]})
+        manifest_csv = tmp_path / "wds_manifest.csv"
+
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter=slide_ids,
+            manifest_csv=manifest_csv,
+        )
+
+        assert manifest_csv.exists(), "manifest_csv was not created"
+        with open(manifest_csv, newline="") as f:
+            rows = {r["slide_id"] for r in csv.DictReader(f)}
+        assert rows == slide_ids, f"expected {slide_ids} in manifest, got {rows}"
+
+    def test_mixed_new_and_already_indexed_both_written(self, tmp_path, monkeypatch):
+        """When some slides are new and some are already indexed, all appear in
+        manifest_csv after append_wds."""
+        import pandas as pd
+        import torch
+        from mussel_dispatcher import wds as wds_mod
+
+        already = {"A"}
+        new_slide = "B"
+        fake_index = self._fake_index(already)
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: dict(fake_index))
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+
+        # Provide a real .pt file for the new slide so append_wds can load it.
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        pt_file = pt_dir / f"{new_slide}.features.pt"
+        torch.save(torch.zeros(1, 4), pt_file)
+
+        inv = pd.DataFrame(
+            {"file_name": ["A.svs", "B.svs"], "project_id": ["PROJ", "PROJ"]}
+        )
+        manifest_csv = tmp_path / "wds_manifest.csv"
+
+        # Mock ShardWriter so no real S3 writes occur.
+        mock_writer = MagicMock()
+        mock_writer.append.return_value = "000000.tar"
+        monkeypatch.setattr(wds_mod, "_ShardWriter", lambda **kw: mock_writer)
+
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter={"A", "B"},
+            manifest_csv=manifest_csv,
+        )
+
+        assert manifest_csv.exists(), "manifest_csv was not created"
+        with open(manifest_csv, newline="") as f:
+            rows = {r["slide_id"] for r in csv.DictReader(f)}
+        assert "A" in rows, "already-indexed slide A missing from manifest"
+        assert "B" in rows, "newly-appended slide B missing from manifest"
+
+    def test_no_slide_id_filter_already_indexed_not_written(self, tmp_path, monkeypatch):
+        """Without slide_id_filter, already-indexed slides are NOT re-written to
+        manifest (only newly appended slides are recorded)."""
+        import pandas as pd
+        from mussel_dispatcher import wds as wds_mod
+
+        fake_index = self._fake_index({"A", "B"})
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: dict(fake_index))
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        inv = pd.DataFrame({"file_name": ["A.svs"], "project_id": ["PROJ"]})
+        manifest_csv = tmp_path / "wds_manifest.csv"
+
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter=None,  # no filter — already-indexed slides stay out of manifest
+            manifest_csv=manifest_csv,
+        )
+
+        # No new slides appended and no filter → nothing written to manifest
+        if manifest_csv.exists():
+            with open(manifest_csv, newline="") as f:
+                rows = list(csv.DictReader(f))
+            assert rows == [], f"expected empty manifest, got {rows}"
+
+
+# ===========================================================================
 # S3Watcher._scan / _in_progress_keys
 # ===========================================================================
 

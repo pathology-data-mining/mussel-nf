@@ -235,9 +235,8 @@ def _build_handler(cfg: Config):
         if completed_in_window >= 2 and tp["oldest"] and tp["newest"]:
             try:
                 from datetime import datetime as _dt
-                fmt = "%Y-%m-%d %H:%M:%S"
-                t0 = _dt.strptime(tp["oldest"][:19], fmt)
-                t1 = _dt.strptime(tp["newest"][:19], fmt)
+                t0 = _dt.fromisoformat(tp["oldest"])
+                t1 = _dt.fromisoformat(tp["newest"])
                 elapsed = (t1 - t0).total_seconds()
                 if elapsed > 60:
                     throughput_per_hour = round(completed_in_window / (elapsed / 3600), 1)

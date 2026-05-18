@@ -63,6 +63,7 @@ workflow {
         | LINEAR_PROBE_BENCHMARK
 
     LINEAR_PROBE_BENCHMARK.out.results_json
-        | collect(flat: false)
+        .join(LINEAR_PROBE_BENCHMARK.out.clf_report_test, by: 0)
+        .collect(flat: false)
         | SUMMARIZE_LINEAR_PROBE
 }

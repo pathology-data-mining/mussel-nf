@@ -193,10 +193,8 @@ def _build_handler(cfg: Config):
         wds_done = min(wds_counts.get(m, 0) for m in tcga_watcher.wds_destinations) if (
             tcga_watcher and tcga_watcher.wds_destinations and wds_counts
         ) else succeeded
-        # Total done in slide×model pairs for the percentage denominator
-        wds_done_pairs = sum(wds_counts.values()) if wds_counts else succeeded
-
-        pct = round(wds_done_pairs / true_total * 100, 1) if true_total else 0
+        # pct based on unique slides done (all models complete) vs inventory
+        pct = min(100.0, round(wds_done / _inventory_total * 100, 1)) if _inventory_total else 0
 
         with _db() as conn:
             running_rows = conn.execute(
@@ -210,7 +208,7 @@ def _build_handler(cfg: Config):
         # Note: no in-flight adjustment — WDS manifest is already authoritative for completed
         # slides, so adding in-flight progress would double-count slides already in WDS.
 
-        pct = min(100.0, round(wds_done_pairs / true_total * 100, 1)) if true_total else 0
+        pct = min(100.0, round(wds_done / _inventory_total * 100, 1)) if _inventory_total else 0
 
         with _db() as conn:
             tp = conn.execute(
@@ -249,8 +247,7 @@ def _build_handler(cfg: Config):
 
         return {
             "counts": counts,
-            "total": true_total,
-            "inventory_total": _inventory_total,
+            "total": _inventory_total,
             "wds_done": wds_done,
             "pct_done": pct,
             "running_batches": n_running,

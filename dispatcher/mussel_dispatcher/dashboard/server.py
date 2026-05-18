@@ -352,16 +352,6 @@ def _build_handler(cfg: Config):
     def _api_wds():
         import glob as _glob
 
-        # SUCCEEDED + DISPATCHED count from DB — denominator for WDS % coverage.
-        with _db() as conn:
-            db_succeeded = conn.execute(
-                "SELECT COUNT(*) FROM slides WHERE status='SUCCEEDED'"
-            ).fetchone()[0]
-            db_dispatched = conn.execute(
-                "SELECT COUNT(*) FROM slides WHERE status='DISPATCHED'"
-            ).fetchone()[0]
-        db_total_expected = db_succeeded + db_dispatched
-
         # WDS manifest counts + per-shard distribution
         wds_counts: dict = {}
         shard_slide_counts: dict = {}  # model → {shard_path: slide_count}
@@ -376,7 +366,7 @@ def _build_handler(cfg: Config):
                             shard_slide_counts[model] = {}
                         shard_slide_counts[model][shard] = shard_slide_counts[model].get(shard, 0) + 1
             except Exception as exc:
-                return {"models": {}, "total": 0, "db_succeeded": db_succeeded, "error": str(exc)}
+                return {"models": {}, "total": 0, "error": str(exc)}
 
         # Local .pt file counts per model (fast glob; shows cleanup status)
         local_pt: dict = {}
@@ -425,7 +415,7 @@ def _build_handler(cfg: Config):
                 }
             models[m] = {
                 "slides": wds_slides,
-                "gap": max(0, db_total_expected - wds_slides),
+                "gap": max(0, _inventory_total - wds_slides),
                 "shards": cached_s3.get(m, {}).get("shards", 0),
                 "manifest_shards": manifest_shards,
                 "shard_stats": shard_stats,
@@ -433,8 +423,7 @@ def _build_handler(cfg: Config):
                 "error": cached_s3.get(m, {}).get("error"),
             }
         return {"models": models, "total": sum(wds_counts.values()),
-                "db_succeeded": db_succeeded, "db_dispatched": db_dispatched,
-                "db_total_expected": db_total_expected}
+                "inventory_total": _inventory_total}
 
     class Handler(_TowerHandlerMixin, BaseHTTPRequestHandler):
         # Expose registry and router so tests and external callers can inspect Tower state.

@@ -201,7 +201,7 @@ def _build_handler(cfg: Config):
                 "SELECT batch_id, log_path, slide_count FROM batches WHERE status='RUNNING'"
             ).fetchall()
             n_blacklisted = conn.execute(
-                "SELECT COUNT(*) FROM slides WHERE fail_count >= 100"
+                f"SELECT COUNT(*) FROM slides WHERE fail_count >= {cfg.max_slide_retries}"
             ).fetchone()[0]
 
         n_running = len(running_rows)

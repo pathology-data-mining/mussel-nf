@@ -72,6 +72,7 @@ jobs:
 
       - name: Run linear probe integration test
         run: |
+          source $MUSSEL_VENV/bin/activate
           nf-test test tests/linear_probe.nf.test --profile test_linear_probe
 
   # ── Main pipeline stub test (no GPU, no mussel CLI) ───────────────────────

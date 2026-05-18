@@ -142,7 +142,7 @@ workflow {
     }
 
 
-    tmpdir = "${params.outdir}/tmp"
+    tmpdir = "${params.outdir}/tmp/${timestamp}"
     new File(tmpdir).mkdirs()
     Channel.topic('slide_meta')
         .map { it[0..2] }

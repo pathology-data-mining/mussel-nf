@@ -66,6 +66,15 @@ class StateStore:
         ).fetchone()
         if not has_col:
             conn.execute("ALTER TABLE slides ADD COLUMN oncotree_code TEXT NOT NULL DEFAULT ''")
+        # Migrate existing DBs where batches column was named nf_session_id instead of session_id.
+        has_session_id = conn.execute(
+            "SELECT name FROM pragma_table_info('batches') WHERE name='session_id'"
+        ).fetchone()
+        has_nf_session_id = conn.execute(
+            "SELECT name FROM pragma_table_info('batches') WHERE name='nf_session_id'"
+        ).fetchone()
+        if has_nf_session_id and not has_session_id:
+            conn.execute("ALTER TABLE batches RENAME COLUMN nf_session_id TO session_id")
         conn.commit()
 
     # -----------------------------------------------------------------------
@@ -352,3 +361,64 @@ class StateStore:
             "SELECT batch_id, work_dir FROM batches WHERE status IN ('SUCCEEDED','FAILED') AND work_dir IS NOT NULL"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_throughput_stats(self, window_hours: float = 6.0) -> dict:
+        """Return slide throughput stats based on recently completed slides.
+
+        Looks at slides that completed within the last *window_hours* and
+        computes wall-clock throughput (slides per hour) as:
+            count / (max(completed_at) - min(completed_at))
+
+        Returns a dict with keys:
+            completed_in_window  – slide count used for the calculation
+            window_hours         – actual elapsed hours in the observation window
+            throughput_per_hour  – slides/hour (float), or None if insufficient data
+            eta_seconds          – seconds until all remaining slides finish, or None
+            remaining            – PENDING + DISPATCHED slide count
+        """
+        row = self._conn().execute(
+            """
+            SELECT
+                COUNT(*) AS cnt,
+                MIN(completed_at) AS oldest,
+                MAX(completed_at) AS newest
+            FROM slides
+            WHERE status = 'SUCCEEDED'
+              AND completed_at IS NOT NULL
+              AND completed_at >= datetime('now', :neg_window)
+            """,
+            {"neg_window": f"-{window_hours} hours"},
+        ).fetchone()
+
+        cnt = row["cnt"] or 0
+        throughput = None
+        window_elapsed_hours = None
+        eta_seconds = None
+
+        if cnt >= 2 and row["oldest"] and row["newest"]:
+            try:
+                fmt = "%Y-%m-%d %H:%M:%S"
+                t0 = datetime.strptime(row["oldest"][:19], fmt)
+                t1 = datetime.strptime(row["newest"][:19], fmt)
+                elapsed_secs = (t1 - t0).total_seconds()
+                if elapsed_secs > 60:
+                    window_elapsed_hours = elapsed_secs / 3600
+                    throughput = cnt / window_elapsed_hours
+            except Exception:
+                pass
+
+        remaining_row = self._conn().execute(
+            "SELECT COUNT(*) FROM slides WHERE status IN ('PENDING', 'DISPATCHED')"
+        ).fetchone()
+        remaining = remaining_row[0] if remaining_row else 0
+
+        if throughput and throughput > 0:
+            eta_seconds = (remaining / throughput) * 3600
+
+        return {
+            "completed_in_window": cnt,
+            "window_hours": window_elapsed_hours,
+            "throughput_per_hour": round(throughput, 1) if throughput else None,
+            "eta_seconds": round(eta_seconds) if eta_seconds is not None else None,
+            "remaining": remaining,
+        }

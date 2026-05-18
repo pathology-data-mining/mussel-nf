@@ -123,6 +123,8 @@
       <div class="stat" title="Slides confirmed written to WDS shards on S3"><div class="val" id="s-wds-pct" style="color:#38bdf8">--</div><div class="lbl">% in WDS</div></div>
       <div class="stat"><div class="val" id="s-running">--</div><div class="lbl">Running Batches</div></div>
       <div class="stat"><div class="val" id="s-blacklisted" style="color:#fb923c">--</div><div class="lbl">Blacklisted</div></div>
+      <div class="stat" title="Slides completed per hour (6-hour rolling window)"><div class="val" id="s-throughput" style="color:#a78bfa">--</div><div class="lbl">Slides/hr</div></div>
+      <div class="stat" title="Estimated time until all slides are processed"><div class="val" id="s-eta" style="color:#fbbf24">--</div><div class="lbl">ETA</div></div>
     </div>
     <div class="pbar-wrap-main" style="margin-top:12px">
       <div class="pbar-main" id="progress-bar" style="width:0%"></div>
@@ -221,6 +223,18 @@ async function apiFetch(url) {
   return r.json();
 }
 
+function fmtEta(seconds) {
+  if (seconds === null || seconds === undefined) return '--';
+  const s = Math.round(seconds);
+  if (s < 0) return 'now';
+  if (s < 3600) return Math.ceil(s / 60) + 'm';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h < 24) return h + 'h ' + m + 'm';
+  const d = Math.floor(h / 24);
+  return d + 'd ' + (h % 24) + 'h';
+}
+
 // Status overview
 async function loadStatus() {
   try {
@@ -235,6 +249,16 @@ async function loadStatus() {
     document.getElementById('s-running').textContent     = d.running_batches ?? 0;
     document.getElementById('s-blacklisted').textContent = d.blacklisted ?? 0;
     document.getElementById('progress-bar').style.width  = (d.pct_done ?? 0) + '%';
+    document.getElementById('s-throughput').textContent  = d.throughput_per_hour != null ? d.throughput_per_hour : '--';
+    const etaEl = document.getElementById('s-eta');
+    if (d.eta_seconds != null) {
+      const eta = new Date(Date.now() + d.eta_seconds * 1000);
+      etaEl.textContent = fmtEta(d.eta_seconds);
+      etaEl.title = 'ETA: ' + eta.toLocaleString() + ' (' + (d.completed_in_window || 0) + ' slides in last 6h)';
+    } else {
+      etaEl.textContent = '--';
+      etaEl.title = 'Not enough data yet';
+    }
     const labels = Object.keys(c);
     const values = Object.values(c);
     const colors = labels.map(function(l) {
@@ -490,8 +514,7 @@ async function loadWds() {
     const data = await apiFetch('/api/wds');
     const models    = data.models || {};
     const keys      = Object.keys(models);
-    const dbExpected  = data.db_total_expected || data.db_succeeded || 0;
-    const dbSucceeded = data.db_succeeded || 0;
+    const dbExpected  = data.inventory_total || data.db_total_expected || data.db_succeeded || 0;
     const wdsPctEl = document.getElementById('s-wds-pct');
     if (wdsPctEl && dbExpected > 0) {
       const activeKeys = keys.filter(function(m) { return (models[m].slides||0) > 0; });

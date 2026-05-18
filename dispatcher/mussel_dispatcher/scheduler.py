@@ -151,16 +151,46 @@ class BatchScheduler:
         log.info("BatchScheduler started (batch_size=%d, max_wait=%ds)",
                  self.cfg.batch_size, self.cfg.max_wait_seconds)
         _last_db_sweep = time.monotonic()
+        _last_eta_log = time.monotonic()
+        _ETA_LOG_INTERVAL = 1800  # log ETA every 30 minutes
         while not self.stop_event.is_set():
             self._maybe_dispatch()
             now = time.monotonic()
             if now - _last_db_sweep >= self._DB_SWEEP_INTERVAL:
                 _last_db_sweep = now
                 self._requeue_db_pending()
+            if now - _last_eta_log >= _ETA_LOG_INTERVAL:
+                _last_eta_log = now
+                self._log_eta()
             self.stop_event.wait(5)
         # Do NOT force-dispatch on shutdown — pending slides stay in the DB
         # and will be recovered on next startup.
         log.info("BatchScheduler stopped. Pending slides will be recovered on restart.")
+
+    def _log_eta(self):
+        """Log current throughput and ETA based on recently completed slides."""
+        try:
+            stats = self.state.get_throughput_stats(window_hours=6.0)
+            tph = stats["throughput_per_hour"]
+            remaining = stats["remaining"]
+            eta_s = stats["eta_seconds"]
+            done_in_window = stats["completed_in_window"]
+            if tph is not None:
+                if eta_s is not None:
+                    h, m = divmod(int(eta_s) // 60, 60)
+                    d, h = divmod(h, 24)
+                    eta_str = (f"{d}d {h}h {m}m" if d else f"{h}h {m}m") if eta_s >= 60 else "<1m"
+                else:
+                    eta_str = "unknown"
+                log.info(
+                    "Progress: %d remaining | %.1f slides/hr (last 6h: %d slides) | ETA: %s",
+                    remaining, tph, done_in_window, eta_str,
+                )
+            else:
+                log.info("Progress: %d remaining | throughput not yet available (%d slides in last 6h)",
+                         remaining, done_in_window)
+        except Exception as exc:
+            log.debug("ETA calculation failed: %s", exc)
 
     def _requeue_db_pending(self):
         """Re-enqueue PENDING slides from the DB that are not currently in the dispatch deque.

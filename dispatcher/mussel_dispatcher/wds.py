@@ -521,21 +521,32 @@ def append_wds(
             log.info("Deleted %d extra file(s) from also-delete-pt-dirs", n_extra_deleted)
 
     # Write / append WDS manifest CSV: slide_id, model, wds_path (full S3 or local path)
-    if manifest_csv is not None and not dry_run and n_appended > 0:
-        manifest_csv = Path(manifest_csv)
-        manifest_csv.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not manifest_csv.exists()
-        with manifest_csv.open("a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
-            if write_header:
-                writer.writeheader()
-            for slide_id, info in index.items():
-                if slide_id not in already_indexed:
+    # Include both newly-appended slides AND batch slides that were already indexed in WDS.
+    # The latter ensures the manifest stays consistent even when a batch's slides were all
+    # already in the WDS index (n_appended == 0), which happens after a manifest reset/rename.
+    if manifest_csv is not None and not dry_run:
+        slides_to_manifest: dict[str, dict] = {}
+        for slide_id, info in index.items():
+            if slide_id not in already_indexed:
+                slides_to_manifest[slide_id] = info  # newly appended
+            elif slide_id_filter is not None and slide_id in slide_id_filter:
+                slides_to_manifest[slide_id] = info  # batch slide already in WDS — confirm in manifest
+        if slides_to_manifest:
+            manifest_csv = Path(manifest_csv)
+            manifest_csv.parent.mkdir(parents=True, exist_ok=True)
+            write_header = not manifest_csv.exists()
+            with manifest_csv.open("a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
+                if write_header:
+                    writer.writeheader()
+                for slide_id, info in slides_to_manifest.items():
                     shard_file = info["shard_file"]
                     wds_path = f"{wds_dest.rstrip('/')}/{model_type}/{shard_file}"
                     writer.writerow({"slide_id": slide_id, "model": model_type,
                                      "wds_path": wds_path})
-        log.info("Wrote %d WDS path entries to %s", n_appended, manifest_csv)
+            n_already_written = len(slides_to_manifest) - n_appended
+            log.info("Wrote %d WDS path entries to %s (%d new, %d already-indexed)",
+                     len(slides_to_manifest), manifest_csv, n_appended, n_already_written)
 
     if n_missing_project:
         log.warning("%d slides skipped (no project_id in inventory)", n_missing_project)

@@ -207,17 +207,10 @@ def _build_handler(cfg: Config):
             ).fetchone()[0]
 
         n_running = len(running_rows)
-        in_flight_done = 0
-        in_flight_total = 0
-        for rb in running_rows:
-            slide_count = rb["slide_count"] or 0
-            tower = _registry.get_by_batch(rb["batch_id"])
-            if tower and tower.get("total", 0) > 0:
-                in_flight_done  += slide_count * tower["done"]  / tower["total"]
-                in_flight_total += slide_count
-        if true_total:
-            effective_done_pairs = wds_done_pairs + in_flight_done * _n_models
-            pct = round(effective_done_pairs / true_total * 100, 1)
+        # Note: no in-flight adjustment — WDS manifest is already authoritative for completed
+        # slides, so adding in-flight progress would double-count slides already in WDS.
+
+        pct = min(100.0, round(wds_done_pairs / true_total * 100, 1)) if true_total else 0
 
         with _db() as conn:
             tp = conn.execute(

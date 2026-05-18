@@ -113,13 +113,25 @@ def _build_handler(cfg: Config):
         ).start()
 
     # Cache inventory total (unique slides the dispatcher should eventually process).
-    # Read once from the inventory CSV (fast line count).
+    # Filter by the watcher's slide_type (e.g. "DX" matches DX1, DX2, ...) since
+    # the inventory CSV contains all slide types (TS, BS, MS, etc.).
     _inventory_total: int = 0
     if tcga_watcher and getattr(tcga_watcher, "inventory_csv", ""):
         inv_path = tcga_watcher.inventory_csv
+        slide_type_prefix = getattr(tcga_watcher, "slide_type", "") or ""
         if os.path.exists(inv_path):
-            with open(inv_path) as _f:
-                _inventory_total = sum(1 for _ in _f) - 1  # subtract header
+            try:
+                with open(inv_path, newline="") as _f:
+                    _reader = csv.DictReader(_f)
+                    if slide_type_prefix:
+                        _inventory_total = sum(
+                            1 for r in _reader
+                            if r.get("slide_type", "").startswith(slide_type_prefix)
+                        )
+                    else:
+                        _inventory_total = sum(1 for _ in _reader)
+            except Exception:
+                pass
 
     # Number of WDS models required per slide.
     _n_models: int = len(tcga_watcher.wds_destinations) if (

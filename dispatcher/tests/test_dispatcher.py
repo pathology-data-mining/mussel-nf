@@ -2289,6 +2289,294 @@ class TestAppendWdsManifest:
 
 
 # ===========================================================================
+# _s3_download error-code handling
+# ===========================================================================
+
+class TestS3Download:
+    """Unit tests for _s3_download error-code behaviour.
+
+    These cover the cases that previously caused silent WDS upload failures:
+    - 404 / NoSuchKey  → return False (index absent → start fresh)
+    - 403 / AccessDenied → return False with a warning (ECS quirk: returns
+      403 instead of 404 for non-existent keys with wrong/missing credentials)
+    - Other errors     → re-raised so the caller sees a real failure
+    """
+
+    def _make_client_error(self, code: str):
+        from botocore.exceptions import ClientError
+        return ClientError(
+            {"Error": {"Code": code, "Message": "test"}},
+            "GetObject",
+        )
+
+    def _patch_s3_client(self, monkeypatch, exc):
+        """Patch _s3_client() so download_file raises *exc*."""
+        from mussel_dispatcher import wds as wds_mod
+        mock_client = MagicMock()
+        mock_client.download_file.side_effect = exc
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+    def test_404_returns_false(self, tmp_path, monkeypatch):
+        from mussel_dispatcher import wds as wds_mod
+        self._patch_s3_client(monkeypatch, self._make_client_error("404"))
+        result = wds_mod._s3_download("s3://bucket/key", tmp_path / "out.json")
+        assert result is False
+
+    def test_no_such_key_returns_false(self, tmp_path, monkeypatch):
+        from mussel_dispatcher import wds as wds_mod
+        self._patch_s3_client(monkeypatch, self._make_client_error("NoSuchKey"))
+        result = wds_mod._s3_download("s3://bucket/key", tmp_path / "out.json")
+        assert result is False
+
+    def test_403_returns_false_with_warning(self, tmp_path, monkeypatch):
+        """ECS returns 403 instead of 404 for non-existent keys — must not raise."""
+        from mussel_dispatcher import wds as wds_mod
+        self._patch_s3_client(monkeypatch, self._make_client_error("403"))
+        result = wds_mod._s3_download("s3://bucket/key", tmp_path / "out.json")
+        assert result is False
+
+    def test_access_denied_returns_false_with_warning(self, tmp_path, monkeypatch):
+        from mussel_dispatcher import wds as wds_mod
+        self._patch_s3_client(monkeypatch, self._make_client_error("AccessDenied"))
+        result = wds_mod._s3_download("s3://bucket/key", tmp_path / "out.json")
+        assert result is False
+
+    def test_other_client_error_is_raised(self, tmp_path, monkeypatch):
+        """Unexpected S3 errors (e.g. 500 InternalError) must propagate."""
+        from mussel_dispatcher import wds as wds_mod
+        from botocore.exceptions import ClientError
+        self._patch_s3_client(monkeypatch, self._make_client_error("InternalError"))
+        with pytest.raises(ClientError):
+            wds_mod._s3_download("s3://bucket/key", tmp_path / "out.json")
+
+    def test_success_returns_true(self, tmp_path, monkeypatch):
+        from mussel_dispatcher import wds as wds_mod
+        out = tmp_path / "out.json"
+        mock_client = MagicMock()
+        mock_client.download_file.side_effect = lambda b, k, p, **kw: Path(p).write_text("{}")
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+        result = wds_mod._s3_download("s3://bucket/key", out)
+        assert result is True
+        assert out.read_text() == "{}"
+
+    def test_403_does_not_prevent_upload_attempt(self, tmp_path, monkeypatch):
+        """After a 403 on _load_index, append_wds should still attempt uploads
+        (and fail loudly if credentials are wrong), not silently skip slides.
+
+        Regression test: previously the 403 raised an exception that was caught
+        at the top level and the process exited 0 with no slides uploaded.
+        """
+        import pandas as pd
+        from mussel_dispatcher import wds as wds_mod
+
+        download_calls = []
+
+        def fake_download(bucket, key, path, **kw):
+            download_calls.append(key)
+            from botocore.exceptions import ClientError
+            raise ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "GetObject")
+
+        mock_client = MagicMock()
+        mock_client.download_file.side_effect = fake_download
+
+        upload_calls = []
+
+        def fake_upload(path, bucket, key, **kw):
+            upload_calls.append(key)
+
+        mock_client.upload_file.side_effect = fake_upload
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+
+        import torch
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        (pt_dir / "SLIDE1.features.pt").parent.mkdir(parents=True, exist_ok=True)
+        torch.save(torch.zeros(1, 4), pt_dir / "SLIDE1.features.pt")
+
+        inv = pd.DataFrame({"file_name": ["SLIDE1.svs"], "project_id": ["PROJ"]})
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        # append_wds must attempt at least one upload despite the initial 403
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=staging,
+            max_shard_bytes=10 * 1024 ** 3,
+        )
+
+        assert len(upload_calls) > 0, (
+            "append_wds made no upload calls after 403 on _load_index — "
+            "silent failure regression"
+        )
+
+
+# ===========================================================================
+# _verify_wds_coverage + WDS hook end-to-end manifest interaction
+# ===========================================================================
+
+class TestVerifyWdsCoverageManifestRoundtrip:
+    """Integration tests for the full round-trip:
+
+    WDS hook writes to manifest → _verify_wds_coverage reads manifest →
+    slides are (or are not) reset to PENDING.
+
+    These catch the regression where already-indexed slides were skipped
+    without being written to the manifest, causing _verify_wds_coverage to
+    perpetually reset them to PENDING even though the S3 data was present.
+    """
+
+    def _make_runner(self, tmp_path, wds_destinations):
+        watcher = WatcherConfig(type="tcga", wds_destinations=wds_destinations)
+        cfg = make_config(
+            repo_dir=str(tmp_path),
+            outdir=str(tmp_path / "results"),
+            work_base_dir=str(tmp_path / "work"),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            watchers=[watcher],
+        )
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+        state = StateStore(str(tmp_path / "state" / "test.db"))
+        runner = NextflowRunner(cfg, "batch-001", [], state)
+        return runner, state
+
+    def _write_batch_csv(self, tmp_path, slide_ids):
+        batch_csv = tmp_path / "batches" / "batch.csv"
+        batch_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(batch_csv, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["slide_id", "slide_path"])
+            for sid in slide_ids:
+                w.writerow([sid, f"/slides/{sid}.svs"])
+        return str(batch_csv)
+
+    def _write_manifest(self, tmp_path, entries):
+        """entries: list of (slide_id, model[, wds_path])"""
+        manifest = tmp_path / "results" / "wds_manifest.csv"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        with open(manifest, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["slide_id", "model", "wds_path"])
+            for entry in entries:
+                slide_id, model = entry[0], entry[1]
+                wds_path = entry[2] if len(entry) > 2 else f"s3://b/wds/{model}/PROJ/000000.tar"
+                w.writerow([slide_id, model, wds_path])
+
+    def test_slides_in_manifest_are_not_reset(self, tmp_path):
+        """Slides present in wds_manifest for all required models must NOT be
+        reset to PENDING — they are already in WDS."""
+        runner, state = self._make_runner(
+            tmp_path, {"hoptimus1": "s3://b/wds", "titan_slide": "s3://b/wds"}
+        )
+        state.add_slide("/slides/A.svs", "A")
+        state.mark_dispatched(["/slides/A.svs"], "batch-001")
+        state.mark_slides_complete("batch-001", succeeded=True)
+
+        self._write_manifest(tmp_path, [
+            ("A", "hoptimus1"),
+            ("A", "titan_slide"),
+        ])
+        batch_csv = self._write_batch_csv(tmp_path, ["A"])
+        runner._verify_wds_coverage(batch_csv)
+
+        row = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_id='A'"
+        ).fetchone()
+        assert row["status"] == "SUCCEEDED", (
+            "slide in manifest for all models must stay SUCCEEDED"
+        )
+
+    def test_slide_missing_from_one_model_is_reset(self, tmp_path):
+        """If a slide is in the manifest for one model but not the other, it
+        must be reset to PENDING."""
+        runner, state = self._make_runner(
+            tmp_path, {"hoptimus1": "s3://b/wds", "titan_slide": "s3://b/wds"}
+        )
+        state.add_slide("/slides/A.svs", "A")
+        state.mark_dispatched(["/slides/A.svs"], "batch-001")
+        state.mark_slides_complete("batch-001", succeeded=True)
+
+        # Only hoptimus1 in manifest — titan_slide missing
+        self._write_manifest(tmp_path, [
+            ("A", "hoptimus1"),
+        ])
+        batch_csv = self._write_batch_csv(tmp_path, ["A"])
+        runner._verify_wds_coverage(batch_csv)
+
+        row = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_id='A'"
+        ).fetchone()
+        assert row["status"] == "PENDING", (
+            "slide missing from titan_slide manifest must be reset to PENDING"
+        )
+
+    def test_stale_manifest_entries_do_not_protect_slides(self, tmp_path):
+        """Manifest entries pointing to a model that is not in wds_destinations
+        must not satisfy coverage for the required model."""
+        runner, state = self._make_runner(
+            tmp_path, {"hoptimus1": "s3://b/wds"}  # only hoptimus1 required
+        )
+        state.add_slide("/slides/A.svs", "A")
+        state.mark_dispatched(["/slides/A.svs"], "batch-001")
+        state.mark_slides_complete("batch-001", succeeded=True)
+
+        # Manifest has titan_slide but NOT hoptimus1
+        self._write_manifest(tmp_path, [
+            ("A", "titan_slide"),
+        ])
+        batch_csv = self._write_batch_csv(tmp_path, ["A"])
+        runner._verify_wds_coverage(batch_csv)
+
+        row = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_id='A'"
+        ).fetchone()
+        assert row["status"] == "PENDING"
+
+    def test_already_indexed_not_in_manifest_is_reset(self, tmp_path):
+        """Regression test for the original bug (pre-d19bb92):
+
+        If append_wds confirmed a slide was already in the S3 WDS index but
+        omitted it from wds_manifest.csv, _verify_wds_coverage would reset
+        the slide to PENDING on every cycle — an infinite retry loop.
+
+        This test verifies the consequence: a SUCCEEDED slide with no manifest
+        entry for the required model IS reset to PENDING (correct behaviour),
+        and therefore the bug's fix (writing all confirmed slides to the
+        manifest) is necessary for the slide to remain SUCCEEDED.
+        """
+        runner, state = self._make_runner(
+            tmp_path, {"hoptimus1": "s3://b/wds"}
+        )
+        state.add_slide("/slides/A.svs", "A")
+        state.mark_dispatched(["/slides/A.svs"], "batch-001")
+        state.mark_slides_complete("batch-001", succeeded=True)
+
+        # Empty manifest — simulates the pre-fix behaviour where already-indexed
+        # slides were not written to the manifest.
+        manifest = tmp_path / "results" / "wds_manifest.csv"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        with open(manifest, "w", newline="") as f:
+            csv.writer(f).writerow(["slide_id", "model", "wds_path"])
+
+        batch_csv = self._write_batch_csv(tmp_path, ["A"])
+        runner._verify_wds_coverage(batch_csv)
+
+        row = state._conn().execute(
+            "SELECT status FROM slides WHERE slide_id='A'"
+        ).fetchone()
+        assert row["status"] == "PENDING", (
+            "slide absent from manifest must be reset to PENDING — "
+            "confirms that the fix (writing already-indexed slides to manifest) is necessary"
+        )
+
+
+# ===========================================================================
 # S3Watcher._scan / _in_progress_keys
 # ===========================================================================
 

@@ -514,8 +514,7 @@ async function loadWds() {
     const data = await apiFetch('/api/wds');
     const models    = data.models || {};
     const keys      = Object.keys(models);
-    const dbExpected  = data.db_total_expected || data.db_succeeded || 0;
-    const dbSucceeded = data.db_succeeded || 0;
+    const dbExpected  = data.inventory_total || data.db_total_expected || data.db_succeeded || 0;
     const wdsPctEl = document.getElementById('s-wds-pct');
     if (wdsPctEl && dbExpected > 0) {
       const activeKeys = keys.filter(function(m) { return (models[m].slides||0) > 0; });

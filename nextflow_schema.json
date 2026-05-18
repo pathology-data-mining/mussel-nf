@@ -339,6 +339,28 @@
                     "default": true,
                     "description": "Save patch-level features to HDF5 (.h5) in addition to .pt slide tensors."
                 },
+                "embedding_precision": {
+                    "type": "string",
+                    "default": "float32",
+                    "description": "Global default embedding precision for all models. Can be overridden per model via model_embedding_precision.",
+                    "enum": ["float32", "float16", "bfloat16"]
+                },
+                "model_embedding_precision": {
+                    "type": "object",
+                    "description": "Per-model embedding precision overrides (e.g. {hoptimus1: bfloat16}). Keys are model names, values are float32, float16, or bfloat16.",
+                    "additionalProperties": {
+                        "type": "string",
+                        "enum": ["float32", "float16", "bfloat16"]
+                    }
+                },
+                "benchmark_precisions": {
+                    "type": "array",
+                    "description": "Precisions to benchmark against existing float32 features via CONVERT_FEATURES_PRECISION (e.g. [float16, bfloat16]). No GPU required.",
+                    "items": {
+                        "type": "string",
+                        "enum": ["float32", "float16", "bfloat16"]
+                    }
+                },
                 "slide_to_patch_mapping": {
                     "type": "object",
                     "description": "Maps slide-level encoder names to the required patch encoder.",

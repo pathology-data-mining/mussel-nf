@@ -342,24 +342,20 @@
                 "embedding_precision": {
                     "type": "string",
                     "default": "float32",
-                    "description": "Global default embedding precision for all models. Can be overridden per model via model_embedding_precision.",
-                    "enum": ["float32", "float16", "bfloat16"]
+                    "enum": ["float32", "float16", "bfloat16"],
+                    "description": "Numeric dtype used when saving extracted feature embeddings. 'float32' preserves full precision; 'float16'/'bfloat16' halve storage size. Note: multi-slide sample aggregation (MERGE_SAMPLE_FEATURES) with non-float32 precision is currently unsupported."
                 },
-                "model_embedding_precision": {
+                "model_precision_overrides": {
                     "type": "object",
-                    "description": "Per-model embedding precision overrides (e.g. {hoptimus1: bfloat16}). Keys are model names, values are float32, float16, or bfloat16.",
-                    "additionalProperties": {
-                        "type": "string",
-                        "enum": ["float32", "float16", "bfloat16"]
-                    }
+                    "description": "Per-model embedding precision overrides. Takes precedence over embedding_precision. Keys are model type names (e.g. 'optimus'), values are 'float32', 'float16', or 'bfloat16'."
                 },
                 "benchmark_precisions": {
                     "type": "array",
-                    "description": "Precisions to benchmark against existing float32 features via CONVERT_FEATURES_PRECISION (e.g. [float16, bfloat16]). No GPU required.",
                     "items": {
                         "type": "string",
-                        "enum": ["float32", "float16", "bfloat16"]
-                    }
+                        "enum": ["float16", "bfloat16"]
+                    },
+                    "description": "Precision variants to generate for linear probe benchmarking. A CPU-only conversion step casts existing float32 features to each listed precision and feeds all variants into the linear probe workflow. Designed for use with embedding_precision='float32'."
                 },
                 "slide_to_patch_mapping": {
                     "type": "object",
@@ -489,6 +485,83 @@
                     "type": ["boolean", "string"],
                     "default": false,
                     "description": "Enable multiclass mode (>=3 classes) for linear probe benchmarking."
+                }
+            }
+        },
+        "abmil_benchmark": {
+            "title": "ABMIL benchmark options",
+            "description": "Train a Gated-ABMIL classifier on per-slide H5 features and report AUROC. Runs automatically when labels_parquet and target_col are set.",
+            "type": "object",
+            "properties": {
+                "labels_parquet": {
+                    "type": "string",
+                    "description": "Parquet file with columns: slide_id, <target_col>, and optionally a split column.",
+                    "format": "file-path"
+                },
+                "target_col": {
+                    "type": "string",
+                    "description": "Binary label column in labels_parquet (integer 0/1)."
+                },
+                "split_col": {
+                    "type": ["string", "null"],
+                    "default": null,
+                    "description": "Optional column containing pre-defined 'train'/'val'/'test' split labels. When null, a random slide-level split is used."
+                },
+                "n_seeds": {
+                    "type": "integer",
+                    "default": 3,
+                    "description": "Number of random seeds; mean +/- std reported across seeds."
+                },
+                "n_bootstrap": {
+                    "type": "integer",
+                    "default": 1000,
+                    "description": "Bootstrap resamples for 95% CI on test AUROC (primary seed only)."
+                },
+                "random_state": {
+                    "type": "integer",
+                    "default": 42,
+                    "description": "Primary random seed."
+                },
+                "n_epochs": {
+                    "type": "integer",
+                    "default": 20,
+                    "description": "Training epochs per seed."
+                },
+                "batch_size": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "Slides per batch. Tiles are zero-padded to the longest slide in the batch."
+                },
+                "lr": {
+                    "type": "number",
+                    "default": 1e-4,
+                    "description": "Adam learning rate."
+                },
+                "head_dim": {
+                    "type": "integer",
+                    "default": 256,
+                    "description": "Hidden dimension for each ABMIL attention head."
+                },
+                "n_heads": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "Number of independent attention heads in ABMIL."
+                },
+                "dtype": {
+                    "type": "string",
+                    "default": "float32",
+                    "enum": ["float32", "float16", "bfloat16"],
+                    "description": "Dtype to cast features to at load time. Use float16 or bfloat16 to simulate low-precision storage and measure impact on AUROC."
+                },
+                "test_size": {
+                    "type": "number",
+                    "default": 0.2,
+                    "description": "Fraction of slides held out as test set (only used when split_col is null)."
+                },
+                "val_size": {
+                    "type": "number",
+                    "default": 0.1,
+                    "description": "Fraction of slides held out as validation set (only used when split_col is null)."
                 }
             }
         },

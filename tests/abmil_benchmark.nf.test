@@ -1,0 +1,70 @@
+nextflow_pipeline {
+    name   "ABMIL_BENCHMARK workflow — end-to-end benchmark"
+    script "./abmil_benchmark.nf"
+    profile "test_abmil_benchmark"
+
+    test("workflow succeeds and produces results.json") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            def benchDir = path("${outputDir}/abmil_benchmark/resnet50")
+            assert benchDir.resolve("results.json").exists()
+
+            def summary = new groovy.json.JsonSlurper().parse(
+                benchDir.resolve("results.json").toFile()
+            )
+
+            assert summary.n_seeds == 1
+
+            for (split in ["val", "test"]) {
+                assert summary.containsKey(split), "Missing '${split}' key in results.json"
+                def m = summary[split]
+                assert m.containsKey("auroc"), "Missing auroc in ${split}"
+                def auc = m.auroc.mean
+                // val AUROC can be null when val split happens to have only one class
+                if (auc != null) {
+                    assert (auc as double) >= 0.0 && (auc as double) <= 1.0,
+                        "AUC out of [0,1] in ${split}: ${auc}"
+                }
+            }
+
+            // Bootstrap CI on test split (only present when test AUROC is defined)
+            if (summary.test.auroc.mean != null) {
+                def ci = summary.test.auroc.bootstrap_ci_95
+                assert ci != null && ci.size() == 2, "Bootstrap CI missing or malformed"
+                assert (ci[0] as double) <= (ci[1] as double), "Bootstrap CI lower > upper"
+            }
+        }
+    }
+
+    test("summary CSV and JSON are produced") {
+        when {
+            params {
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+
+            def summaryDir = path("${outputDir}/abmil_benchmark")
+            assert summaryDir.resolve("abmil_benchmark_summary.csv").exists()
+            assert summaryDir.resolve("abmil_benchmark_summary.json").exists()
+
+            def summaryLines = summaryDir.resolve("abmil_benchmark_summary.csv")
+                .text.trim().split("\n")
+
+            def header = summaryLines[0].split(",")
+            assert "model" in header, "summary CSV missing 'model' column"
+            assert header.any { it.contains("auroc") }, "summary CSV missing auroc column; found: ${header}"
+
+            // One data row (one model type: resnet50)
+            assert summaryLines.size() == 2, "Expected 1 model row + header, got ${summaryLines.size()} lines"
+            assert summaryLines[1].contains("resnet50"), "Expected resnet50 row"
+        }
+    }
+}

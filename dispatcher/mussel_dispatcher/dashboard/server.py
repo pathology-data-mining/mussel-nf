@@ -112,6 +112,41 @@ def _build_handler(cfg: Config):
             target=s3_stats, args=(tcga_watcher, "wds"), daemon=True, name="s3-prewarm"
         ).start()
 
+    # Cache inventory total (unique slides the dispatcher should eventually process).
+    # Read once from the inventory CSV (fast line count).
+    _inventory_total: int = 0
+    if tcga_watcher and getattr(tcga_watcher, "inventory_csv", ""):
+        inv_path = tcga_watcher.inventory_csv
+        if os.path.exists(inv_path):
+            with open(inv_path) as _f:
+                _inventory_total = sum(1 for _ in _f) - 1  # subtract header
+
+    # Number of WDS models required per slide.
+    _n_models: int = len(tcga_watcher.wds_destinations) if (
+        tcga_watcher and tcga_watcher.wds_destinations
+    ) else 1
+
+    # WDS manifest done-count cache: (timestamp, {model: count}) updated every 60s.
+    _wds_manifest_cache: list = [0.0, {}]  # [last_read_time, {model: count}]
+
+    def _wds_done_counts() -> dict[str, int]:
+        """Return {model: slide_count} from wds_manifest, with 60s caching."""
+        now = time.time()
+        if now - _wds_manifest_cache[0] < 60:
+            return _wds_manifest_cache[1]
+        counts: dict[str, int] = {}
+        if os.path.exists(wds_manifest):
+            try:
+                with open(wds_manifest, newline="") as f:
+                    for row in csv.DictReader(f):
+                        m = row.get("model", "")
+                        counts[m] = counts.get(m, 0) + 1
+            except Exception:
+                pass
+        _wds_manifest_cache[0] = now
+        _wds_manifest_cache[1] = counts
+        return counts
+
     # Persistent registry: Tower state survives dashboard restarts.
     _run_store = _RunStore(os.path.join(cfg.state_dir, "turret_runs.db"))
     _registry  = _PersistentRegistry(_run_store)
@@ -132,9 +167,24 @@ def _build_handler(cfg: Config):
                 "SELECT status, COUNT(*) AS n FROM slides GROUP BY status"
             ).fetchall()
         counts = {r["status"]: r["n"] for r in rows}
-        total = sum(counts.values())
+        db_total = sum(counts.values())
         succeeded = counts.get("SUCCEEDED", 0)
-        pct = round(succeeded / total * 100, 1) if total else 0
+
+        # Use inventory total as the true denominator (all slides to eventually process).
+        # Fall back to db_total if inventory is unavailable.
+        true_total = (_inventory_total * _n_models) if _inventory_total else db_total
+
+        # Use WDS manifest counts as the authoritative "done" tally — more reliable
+        # than DB SUCCEEDED (which can be reset to PENDING by _verify_wds_coverage).
+        wds_counts = _wds_done_counts()
+        # "done" = slides confirmed in WDS for EVERY required model (min across models)
+        wds_done = min(wds_counts.get(m, 0) for m in tcga_watcher.wds_destinations) if (
+            tcga_watcher and tcga_watcher.wds_destinations and wds_counts
+        ) else succeeded
+        # Total done in slide×model pairs for the percentage denominator
+        wds_done_pairs = sum(wds_counts.values()) if wds_counts else succeeded
+
+        pct = round(wds_done_pairs / true_total * 100, 1) if true_total else 0
 
         with _db() as conn:
             running_rows = conn.execute(
@@ -153,9 +203,9 @@ def _build_handler(cfg: Config):
             if tower and tower.get("total", 0) > 0:
                 in_flight_done  += slide_count * tower["done"]  / tower["total"]
                 in_flight_total += slide_count
-        if total:
-            effective_done = succeeded + in_flight_done
-            pct = round(effective_done / total * 100, 1)
+        if true_total:
+            effective_done_pairs = wds_done_pairs + in_flight_done * _n_models
+            pct = round(effective_done_pairs / true_total * 100, 1)
 
         with _db() as conn:
             tp = conn.execute(
@@ -172,6 +222,9 @@ def _build_handler(cfg: Config):
             remaining = conn.execute(
                 "SELECT COUNT(*) FROM slides WHERE status IN ('PENDING','DISPATCHED')"
             ).fetchone()[0]
+        # Add undispatched slides to remaining count
+        undispatched = max(0, _inventory_total - db_total) if _inventory_total else 0
+        total_remaining = remaining + undispatched
 
         throughput_per_hour = None
         eta_seconds = None
@@ -185,19 +238,21 @@ def _build_handler(cfg: Config):
                 elapsed = (t1 - t0).total_seconds()
                 if elapsed > 60:
                     throughput_per_hour = round(completed_in_window / (elapsed / 3600), 1)
-                    eta_seconds = round(remaining / throughput_per_hour * 3600)
+                    eta_seconds = round(total_remaining / throughput_per_hour * 3600)
             except Exception:
                 pass
 
         return {
             "counts": counts,
-            "total": total,
+            "total": true_total,
+            "inventory_total": _inventory_total,
+            "wds_done": wds_done,
             "pct_done": pct,
             "running_batches": n_running,
             "blacklisted": n_blacklisted,
             "throughput_per_hour": throughput_per_hour,
             "eta_seconds": eta_seconds,
-            "remaining": remaining,
+            "remaining": total_remaining,
             "completed_in_window": completed_in_window,
         }
 

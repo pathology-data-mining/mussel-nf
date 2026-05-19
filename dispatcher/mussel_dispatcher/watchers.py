@@ -537,10 +537,25 @@ class TcgaWatcher(threading.Thread):
         log.info("TcgaWatcher: %d ready, %d need download", len(ready), len(needs_dl))
 
         # Enqueue slides already on disk / S3
+        stale_succeeded = []
         for s in ready:
             if not self.state.is_known(s["slide_path"]):
                 self.state.add_slide(s["slide_path"], s["slide_id"])
                 self.pending.append({"slide_id": s["slide_id"], "slide_path": s["slide_path"]})
+            else:
+                # Slide is known but prepare_samples says it still needs work —
+                # its output files were likely lost after a prior SUCCEEDED run.
+                # Collect for bulk reset so the DB sweep re-enqueues them.
+                stale_succeeded.append(s["slide_path"])
+
+        if stale_succeeded:
+            n = self.state.reset_succeeded_to_pending(stale_succeeded)
+            if n:
+                log.warning(
+                    "TcgaWatcher: reset %d SUCCEEDED slide(s) to PENDING "
+                    "(prepare_samples reports them as still pending — output files lost?)",
+                    n,
+                )
 
         # Handle slides that need download.
         # Mode A (download_enabled=True): dispatcher downloads via gdc-client first,

@@ -1103,6 +1103,65 @@ class TestTcgaWatcher:
 
         assert len(pending) == 0
 
+    def test_succeeded_slides_reset_to_pending_when_prepare_samples_reports_them(self, tmp_path):
+        """Regression: slides SUCCEEDED in the dispatcher DB but still reported
+        as pending by prepare_samples (i.e. their output files were lost) must
+        be reset to PENDING so the DB sweep re-enqueues them.
+
+        Prior to the fix, these slides were silently skipped by the watcher
+        (is_known returned True) and never re-dispatched, stalling the pipeline.
+        """
+        import unittest.mock as mock
+        import csv as _csv
+
+        watcher, pending, state, _ = self._make_watcher(tmp_path)
+
+        # Pre-populate state DB with slides as SUCCEEDED
+        state.add_slide("/slides/A.svs", "A")
+        state.add_slide("/slides/B.svs", "B")
+        state._conn().execute(
+            "UPDATE slides SET status='SUCCEEDED' WHERE slide_id IN ('A', 'B')"
+        )
+        state._conn().commit()
+
+        # prepare_samples reports both slides as still pending (features lost)
+        samples_csv = str(tmp_path / "status_dispatcher.csv")
+        self._write_meta_csv(
+            Path(samples_csv.replace(".csv", ".meta.csv")),
+            [
+                {"slide_id": "A", "slide_path": "/slides/A.svs", "needs_download": "false"},
+                {"slide_id": "B", "slide_path": "/slides/B.svs", "needs_download": "false"},
+            ],
+        )
+        with open(samples_csv, "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=["slide_id", "slide_path", "file_id", "file_name", "needs_download"])
+            w.writeheader()
+            for sid, sp in [("A", "/slides/A.svs"), ("B", "/slides/B.svs")]:
+                w.writerow({"slide_id": sid, "slide_path": sp, "needs_download": "false", "file_id": "", "file_name": ""})
+
+        def fake_run_script(script, args):
+            return 0
+
+        watcher.cfg.status_csv = str(tmp_path / "status.csv")
+        Path(tmp_path / "status.csv").write_text("slide_id,status\n")
+        watcher._run_script = fake_run_script
+
+        orig_path = tmp_path / "status_dispatcher.csv"
+        with mock.patch.object(watcher, "_run_script", side_effect=lambda s, a: 0):
+            watcher._poll()
+
+        # Slides must now be PENDING (not SUCCEEDED) in the state DB
+        conn = state._conn()
+        for sid in ("A", "B"):
+            row = conn.execute("SELECT status FROM slides WHERE slide_id=?", (sid,)).fetchone()
+            assert row["status"] == "PENDING", (
+                f"slide {sid} should have been reset to PENDING, got {row['status']}"
+            )
+
+        # Nothing in the in-memory pending deque (reset slides are picked up by
+        # the DB sweep, not immediately enqueued by the watcher)
+        assert len(pending) == 0
+
 
 # ---------------------------------------------------------------------------
 # NextflowRunner.run() integration tests

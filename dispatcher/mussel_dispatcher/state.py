@@ -241,6 +241,32 @@ class StateStore:
             "SELECT COUNT(*) FROM slides WHERE status='PENDING'"
         ).fetchone()[0]
 
+    def reset_succeeded_to_pending(self, slide_paths: list[str]) -> int:
+        """Reset specific SUCCEEDED slides back to PENDING for re-dispatch.
+
+        Used when an external status check (e.g. prepare_samples) reports that
+        a slide still needs processing even though the dispatcher DB recorded it
+        as SUCCEEDED — for example when output files were deleted after the run.
+        Only transitions SUCCEEDED → PENDING; DISPATCHED/FAILED slides are left
+        unchanged.
+
+        Returns the number of slides actually reset.
+        """
+        if not slide_paths:
+            return 0
+        conn = self._conn()
+        placeholders = ",".join("?" * len(slide_paths))
+        conn.execute(
+            f"UPDATE slides SET status='PENDING', batch_id=NULL, fail_count=0 "
+            f"WHERE slide_path IN ({placeholders}) AND status='SUCCEEDED'",
+            slide_paths,
+        )
+        conn.commit()
+        return conn.execute(
+            f"SELECT COUNT(*) FROM slides WHERE slide_path IN ({placeholders}) AND status='PENDING'",
+            slide_paths,
+        ).fetchone()[0]
+
     def blacklist_slide(self, slide_id: str, reason: str, max_retries: int = 999):
         """Permanently exclude a slide from future dispatch.
 

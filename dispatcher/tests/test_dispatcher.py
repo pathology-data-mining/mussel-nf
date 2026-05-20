@@ -560,6 +560,7 @@ class TestBatchScheduler:
             max_wait_seconds=max_wait_seconds,
         )
         run_manager = MagicMock()
+        run_manager.in_flight_slide_ids = set()
         scheduler = BatchScheduler(cfg, MagicMock(), run_manager, threading.Event())
         return scheduler, run_manager
 
@@ -635,7 +636,9 @@ class TestBatchScheduler:
         db.add_slide("/s/x.svs", "x")
         db.add_slide("/s/y.svs", "y")
         cfg = make_config(batch_size=10, max_wait_seconds=9_999)
-        scheduler = BatchScheduler(cfg, db, MagicMock(), threading.Event())
+        rm = MagicMock()
+        rm.in_flight_slide_ids = set()
+        scheduler = BatchScheduler(cfg, db, rm, threading.Event())
         # Deque is empty; DB has 2 PENDING slides
         scheduler._requeue_db_pending()
         assert len(scheduler._pending) == 2
@@ -648,11 +651,34 @@ class TestBatchScheduler:
         db = StateStore(str(tmp_path / "s.db"))
         db.add_slide("/s/x.svs", "x")
         cfg = make_config(batch_size=10, max_wait_seconds=9_999)
-        scheduler = BatchScheduler(cfg, db, MagicMock(), threading.Event())
+        rm = MagicMock()
+        rm.in_flight_slide_ids = set()
+        scheduler = BatchScheduler(cfg, db, rm, threading.Event())
         scheduler.enqueue({"slide_id": "x", "slide_path": "/s/x.svs"})
         scheduler._requeue_db_pending()
         # Still only 1 entry — not duplicated
         assert len(scheduler._pending) == 1
+
+    def test_requeue_db_pending_skips_in_flight(self, tmp_path):
+        """Slides in RunManager's in-flight set are not re-enqueued by the DB sweep.
+
+        This prevents the runaway loop where slides popped from the deque but not
+        yet written as DISPATCHED in the DB get re-enqueued during NF startup.
+        """
+        from mussel_dispatcher.state import StateStore
+        from mussel_dispatcher.scheduler import BatchScheduler
+        db = StateStore(str(tmp_path / "s.db"))
+        db.add_slide("/s/x.svs", "x")
+        db.add_slide("/s/y.svs", "y")
+        cfg = make_config(batch_size=10, max_wait_seconds=9_999)
+        rm = MagicMock()
+        # "x" has been submitted to the thread pool but not yet written as DISPATCHED
+        rm.in_flight_slide_ids = {"x"}
+        scheduler = BatchScheduler(cfg, db, rm, threading.Event())
+        scheduler._requeue_db_pending()
+        # Only "y" should be enqueued; "x" is in-flight
+        assert len(scheduler._pending) == 1
+        assert scheduler._pending[0]["slide_id"] == "y"
 
 
 # ===========================================================================

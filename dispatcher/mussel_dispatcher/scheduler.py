@@ -197,13 +197,21 @@ class BatchScheduler:
 
         Handles slides reset to PENDING after a batch completion (e.g. by
         _verify_wds_coverage) that were never re-added to the in-memory queue.
+
+        Excludes slides that are in-flight in RunManager (popped from the deque and
+        submitted to the thread pool but not yet written as DISPATCHED in the DB).
+        Without this exclusion the 60-second sweep would re-enqueue those slides during
+        the Nextflow startup window (~30-90 s), causing duplicate dispatches that spiral
+        into a runaway batch-creation loop.
         """
         with self._lock:
             in_deque_ids = {s.get("slide_id") for s in self._pending}
+        in_flight_ids = self.run_manager.in_flight_slide_ids
+        excluded = in_deque_ids | in_flight_ids
         pending_in_db = self.state.get_pending_slides()
         newly_enqueued = 0
         for slide in pending_in_db:
-            if slide.get("slide_id") not in in_deque_ids:
+            if slide.get("slide_id") not in excluded:
                 self.enqueue(slide)
                 newly_enqueued += 1
         if newly_enqueued:
@@ -250,27 +258,42 @@ class RunManager:
         self._executor = ThreadPoolExecutor(max_workers=cfg.max_concurrent_runs,
                                             thread_name_prefix="nextflow-run")
         self._futures: dict = {}
+        # Maps batch_id → set of slide_ids that have been popped from the dispatch
+        # deque and submitted to the thread pool but not yet written as DISPATCHED in
+        # the DB.  BatchScheduler._requeue_db_pending() excludes these IDs so that
+        # the 60-second sweep never re-enqueues slides that are mid-submission.
+        self._in_flight: dict[str, set] = {}
         self._lock = threading.Lock()
 
-    def submit(self, batch_id: str, slides: list):
-        runner = NextflowRunner(self.cfg, batch_id, slides, self.state)
-        future: Future = self._executor.submit(runner.run)
+    @property
+    def in_flight_slide_ids(self) -> set:
+        """Return the union of all slide IDs currently in-flight (submitted but not yet DB-confirmed)."""
         with self._lock:
+            return set().union(*self._in_flight.values()) if self._in_flight else set()
+
+    def submit(self, batch_id: str, slides: list):
+        slide_ids = {s["slide_id"] for s in slides if s.get("slide_id")}
+        runner = NextflowRunner(self.cfg, batch_id, slides, self.state)
+        with self._lock:
+            self._in_flight[batch_id] = slide_ids
+            future: Future = self._executor.submit(runner.run)
             self._futures[batch_id] = future
         future.add_done_callback(lambda f: self._on_done(batch_id, f))
 
     def submit_resume(self, batch_id: str, csv_path: str, work_dir: str):
         """Re-submit an interrupted batch using the existing work dir and -resume."""
+        # Resume batches have slides already DISPATCHED in DB — no in-flight tracking needed.
         runner = NextflowRunner(self.cfg, batch_id, [], self.state,
                                 resume=True, existing_csv_path=csv_path, existing_work_dir=work_dir)
-        future: Future = self._executor.submit(runner.run)
         with self._lock:
+            future: Future = self._executor.submit(runner.run)
             self._futures[batch_id] = future
         future.add_done_callback(lambda f: self._on_done(batch_id, f))
 
     def _on_done(self, batch_id: str, future: Future):
         with self._lock:
             self._futures.pop(batch_id, None)
+            self._in_flight.pop(batch_id, None)
         try:
             future.result()
         except Exception as e:

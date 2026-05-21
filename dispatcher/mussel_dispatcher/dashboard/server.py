@@ -165,8 +165,31 @@ def _build_handler(cfg: Config):
     # Seed registry from legacy tasks_done/total/failed columns for batches
     # that completed before the PersistentWorkflowRegistry was introduced.
     _seed_registry_from_db(_registry, db_path)
+
+    def _run_name_to_batch_id(run_name: str) -> str:
+        """Map NF run name → dispatcher batch_id.
+
+        Supports two formats:
+          - Legacy: ``dispatcher_{batch_id}``  (pre-fix, full 35-char name)
+          - Modern: ``{hash8}``                (8-char UUID suffix, e.g. "410bb3ce")
+        """
+        if run_name.startswith("dispatcher_"):
+            return run_name[len("dispatcher_"):]
+        # Modern short hash: look up batch whose batch_id ends with _{hash}
+        try:
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                row = conn.execute(
+                    "SELECT batch_id FROM batches WHERE batch_id LIKE ?",
+                    (f"%_{run_name}",)
+                ).fetchone()
+                if row:
+                    return row[0]
+        except Exception:
+            pass
+        return run_name
+
     # Single TowerRouter instance shared across all requests in this handler.
-    _router = _TowerRouter(registry=_registry)
+    _router = _TowerRouter(registry=_registry, run_name_to_batch_id=_run_name_to_batch_id)
 
     def _db():
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)

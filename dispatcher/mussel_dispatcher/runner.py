@@ -213,7 +213,9 @@ class NextflowRunner:
                     self.batch_id, claimed, len(self.slides), len(self.slides) - claimed,
                 )
 
-        nf_run_name = f"dispatcher_{self.batch_id}"
+        # Use the 8-char UUID hash as the NF run name so it fits within
+        # Seqera Platform's 16-char workflow.id field limit.
+        nf_run_name = self.batch_id.rsplit("_", 1)[-1]  # e.g. "410bb3ce"
         trace_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.trace.tsv")
         cmd = [
             "nextflow", "run", self.cfg.repo_dir,

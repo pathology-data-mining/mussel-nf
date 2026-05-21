@@ -16,7 +16,7 @@ outdir: tcga-results
 #nextflow_config: tcga_nextflow.config
 nextflow_params_file: ../tcga_params.yaml
 nextflow_version: "26.04.0"
-tower_endpoint: "http://localhost:8050"  # local Tower shim — NF pushes real-time progress here
+tower_endpoint: "http://localhost:8049"  # persistent Tower proxy (never restarts); forwards to dashboard on :8050
 
 # Run up to 3 Nextflow jobs simultaneously
 max_concurrent_runs: 3

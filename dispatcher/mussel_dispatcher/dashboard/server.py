@@ -423,8 +423,12 @@ def _build_handler(cfg: Config):
                 "local_pt": local_pt.get(m, 0),
                 "error": cached_s3.get(m, {}).get("error"),
             }
+        with _db() as conn:
+            db_succeeded = conn.execute(
+                "SELECT COUNT(*) FROM slides WHERE status='SUCCEEDED'"
+            ).fetchone()[0]
         return {"models": models, "total": sum(wds_counts.values()),
-                "inventory_total": _inventory_total}
+                "inventory_total": _inventory_total, "db_succeeded": db_succeeded}
 
     class Handler(_TowerHandlerMixin, BaseHTTPRequestHandler):
         # Expose registry and router so tests and external callers can inspect Tower state.

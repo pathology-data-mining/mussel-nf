@@ -114,17 +114,17 @@
   <div class="card full">
     <h2>Overview</h2>
     <div class="summary-grid" id="summary-grid">
-      <div class="stat"><div class="val" id="s-total">--</div><div class="lbl">Total Slides</div></div>
-      <div class="stat"><div class="val" id="s-done" style="color:#4ade80">--</div><div class="lbl">Succeeded</div></div>
-      <div class="stat"><div class="val" id="s-failed" style="color:#f87171">--</div><div class="lbl">Failed</div></div>
-      <div class="stat"><div class="val" id="s-pending" style="color:#a5b4fc">--</div><div class="lbl">Pending</div></div>
-      <div class="stat"><div class="val" id="s-dispatched" style="color:#38bdf8">--</div><div class="lbl">Dispatched</div></div>
-      <div class="stat" title="Features extracted (Nextflow succeeded)"><div class="val" id="s-pct">--</div><div class="lbl">% Features Extracted</div></div>
-      <div class="stat" title="Slides confirmed written to WDS shards on S3"><div class="val" id="s-wds-pct" style="color:#38bdf8">--</div><div class="lbl">% in WDS</div></div>
-      <div class="stat"><div class="val" id="s-running">--</div><div class="lbl">Running Batches</div></div>
-      <div class="stat"><div class="val" id="s-blacklisted" style="color:#fb923c">--</div><div class="lbl">Blacklisted</div></div>
-      <div class="stat" title="Slides completed per hour (6-hour rolling window)"><div class="val" id="s-throughput" style="color:#a78bfa">--</div><div class="lbl">Slides/hr</div></div>
-      <div class="stat" title="Estimated time until all slides are processed"><div class="val" id="s-eta" style="color:#fbbf24">--</div><div class="lbl">ETA</div></div>
+      <div class="stat" title="Total slides in the dispatch queue across all statuses"><div class="val" id="s-total">--</div><div class="lbl">Total Slides</div></div>
+      <div class="stat" title="Slides whose Nextflow batch exited successfully (exit 0). Does not guarantee WDS upload — see % in WDS."><div class="val" id="s-done" style="color:#4ade80">--</div><div class="lbl">Succeeded</div></div>
+      <div class="stat" title="Slides whose Nextflow task failed and are queued for automatic retry on the next dispatch sweep."><div class="val" id="s-failed" style="color:#f87171">--</div><div class="lbl">Failed</div></div>
+      <div class="stat" title="Slides waiting to be included in the next dispatch batch."><div class="val" id="s-pending" style="color:#a5b4fc">--</div><div class="lbl">Pending</div></div>
+      <div class="stat" title="Slides currently assigned to an active Nextflow batch (status=DISPATCHED in DB)."><div class="val" id="s-dispatched" style="color:#38bdf8">--</div><div class="lbl">Dispatched</div></div>
+      <div class="stat" title="Percentage of total slides with status SUCCEEDED in DB (Nextflow exited 0 for their batch)."><div class="val" id="s-pct">--</div><div class="lbl">% Features Extracted</div></div>
+      <div class="stat" title="Percentage of total slides confirmed written to WDS shards on S3 (minimum across all required models)."><div class="val" id="s-wds-pct" style="color:#38bdf8">--</div><div class="lbl">% in WDS</div></div>
+      <div class="stat" title="Number of Nextflow batch runs currently active."><div class="val" id="s-running">--</div><div class="lbl">Running Batches</div></div>
+      <div class="stat" title="Slides permanently excluded after exceeding the retry limit (fail_count ≥ 10). Require manual investigation."><div class="val" id="s-blacklisted" style="color:#fb923c">--</div><div class="lbl">Blacklisted</div></div>
+      <div class="stat" title="Slides reaching SUCCEEDED status per hour, computed over a 6-hour rolling window."><div class="val" id="s-throughput" style="color:#a78bfa">--</div><div class="lbl">Slides/hr</div></div>
+      <div class="stat" title="Estimated wall-clock time until all remaining slides are processed, based on current throughput."><div class="val" id="s-eta" style="color:#fbbf24">--</div><div class="lbl">ETA</div></div>
     </div>
     <div class="pbar-wrap-main" style="margin-top:12px">
       <div class="pbar-main" id="progress-bar" style="width:0%"></div>
@@ -162,14 +162,14 @@
       <table>
         <thead>
           <tr>
-            <th>Batch ID</th>
-            <th>Status</th>
-            <th>Slides</th>
-            <th>Progress</th>
-            <th>SLURM</th>
+            <th title="Timestamp + 8-character UUID (e.g. 20260521T150637_410bb3ce)">Batch ID</th>
+            <th title="RUNNING = active NF process · SUCCEEDED = NF exited 0 · FAILED = NF error or abort · Note: SUCCEEDED reflects NF exit code, not WDS coverage">Status</th>
+            <th title="Number of slides assigned to this batch">Slides</th>
+            <th title="Nextflow tasks completed / total. ⚠ = batch completed but fewer tasks finished than expected (usually from node failures with errorStrategy=ignore).">Progress</th>
+            <th title="SLURM jobs: ▶ running · ⏳ pending. Hover cell for node list.">SLURM</th>
             <th>Started</th>
             <th>Duration</th>
-            <th>Exit</th>
+            <th title="Nextflow process exit code (0 = clean exit · non-zero = error or abort · Tower disconnect used to abort before proxy was added)">Exit</th>
             <th>Log</th>
           </tr>
         </thead>
@@ -309,11 +309,11 @@ function renderProcesses(processes) {
       '<div class="process-name" title="' + (p.process||'') + '">' + name + '</div>' +
       '<div class="pbar-wrap"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + pct + '%"></div></div>' +
       '<div class="process-counts">' +
-        '<span class="chip chip-green">&#x2714; ' + done + '</span>' +
-        (run  ? '<span class="chip chip-blue">&#x25B6; ' + run  + '</span>' : '') +
-        (fail ? '<span class="chip chip-red">&#x2716; '  + fail + '</span>' : '') +
+        '<span class="chip chip-green" title="Tasks succeeded or served from cache">&#x2714; ' + done + '</span>' +
+        (run  ? '<span class="chip chip-blue" title="Tasks currently running in SLURM">&#x25B6; ' + run  + '</span>' : '') +
+        (fail ? '<span class="chip chip-red" title="Tasks failed (errorStrategy=ignore — typically killed by node failure; slides will be re-queued after WDS check)">&#x2716; '  + fail + '</span>' : '') +
         slurmBadge +
-        '<span class="chip chip-gray">' + pct + '%</span>' +
+        '<span class="chip chip-gray" title="Percentage of tasks complete">' + pct + '%</span>' +
       '</div></div>';
   }).join('');
   return '<div style="margin-top:6px;font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em">Processes</div>' +
@@ -324,11 +324,11 @@ function renderProcesses(processes) {
 function renderResources(res) {
   if (!res || !Object.keys(res).length) return '';
   const parts = [];
-  if (res.loadCpus    != null) parts.push('<div class="resource-chip">CPU load <span>' + res.loadCpus + '</span></div>');
-  if (res.loadMemory  != null) parts.push('<div class="resource-chip">Mem load <span>' + fmtBytes(res.loadMemory) + '</span></div>');
-  if (res.peakCpus    != null) parts.push('<div class="resource-chip">Peak CPU <span>' + res.peakCpus + '</span></div>');
-  if (res.peakMemory  != null) parts.push('<div class="resource-chip">Peak mem <span>' + fmtBytes(res.peakMemory) + '</span></div>');
-  if (res.peakRunning != null) parts.push('<div class="resource-chip">Peak running <span>' + res.peakRunning + '</span></div>');
+  if (res.loadCpus    != null) parts.push('<div class="resource-chip" title="Aggregate CPU load across all running tasks">CPU load <span>' + res.loadCpus + '</span></div>');
+  if (res.loadMemory  != null) parts.push('<div class="resource-chip" title="Aggregate memory in use across all running tasks">Mem load <span>' + fmtBytes(res.loadMemory) + '</span></div>');
+  if (res.peakCpus    != null) parts.push('<div class="resource-chip" title="Highest CPU load seen during this batch run">Peak CPU <span>' + res.peakCpus + '</span></div>');
+  if (res.peakMemory  != null) parts.push('<div class="resource-chip" title="Highest memory usage seen during this batch run">Peak mem <span>' + fmtBytes(res.peakMemory) + '</span></div>');
+  if (res.peakRunning != null) parts.push('<div class="resource-chip" title="Maximum number of tasks running concurrently">Peak running <span>' + res.peakRunning + '</span></div>');
   return parts.length ? '<div class="resource-row">' + parts.join('') + '</div>' : '';
 }
 
@@ -383,7 +383,7 @@ function renderBatchCard(b) {
       (b.slurm_pending ? ' <span style="color:#fcd34d">' + b.slurm_pending + '&#x23F3;</span>' : '') + '</span>'
     : '';
   const lastHb = t && t.updated_at
-    ? '<span style="font-size:0.7rem;color:#475569">heartbeat ' + Math.round((Date.now()/1000 - t.updated_at)) + 's ago</span>'
+    ? '<span style="font-size:0.7rem;color:#475569" title="Time since last Nextflow Tower telemetry heartbeat. Over 5 min may indicate the batch is stalled or the Tower proxy is unreachable.">heartbeat ' + Math.round((Date.now()/1000 - t.updated_at)) + 's ago</span>'
     : '';
   const logBtn = b.has_log ? '<button class="btn-sm" onclick="showLog(\'' + b.batch_id + '\')">Log</button>' : '';
   const towerContent = t
@@ -559,7 +559,7 @@ async function loadWds() {
     const footer = dbSucceeded
       ? '<tr style="border-top:1px solid #334155;color:#94a3b8">' +
         '<td style="padding:4px 6px" colspan="2">SUCCEEDED in DB: <b style="color:#fff">' + dbSucceeded + '</b></td>' +
-        '<td colspan="4" style="padding:4px 6px;font-size:0.7rem;color:#64748b">Gap = SUCCEEDED - WDS indexed</td>' +
+        '<td colspan="4" style="padding:4px 6px;font-size:0.7rem;color:#64748b" title="Non-zero gap means slides completed Nextflow but were not uploaded to WDS — usually caused by GPU node failures (errorStrategy=ignore) killing TESSELLATE tasks before .pt files are written">Gap = SUCCEEDED − WDS indexed (non-zero = slides need re-processing)</td>' +
         '</tr>' : '';
     el.innerHTML = header + rows.join('') + footer + '</tbody></table>';
   } catch(e) {
@@ -575,21 +575,21 @@ async function loadSlurm() {
     const d = await apiFetch('/api/slurm');
     if (d.error) { el.innerHTML = '<span class="no-data">squeue error: ' + d.error + '</span>'; return; }
     const summary = '<div style="font-size:1.1rem;margin-bottom:0.5rem">' +
-      '<span style="color:#6ee7b7;font-weight:600">' + d.running + '</span> running &nbsp;' +
-      '<span style="color:#fcd34d;font-weight:600">' + d.pending + '</span> pending &nbsp;' +
-      '<span style="color:#94a3b8">(' + d.total + ' total nf-* jobs)</span></div>';
+      '<span style="color:#6ee7b7;font-weight:600" title="SLURM jobs actively executing on GPU nodes">' + d.running + '</span> running &nbsp;' +
+      '<span style="color:#fcd34d;font-weight:600" title="SLURM jobs submitted but waiting for available GPU slots">' + d.pending + '</span> pending &nbsp;' +
+      '<span style="color:#94a3b8" title="All nf-* SLURM jobs across all running batches">(' + d.total + ' total nf-* jobs)</span></div>';
 
     // Per-process breakdown
     const procs = Object.entries(d.processes || {}).sort(function(a,b){
       return (b[1].running + b[1].pending) - (a[1].running + a[1].pending);
     });
     const procHtml = procs.length
-      ? '<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem">BY PROCESS</span><br>' +
+      ? '<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem" title="Active SLURM jobs grouped by Nextflow process name">BY PROCESS</span><br>' +
         procs.map(function(e) {
           const name = e[0]; const v = e[1];
           return '<span style="font-family:monospace;font-size:0.75rem;color:#c4b5fd">' + name + '</span> ' +
-            (v.running ? '<span style="color:#6ee7b7">&#x25B6;' + v.running + '</span> ' : '') +
-            (v.pending ? '<span style="color:#fcd34d">&#x23F3;' + v.pending + '</span>' : '');
+            (v.running ? '<span style="color:#6ee7b7" title="Running SLURM jobs">&#x25B6;' + v.running + '</span> ' : '') +
+            (v.pending ? '<span style="color:#fcd34d" title="Pending SLURM jobs (waiting for GPU slot)">&#x23F3;' + v.pending + '</span>' : '');
         }).join(' &nbsp; ') + '</div>'
       : '';
 
@@ -607,12 +607,12 @@ async function loadSlurm() {
 
     const nodes = Object.entries(d.nodes || {}).sort(function(a,b){return b[1]-a[1];});
     const nodeHtml = nodes.length
-      ? '<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">NODES</span><br>' +
-        nodes.map(function(e) { return '<span style="font-family:monospace;font-size:0.8rem">' + e[0] + '</span> <span style="color:#6ee7b7">x' + e[1] + '</span>'; }).join(' &nbsp; ') + '</div>'
+      ? '<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem" title="GPU nodes currently running our jobs and their active job count">NODES</span><br>' +
+        nodes.map(function(e) { return '<span style="font-family:monospace;font-size:0.8rem">' + e[0] + '</span> <span style="color:#6ee7b7" title="Running jobs on this node">x' + e[1] + '</span>'; }).join(' &nbsp; ') + '</div>'
       : '';
     const reasons = Object.entries(d.pending_reasons || {}).sort(function(a,b){return b[1]-a[1];});
     const reasonHtml = reasons.length
-      ? '<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem">PENDING REASONS</span><br>' +
+      ? '<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem" title="Reasons SLURM jobs are waiting (from squeue)">PENDING REASONS</span><br>' +
         reasons.map(function(e) { return '<span style="color:#fcd34d">' + e[0] + '</span>: ' + e[1]; }).join(' &nbsp; ') + '</div>'
       : '';
     let histHtml = '';
@@ -624,7 +624,7 @@ async function loadSlurm() {
       if (d.timeout)   parts.push('<span style="color:#fcd34d">&#x23F1; ' + d.timeout + ' timeout</span>');
       let avgStr = '';
       if (d.avg_elapsed_s != null) avgStr = ' &nbsp; <span style="color:#94a3b8">avg ' + fmtDuration(d.avg_elapsed_s) + ' &nbsp; min ' + fmtDuration(d.min_elapsed_s) + ' &nbsp; max ' + fmtDuration(d.max_elapsed_s) + '</span>';
-      histHtml = '<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem">LAST 24H</span><br>' + parts.join(' &nbsp; ') + avgStr + '</div>';
+      histHtml = '<div style="margin-bottom:0.4rem"><span style="color:#94a3b8;font-size:0.75rem" title="SLURM job outcomes for all nf-* jobs in the last 24 hours (from sacct)">LAST 24H</span><br>' + parts.join(' &nbsp; ') + avgStr + '</div>';
       const ftypes = d.failure_types || {};
       const ftypeLabels = {
         sigterm:{icon:'&#x26A1;',label:'SIGTERM',color:'#94a3b8'}, oom_gpu:{icon:'&#x1F525;',label:'GPU OOM',color:'#f87171'},

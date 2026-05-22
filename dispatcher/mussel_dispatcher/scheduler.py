@@ -146,11 +146,17 @@ class BatchScheduler:
     # that weren't re-added to the in-memory dispatch queue.
     _DB_SWEEP_INTERVAL = 60  # seconds
 
+    # How often to reset retriable FAILED slides back to PENDING.
+    # Complements the startup-time retry so slides failed mid-run (e.g. due to
+    # node failures) get re-queued without requiring a dispatcher restart.
+    _RETRY_FAILED_INTERVAL = 600  # seconds (10 minutes)
+
     def run(self):
         """Scheduler loop — call in the main thread."""
         log.info("BatchScheduler started (batch_size=%d, max_wait=%ds)",
                  self.cfg.batch_size, self.cfg.max_wait_seconds)
         _last_db_sweep = time.monotonic()
+        _last_retry_failed = time.monotonic()
         _last_eta_log = time.monotonic()
         _ETA_LOG_INTERVAL = 1800  # log ETA every 30 minutes
         while not self.stop_event.is_set():
@@ -159,6 +165,9 @@ class BatchScheduler:
             if now - _last_db_sweep >= self._DB_SWEEP_INTERVAL:
                 _last_db_sweep = now
                 self._requeue_db_pending()
+            if now - _last_retry_failed >= self._RETRY_FAILED_INTERVAL:
+                _last_retry_failed = now
+                self._retry_failed_slides()
             if now - _last_eta_log >= _ETA_LOG_INTERVAL:
                 _last_eta_log = now
                 self._log_eta()
@@ -217,6 +226,20 @@ class BatchScheduler:
         if newly_enqueued:
             log.info("BatchScheduler: re-enqueued %d PENDING slide(s) from DB (missed by watcher)",
                      newly_enqueued)
+
+    def _retry_failed_slides(self):
+        """Periodically reset retriable FAILED slides back to PENDING.
+
+        Mirrors the startup-time retry in recover_in_flight() so that slides
+        failed mid-run (e.g. due to SLURM node failures with errorStrategy=ignore)
+        are re-queued without requiring a dispatcher restart.
+        """
+        if not self.cfg.retry_failed:
+            return
+        n = self.state.reset_failed_to_pending(max_retries=self.cfg.max_slide_retries)
+        if n:
+            log.info("BatchScheduler: reset %d FAILED slide(s) to PENDING (periodic retry sweep)", n)
+            self._requeue_db_pending()
 
     def _maybe_dispatch(self, force: bool = False):
         with self._lock:

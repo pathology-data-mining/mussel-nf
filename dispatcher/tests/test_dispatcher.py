@@ -3697,3 +3697,260 @@ class TestStateOncotree:
         for col in ("slide_path", "slide_id", "oncotree_code", "status",
                     "error_msg", "first_seen_at", "completed_at"):
             assert col in row, f"Missing column: {col}"
+
+
+# ===========================================================================
+# BatchScheduler._retry_failed_slides  (periodic retry sweep)
+# ===========================================================================
+
+class TestRetryFailedSlides:
+    """Tests for the periodic FAILED → PENDING sweep added to BatchScheduler.run()."""
+
+    def _make_scheduler(self, tmp_path, retry_failed=True, max_slide_retries=5):
+        from mussel_dispatcher.state import StateStore
+        db = StateStore(str(tmp_path / "s.db"))
+        cfg = make_config(
+            batch_size=10,
+            max_wait_seconds=9_999,
+            retry_failed=retry_failed,
+            max_slide_retries=max_slide_retries,
+        )
+        rm = MagicMock()
+        rm.in_flight_slide_ids = set()
+        scheduler = BatchScheduler(cfg, db, rm, threading.Event())
+        return scheduler, db
+
+    def _set_failed(self, db, slide_id, fail_count=1):
+        """Directly write a FAILED slide with given fail_count to the DB."""
+        db._conn().execute(
+            "UPDATE slides SET status='FAILED', fail_count=? WHERE slide_id=?",
+            (fail_count, slide_id),
+        )
+        db._conn().commit()
+
+    def test_retry_failed_resets_retriable_slides_to_pending(self, tmp_path):
+        """FAILED slides below max_retries are reset to PENDING and enqueued."""
+        scheduler, db = self._make_scheduler(tmp_path, max_slide_retries=5)
+        db.add_slide("/s/a.svs", "a")
+        self._set_failed(db, "a", fail_count=1)
+
+        scheduler._retry_failed_slides()
+
+        row = db._conn().execute("SELECT status FROM slides WHERE slide_id='a'").fetchone()
+        assert row["status"] == "PENDING"
+        assert any(s["slide_id"] == "a" for s in scheduler._pending)
+
+    def test_retry_failed_does_not_reset_at_max_retries(self, tmp_path):
+        """FAILED slides at max_retries are left FAILED (permanently blacklisted)."""
+        scheduler, db = self._make_scheduler(tmp_path, max_slide_retries=3)
+        db.add_slide("/s/b.svs", "b")
+        self._set_failed(db, "b", fail_count=3)
+
+        scheduler._retry_failed_slides()
+
+        row = db._conn().execute("SELECT status, fail_count FROM slides WHERE slide_id='b'").fetchone()
+        assert row["status"] == "FAILED"
+        assert row["fail_count"] == 3
+        assert len(scheduler._pending) == 0
+
+    def test_retry_failed_disabled_when_cfg_retry_failed_false(self, tmp_path):
+        """No reset happens when cfg.retry_failed=False."""
+        scheduler, db = self._make_scheduler(tmp_path, retry_failed=False)
+        db.add_slide("/s/c.svs", "c")
+        self._set_failed(db, "c", fail_count=1)
+
+        scheduler._retry_failed_slides()
+
+        row = db._conn().execute("SELECT status FROM slides WHERE slide_id='c'").fetchone()
+        assert row["status"] == "FAILED"
+        assert len(scheduler._pending) == 0
+
+    def test_retry_failed_mixed_counts(self, tmp_path):
+        """Retriable slides are reset; exhausted slides stay FAILED."""
+        scheduler, db = self._make_scheduler(tmp_path, max_slide_retries=5)
+        db.add_slide("/s/ok.svs", "ok")
+        db.add_slide("/s/perm.svs", "perm")
+        self._set_failed(db, "ok",   fail_count=1)  # retriable
+        self._set_failed(db, "perm", fail_count=5)  # exhausted
+
+        scheduler._retry_failed_slides()
+
+        ok_row   = db._conn().execute("SELECT status FROM slides WHERE slide_id='ok'").fetchone()
+        perm_row = db._conn().execute("SELECT status FROM slides WHERE slide_id='perm'").fetchone()
+        assert ok_row["status"] == "PENDING"
+        assert perm_row["status"] == "FAILED"
+        assert len(scheduler._pending) == 1
+        assert scheduler._pending[0]["slide_id"] == "ok"
+
+    def test_retry_failed_already_in_deque_not_duplicated(self, tmp_path):
+        """If a reset slide is already in the deque it is not added again."""
+        scheduler, db = self._make_scheduler(tmp_path, max_slide_retries=5)
+        db.add_slide("/s/dup.svs", "dup")
+        self._set_failed(db, "dup", fail_count=1)
+        # Manually pre-populate the deque (simulates a race where DB swept first)
+        scheduler.enqueue({"slide_id": "dup", "slide_path": "/s/dup.svs"})
+
+        scheduler._retry_failed_slides()
+
+        assert sum(1 for s in scheduler._pending if s["slide_id"] == "dup") == 1
+
+    def test_retry_failed_does_not_touch_succeeded(self, tmp_path):
+        """SUCCEEDED slides are never reset by the retry sweep."""
+        scheduler, db = self._make_scheduler(tmp_path, max_slide_retries=5)
+        db.add_slide("/s/done.svs", "done")
+        db._conn().execute("UPDATE slides SET status='SUCCEEDED' WHERE slide_id='done'")
+        db._conn().commit()
+
+        scheduler._retry_failed_slides()
+
+        row = db._conn().execute("SELECT status FROM slides WHERE slide_id='done'").fetchone()
+        assert row["status"] == "SUCCEEDED"
+        assert len(scheduler._pending) == 0
+
+
+# ===========================================================================
+# TestE2ERetryFailedLoop — dispatch-loop regression with periodic retry
+# ===========================================================================
+
+class TestE2ERetryFailedLoop:
+    """End-to-end regression tests ensuring periodic retry does not re-create
+    the runaway dispatch loop fixed in the in-flight tracking patch."""
+
+    def _make_stack(self, tmp_path, max_slide_retries=5):
+        for d in ["batches", "state", "logs", "work", "results"]:
+            (tmp_path / d).mkdir()
+        cfg = make_config(
+            repo_dir=str(tmp_path),
+            outdir=str(tmp_path / "results"),
+            work_base_dir=str(tmp_path / "work"),
+            dispatch_dir=str(tmp_path / "batches"),
+            state_dir=str(tmp_path / "state"),
+            log_dir=str(tmp_path / "logs"),
+            batch_size=3,
+            min_batch_size=1,
+            max_wait_seconds=9999,
+            retry_failed=True,
+            max_slide_retries=max_slide_retries,
+        )
+        state = StateStore(str(tmp_path / "state" / "test.db"))
+        run_manager = RunManager(cfg, state)
+        scheduler = BatchScheduler(cfg, state, run_manager, threading.Event())
+        return cfg, state, scheduler, run_manager
+
+    def test_periodic_retry_requeues_failed_slides(self, tmp_path):
+        """_retry_failed_slides re-queues slides that failed mid-run (simulating
+        node failures) so they are picked up by the next dispatch without restart."""
+        import unittest.mock as mock
+
+        cfg, state, scheduler, run_manager = self._make_stack(tmp_path)
+
+        slides = [{"slide_path": f"/slides/{c}.svs", "slide_id": c} for c in ["A", "B"]]
+        for s in slides:
+            state.add_slide(s["slide_path"], s["slide_id"])
+            scheduler.enqueue(s)
+
+        # First dispatch: batch fails (simulating NF crash / node failure)
+        fail_proc = mock.Mock(returncode=1)
+        with mock.patch("subprocess.run", return_value=fail_proc), \
+             mock.patch("mussel_dispatcher.runner.time") as mt:
+            mt.time.side_effect = [0.0, 120.0]
+            scheduler._maybe_dispatch(force=True)
+            run_manager.shutdown(wait=True)
+
+        for s in slides:
+            row = state._conn().execute(
+                "SELECT status, fail_count FROM slides WHERE slide_id=?", (s["slide_id"],)
+            ).fetchone()
+            assert row["status"] == "FAILED"
+            assert row["fail_count"] == 1
+
+        # Periodic retry sweep re-queues them (no restart needed)
+        scheduler._retry_failed_slides()
+
+        for s in slides:
+            row = state._conn().execute(
+                "SELECT status FROM slides WHERE slide_id=?", (s["slide_id"],)
+            ).fetchone()
+            assert row["status"] == "PENDING"
+        assert {s["slide_id"] for s in scheduler._pending} == {"A", "B"}
+
+        # Second dispatch: succeeds
+        run_manager2 = RunManager(cfg, state)
+        scheduler2 = BatchScheduler(cfg, state, run_manager2, threading.Event())
+        scheduler2.enqueue({"slide_path": "/slides/A.svs", "slide_id": "A"})
+        scheduler2.enqueue({"slide_path": "/slides/B.svs", "slide_id": "B"})
+
+        ok_proc = mock.Mock(returncode=0)
+        with mock.patch("subprocess.run", return_value=ok_proc), \
+             mock.patch("mussel_dispatcher.runner.time") as mt:
+            mt.time.side_effect = [0.0, 120.0]
+            scheduler2._maybe_dispatch(force=True)
+            run_manager2.shutdown(wait=True)
+
+        for s in slides:
+            row = state._conn().execute(
+                "SELECT status FROM slides WHERE slide_id=?", (s["slide_id"],)
+            ).fetchone()
+            assert row["status"] == "SUCCEEDED"
+
+    def test_periodic_retry_does_not_cause_dispatch_loop(self, tmp_path):
+        """_retry_failed_slides must not re-enqueue slides that are in-flight
+        (already popped from deque but not yet written DISPATCHED in DB) to
+        avoid recreating the runaway loop fixed by in-flight tracking."""
+        cfg, state, scheduler, run_manager = self._make_stack(tmp_path)
+
+        slides = [{"slide_path": f"/slides/{c}.svs", "slide_id": c} for c in ["X", "Y", "Z"]]
+        for s in slides:
+            state.add_slide(s["slide_path"], s["slide_id"])
+
+        # Put all three slides in FAILED state directly
+        state._conn().execute(
+            "UPDATE slides SET status='FAILED', fail_count=1"
+        )
+        state._conn().commit()
+
+        # Simulate "X" in-flight: popped by RunManager but not yet DISPATCHED in DB
+        run_manager._in_flight["batch-001"] = {"X"}
+
+        scheduler._retry_failed_slides()
+
+        # X should NOT be in the deque — it is in-flight
+        queued_ids = {s["slide_id"] for s in scheduler._pending}
+        assert "X" not in queued_ids, "In-flight slide was re-enqueued — dispatch loop risk!"
+        # Y and Z are not in-flight → they should be re-queued
+        assert "Y" in queued_ids
+        assert "Z" in queued_ids
+
+    def test_exhausted_slides_never_dispatched(self, tmp_path):
+        """Slides at max_slide_retries are permanently FAILED and never re-dispatched."""
+        import unittest.mock as mock
+
+        cfg, state, scheduler, run_manager = self._make_stack(tmp_path, max_slide_retries=2)
+
+        slide = {"slide_path": "/slides/bad.svs", "slide_id": "bad"}
+        state.add_slide(slide["slide_path"], slide["slide_id"])
+        scheduler.enqueue(slide)
+
+        for _ in range(2):
+            fail_proc = mock.Mock(returncode=1)
+            with mock.patch("subprocess.run", return_value=fail_proc), \
+                 mock.patch("mussel_dispatcher.runner.time") as mt:
+                mt.time.side_effect = [0.0, 120.0]
+                scheduler._maybe_dispatch(force=True)
+                run_manager.shutdown(wait=True)
+            # After each failure, periodic retry re-queues (if not exhausted)
+            scheduler._retry_failed_slides()
+            run_manager = RunManager(cfg, state)
+            scheduler = BatchScheduler(cfg, state, run_manager, threading.Event())
+            for s in scheduler.state.get_pending_slides():
+                scheduler.enqueue(s)
+
+        # After max_slide_retries failures the slide should be permanently FAILED
+        row = state._conn().execute(
+            "SELECT status, fail_count FROM slides WHERE slide_id='bad'"
+        ).fetchone()
+        assert row["status"] == "FAILED"
+        assert row["fail_count"] >= 2
+        # Retry sweep does nothing more
+        scheduler._retry_failed_slides()
+        assert len(scheduler._pending) == 0

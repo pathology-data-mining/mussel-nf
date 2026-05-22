@@ -262,6 +262,22 @@ WHERE i.path IS NOT NULL
                 self._poll()
 
     def _build_query(self) -> str:
+        # Custom query: inline YAML string takes top priority.
+        if self.cfg.query:
+            return self.cfg.query.strip()
+
+        # Custom query: .sql file (path already resolved to absolute by config loader).
+        if self.cfg.query_file:
+            try:
+                sql = Path(self.cfg.query_file).read_text()
+                log.debug("DatabricksWatcher: loaded query from %s", self.cfg.query_file)
+                return sql.strip()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"DatabricksWatcher: could not read query_file {self.cfg.query_file!r}: {exc}"
+                ) from exc
+
+        # Default built-in template with optional filter clauses.
         source_clause = ""
         if self.cfg.source_filter:
             quoted = ", ".join(f"'{s}'" for s in self.cfg.source_filter)

@@ -85,25 +85,28 @@ watchers:
   #   # databricks_job_id: "12345"   # optional
 
   # Uncomment to watch a Databricks SQL warehouse for IMPACT slides.
-  # Queries the join of impact_matched_slides + slide_inventory to get S3 paths.
   # Credentials come from DATABRICKS_HOST + DATABRICKS_TOKEN env vars
   # (or ~/.databrickscfg DEFAULT profile).
   # Requires: pip install databricks-sdk
   #
-   - type: databricks
-     # warehouse_id: 0b49b7d78734ad5c    # auto-detected if omitted
-     poll_interval_seconds: 86400       # re-query once per day (default); use 259200 for every 3 days
-     source_filter: [ECS2]              # limit to slide_inventory.source values; [] = all
-  #   # additional_where: "m.IS_HNE = 1"  # optional extra SQL WHERE clause
+  - type: databricks
+    # warehouse_id: 0b49b7d78734ad5c    # auto-detected if omitted
+    poll_interval_seconds: 86400       # re-query once per day (default); use 259200 for every 3 days
+    # Query for slides. Three options (in priority order):
+    #   1. query_file: path to a .sql file (relative to this config file)
+    #   2. query: inline SQL string
+    #   3. built-in template (impact_matched_slides JOIN slide_inventory) with optional filters:
+    source_filter: [ECS2]              # (built-in only) limit to slide_inventory.source values
+  #   # additional_where: "m.IS_HNE = 1"  # (built-in only) extra SQL WHERE clause
+  #   # query_file: queries/reef_v2_slides.sql   # custom query file (must return slide_id, slide_path, oncotree_code)
   #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
   #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).
-     wds_destinations:
-       hoptimus1: s3://reef-v2-0/wds
-       titan_slide: s3://reef-v2-0/wds
-  #   #   uni2h: s3://your-bucket/wds/impact/uni2h
+    wds_destinations:
+      hoptimus1: s3://reef-v2-0/wds
+      titan_slide: s3://reef-v2-0/wds
   #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
-     # Sync results back to Databricks after each batch.
-     # Volume folder and warehouse MERGE are auto-configured from the table name
-     # and the auto-detected warehouse — no job_id or warehouse_id required.
-     databricks_table: cdsi_prod.pathology_data_mining.slide_embeddings_v2
+    # Sync results back to Databricks after each batch.
+    # Volume folder and warehouse MERGE are auto-configured from the table name
+    # and the auto-detected warehouse — no job_id or warehouse_id required.
+    databricks_table: cdsi_prod.pathology_data_mining.slide_embeddings_v2

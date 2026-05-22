@@ -61,6 +61,8 @@ class WatcherConfig:
     warehouse_id: str = ""
     source_filter: list = field(default_factory=list)
     additional_where: str = ""
+    query: str = ""        # inline SQL override (replaces built-in template entirely)
+    query_file: str = ""   # path to a .sql file (alternative to inline query)
 
 
 @dataclass
@@ -122,6 +124,7 @@ class Config:
         _WATCHER_PATH_FIELDS = (
             "path", "inventory_csv", "status_csv", "local_slides_dir",
             "wds_staging_dir", "scripts_dir", "gdc_token_file", "secrets_env_file",
+            "query_file",
         )
 
         def _resolve_watcher_path(val: str) -> str:

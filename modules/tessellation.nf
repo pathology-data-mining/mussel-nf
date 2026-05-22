@@ -1,7 +1,11 @@
 
 process TESSELLATE {
     label "bigTask"
-    label "cpuTask"
+    // Note: no cpuTask/gpuTask label here — GPU requirement is determined at
+    // runtime based on params.tiling.seg_model.  When seg_model='neural' (the
+    // default), tessellation uses a neural segmentation model (GrandQC) that
+    // requires a GPU.  The executor profiles (condor, slurm, cloud) handle this
+    // via withName:TESSELLATE directives in nextflow.config.
 
     scratch params.scratch_dir ?: false
 

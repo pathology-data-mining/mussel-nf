@@ -1,0 +1,18 @@
+tiling:
+  seg_config_group: 'biopsy'
+  remove_penmarks: true    # remove pen marks (conservative; pen marks only)
+  remove_artifacts: false  # do NOT remove artifacts (too stringent for TCGA)
+featurize:
+  model_types:
+    - hoptimus1
+    - titan_slide
+  # Max patches per slide for slide-level models (TITAN_SLIDE, GIGAPATH_SLIDE).
+  # Slides exceeding this limit are subsampled to prevent CUDA OOM (O(N²) attention).
+  # 4096 is safe for V100 (16 GB), 8192 for A100 (40 GB).
+  slide_max_patches: 4096
+  model_embedding_precision:
+    hoptimus1: bfloat16
+prefetch:
+  local_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/s3-slides
+  s3_endpoint: http://pmindecs.mskcc.org:9020
+  max_concurrent: 16

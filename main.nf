@@ -4,6 +4,7 @@ include { validateParameters; paramsSummaryLog; samplesheetToList } from 'plugin
 
 include { MUSSEL } from './modules/mussel'
 include { DOWNLOAD_SLIDE } from './modules/download'
+include { PREFETCH_SLIDE } from './modules/prefetch'
 
 
 process saveParams {
@@ -118,7 +119,25 @@ workflow {
         ch_downloaded = DOWNLOAD_SLIDE(
             ch_branched.needs_download.map { meta, _slide -> meta }
         )
-        ch_samples = ch_branched.ready.mix(ch_downloaded)
+
+        // Pre-fetch S3/ECS slides on CPU nodes before GPU tasks run.
+        // Only routes slides whose path starts with "s3://" — local paths pass through.
+        // Skipped entirely when params.prefetch.enabled = false.
+        if (params.prefetch.enabled) {
+            ch_branched.ready.branch { meta, slide ->
+                s3: slide.toString().startsWith("s3://")
+                local: true
+            }.set { ch_ready_branched }
+
+            ch_prefetched = PREFETCH_SLIDE(
+                ch_ready_branched.s3.map { meta, slide -> tuple(meta, slide.toString()) }
+            )
+            ch_samples = ch_branched.ready.filter { meta, slide ->
+                !slide.toString().startsWith("s3://")
+            }.mix(ch_prefetched).mix(ch_downloaded)
+        } else {
+            ch_samples = ch_branched.ready.mix(ch_downloaded)
+        }
     }
 
     if (params.linear_probe.annotations_csv) {

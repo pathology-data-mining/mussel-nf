@@ -94,6 +94,13 @@ class Config:
     tower_endpoint: str = ""           # if set, pass -with-tower to NF (e.g. http://localhost:8050)
     dashboard_port: int = 8050         # port for the dashboard HTTP server
     tower_proxy_port: int = 8049       # port for the persistent Tower proxy (sits in front of dashboard)
+    # Top-level S3/ECS credentials — inherited by all watchers that don't set their own.
+    # Prefer nextflow_secrets (portable); secrets_env_file and inline keys are fallbacks.
+    s3_endpoint: str = ""
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    secrets_env_file: str = ""
+    nextflow_secrets: list = field(default_factory=list)
     combined_manifest_path: Optional[str] = None
     post_batch_hooks: list = field(default_factory=list)
     watchers: list = field(default_factory=list)
@@ -118,7 +125,7 @@ class Config:
         raw["state_dir"]     = _resolve("state_dir",     "state")
         raw["log_dir"]       = _resolve("log_dir",       "logs")
 
-        for key in ("outdir", "nextflow_config", "nextflow_params_file"):
+        for key in ("outdir", "nextflow_config", "nextflow_params_file", "secrets_env_file"):
             val = raw.get(key, "")
             if val and not os.path.isabs(val):
                 raw[key] = os.path.join(config_dir, val)
@@ -162,6 +169,21 @@ class Config:
                     log.info("Auto-detected warehouse_id: %s", w.warehouse_id)
                 else:
                     log.warning("Could not auto-detect warehouse_id; set it explicitly in the config")
+
+        # Resolve top-level S3 credentials (secrets_env_file / nextflow_secrets).
+        if cfg.secrets_env_file and os.path.isfile(cfg.secrets_env_file):
+            _load_secrets_env(cfg.secrets_env_file, cfg)  # type: ignore[arg-type]
+        if cfg.nextflow_secrets:
+            _load_nf_secrets(cfg.nextflow_secrets, cfg)  # type: ignore[arg-type]
+
+        # Propagate top-level S3 config to watchers that don't have their own.
+        for w in cfg.watchers:
+            if not w.s3_endpoint and cfg.s3_endpoint:
+                w.s3_endpoint = cfg.s3_endpoint
+            if not w.s3_access_key and cfg.s3_access_key:
+                w.s3_access_key = cfg.s3_access_key
+            if not w.s3_secret_key and cfg.s3_secret_key:
+                w.s3_secret_key = cfg.s3_secret_key
 
         for w in cfg.watchers:
             if w.secrets_env_file and os.path.isfile(w.secrets_env_file):

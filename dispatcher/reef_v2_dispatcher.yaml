@@ -18,6 +18,12 @@ outdir: reef-v2-results          # nextflow --outdir; manifest CSVs are written 
 # nextflow_config: custom.config        # optional: passed as -c to every nextflow run
 nextflow_params_file: ../reef_v2_params.yaml # optional: passed as -params-file to every nextflow run
 
+# S3/ECS credentials — inherited by all watchers
+s3_endpoint: http://pmindecs.mskcc.org:9020
+nextflow_secrets:
+  - ECS_ACCESS_KEY
+  - ECS_SECRET_KEY
+
 # Parallelism
 max_concurrent_runs: 4
 
@@ -94,12 +100,7 @@ watchers:
   #
   - type: databricks
     # warehouse_id: 0b49b7d78734ad5c    # auto-detected if omitted
-    poll_interval_seconds: 86400       # re-query once per day (default); use 259200 for every 3 days
-    # ECS S3 endpoint and credentials for slide access
-    s3_endpoint: http://pmindecs.mskcc.org:9020
-    nextflow_secrets:
-      - ECS_ACCESS_KEY
-      - ECS_SECRET_KEY
+    poll_interval_seconds: 86400
     # Query for slides. Three options (in priority order):
     #   1. query_file: path to a .sql file (relative to this config file)
     #   2. query: inline SQL string

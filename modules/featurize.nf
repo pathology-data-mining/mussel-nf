@@ -5,6 +5,10 @@ process FEATURIZE_BATCH {
     label "gpuTask"
     label "parallelTask"
 
+    // HDF5 file locking is incompatible with GPFS/Lustre/NFS: multiple DataLoader
+    // workers opening the same .patch.h5 concurrently get EAGAIN (errno=11).
+    env HDF5_USE_FILE_LOCKING = 'FALSE'
+
     secret 'HF_TOKEN'
 
     // Publish slide encoder features (always created)

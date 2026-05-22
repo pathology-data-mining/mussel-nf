@@ -186,9 +186,17 @@ let _chartJsReady = false;
 function onChartJsReady() { _chartJsReady = true; loadStatus(); }
 
 function badge(status, stalled) {
-  if (stalled) return '<span class="badge badge-stalled">STALLED</span>';
+  if (stalled) return '<span class="badge badge-stalled" title="No Tower heartbeat for >5 min — NF may be hung or disconnected">STALLED</span>';
   const cls = {RUNNING:'running',SUCCEEDED:'succeeded',FAILED:'failed',PENDING:'pending',DISPATCHED:'running'}[status] || 'pending';
-  return '<span class="badge badge-' + cls + '">' + status + '</span>';
+  const tips = {
+    RUNNING:    'Nextflow process is active; slides are being processed',
+    SUCCEEDED:  'Nextflow exited 0 — all slides attempted. Check WDS Gap for any that did not make it to S3.',
+    FAILED:     'Nextflow exited non-zero or was aborted (e.g. Tower disconnect). Slides reset to PENDING or FAILED for retry.',
+    PENDING:    'Batch queued but not yet started',
+    DISPATCHED: 'Slides dispatched; Nextflow starting up',
+  };
+  const tip = tips[status] ? ' title="' + tips[status] + '"' : '';
+  return '<span class="badge badge-' + cls + '"' + tip + '>' + status + '</span>';
 }
 
 function fmtDuration(s, startIso, ongoing) {
@@ -428,13 +436,18 @@ async function loadBatches() {
       if (t && t.total) {
         const fail = (t.task_counts||{}).failed || 0;
         if (b.status === 'RUNNING') {
-          progressCell = '<span style="font-size:0.75rem">' + t.done + '/' + t.total + '</span>' +
+          const runTip = fail ? 'title="' + fail + ' tasks failed so far (will be ignored — see NF errorStrategy)"' : 'title="All tasks passing so far"';
+          progressCell = '<span style="font-size:0.75rem" ' + runTip + '>' + t.done + '/' + t.total + '</span>' +
             '<div class="pbar-wrap" style="min-width:60px"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + t.pct + '%"></div></div>';
         } else {
           const incomplete = t.done < t.total;
           const color = incomplete ? 'fbbf24' : (fail ? 'f87171' : '6ee7b7');
           const icon  = incomplete ? '&#x26A0; ' : (fail ? '&#x2716; ' + fail + ' failed &middot; ' : '&#x2714; ');
-          const tip   = incomplete ? ' title="stalled: only ' + t.done + ' of ' + t.total + ' tasks completed"' : '';
+          const tip   = incomplete
+            ? ' title="Only ' + t.done + ' of ' + t.total + ' tasks completed before NF exited (remaining slides reset to PENDING for retry)"'
+            : (fail
+                ? ' title="All ' + t.total + ' tasks ran; ' + fail + ' failed (errorStrategy=ignore — typically node failure; slides requeued)"'
+                : ' title="All ' + t.total + ' tasks completed successfully"');
           progressCell = '<span style="font-size:0.75rem;color:#' + color + '"' + tip + '>' +
             icon + t.done + '/' + t.total + '</span>';
         }
@@ -445,24 +458,24 @@ async function loadBatches() {
       const nodes  = (b.slurm_nodes || []).join(', ');
       let slurmCell = '--';
       if (slurmR != null) {
-        const tip = nodes ? 'title="' + nodes + '"' : '';
-        slurmCell = '<span ' + tip + ' style="cursor:' + (nodes?'help':'default') + '">' +
-          '<span style="color:#6ee7b7">' + slurmR + '&#x25B6;</span>' +
-          (b.slurm_pending ? ' <span style="color:#fcd34d">' + b.slurm_pending + '&#x23F3;</span>' : '') + '</span>';
+        const tip = nodes ? 'title="Running on: ' + nodes + '"' : 'title="SLURM jobs running"';
+        slurmCell = '<span ' + tip + ' style="cursor:help">' +
+          '<span style="color:#6ee7b7" title="' + slurmR + ' SLURM job(s) actively running">' + slurmR + '&#x25B6;</span>' +
+          (b.slurm_pending ? ' <span style="color:#fcd34d" title="' + b.slurm_pending + ' SLURM job(s) queued — waiting for GPU slots">'+b.slurm_pending+'&#x23F3;</span>' : '') + '</span>';
       }
       const stalled  = t && t.stalled;
       const failChip = t && (t.task_counts||{}).failed
-        ? '<span class="chip chip-red" style="margin-left:4px">&#x2716;' + t.task_counts.failed + '</span>' : '';
+        ? '<span class="chip chip-red" style="margin-left:4px" title="' + t.task_counts.failed + ' Nextflow tasks failed (errorStrategy=ignore — typically killed by node failure; affected slides reset to PENDING for retry)">&#x2716;' + t.task_counts.failed + '</span>' : '';
       const exitCell = (b.nextflow_exit != null && b.nextflow_exit !== 0)
-        ? '<span style="color:#f87171">' + b.nextflow_exit + '</span>'
-        : (b.nextflow_exit === 0 ? '0' : '--');
+        ? '<span style="color:#f87171" title="Non-zero Nextflow exit — process was aborted or errored. Slides were reset to PENDING or FAILED.">' + b.nextflow_exit + '</span>'
+        : (b.nextflow_exit === 0 ? '<span title="Nextflow exited cleanly">0</span>' : '--');
       return '<tr>' +
-        '<td style="font-family:monospace;font-size:0.7rem">' + b.batch_id + '</td>' +
+        '<td style="font-family:monospace;font-size:0.7rem" title="' + b.batch_id + '">' + b.batch_id + '</td>' +
         '<td>' + badge(b.status, stalled) + failChip + '</td>' +
-        '<td style="color:#94a3b8">' + (b.slide_count ?? '--') + '</td>' +
+        '<td style="color:#94a3b8" title="Slides assigned to this batch">' + (b.slide_count ?? '--') + '</td>' +
         '<td>' + progressCell + '</td>' +
         '<td>' + slurmCell + '</td>' +
-        '<td>' + fmtTime(b.dispatched_at) + '</td>' +
+        '<td title="' + (b.dispatched_at || '') + '">' + fmtTime(b.dispatched_at) + '</td>' +
         '<td>' + fmtDuration(b.duration_s, b.dispatched_at, b.status === 'RUNNING') + '</td>' +
         '<td>' + exitCell + '</td>' +
         '<td>' + (b.has_log ? '<button class="btn-sm" onclick="showLog(\'' + b.batch_id + '\')">View</button>' : '--') + '</td>' +

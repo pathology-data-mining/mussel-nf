@@ -92,6 +92,8 @@ class Config:
     nextflow_params_file: str = ""
     nextflow_version: str = ""
     tower_endpoint: str = ""           # if set, pass -with-tower to NF (e.g. http://localhost:8050)
+    dashboard_port: int = 8050         # port for the dashboard HTTP server
+    tower_proxy_port: int = 8049       # port for the persistent Tower proxy (sits in front of dashboard)
     combined_manifest_path: Optional[str] = None
     post_batch_hooks: list = field(default_factory=list)
     watchers: list = field(default_factory=list)

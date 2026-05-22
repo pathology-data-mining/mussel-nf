@@ -16,7 +16,9 @@ outdir: tcga-results
 #nextflow_config: tcga_nextflow.config
 nextflow_params_file: ../tcga_params.yaml
 nextflow_version: "26.04.0"
-tower_endpoint: "http://localhost:8049"  # persistent Tower proxy (never restarts); forwards to dashboard on :8050
+# dashboard_port: 8050      # dashboard HTTP port (default: 8050); auto-started by dispatcher
+# tower_proxy_port: 8049    # Tower proxy port (default: 8049); auto-started, tower_endpoint auto-derived
+# tower_endpoint: "http://localhost:8049"  # set explicitly to override auto-derived value
 
 # Run up to 3 Nextflow jobs simultaneously
 max_concurrent_runs: 3

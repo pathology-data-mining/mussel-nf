@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -21,6 +22,48 @@ from .watchers import LocalWatcher, S3Watcher, DatabricksWatcher, TcgaWatcher
 from .runner import NextflowRunner, collect_manifests, MANIFEST_HEADER
 
 log = logging.getLogger("mussel-dispatcher")
+
+
+def _launch_sidecar(name: str, cmd: list[str]) -> subprocess.Popen:
+    """Launch a sidecar process (dashboard / tower_proxy), logging its output."""
+    log.info("Launching %s: %s", name, " ".join(cmd))
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _start_sidecars(cfg: Config, config_path: str) -> list[subprocess.Popen]:
+    """Start dashboard and tower_proxy subprocesses using ports from config.
+
+    Both are optional — if dashboard_port is 0 neither is started.
+    Returns the list of started Popen objects so main() can terminate them on exit.
+    """
+    if not cfg.dashboard_port:
+        return []
+
+    python = sys.executable
+    procs: list[subprocess.Popen] = []
+
+    dashboard = _launch_sidecar("dashboard", [
+        python, "-m", "mussel_dispatcher.dashboard",
+        config_path,
+        "--port", str(cfg.dashboard_port),
+    ])
+    procs.append(dashboard)
+
+    if cfg.tower_proxy_port:
+        proxy = _launch_sidecar("tower_proxy", [
+            python, "-m", "mussel_dispatcher.tower_proxy",
+            "--upstream", f"http://localhost:{cfg.dashboard_port}",
+            "--port", str(cfg.tower_proxy_port),
+        ])
+        procs.append(proxy)
+
+    return procs
+
+
 
 class BatchScheduler:
     """
@@ -426,6 +469,11 @@ def main():
     cfg = Config.load(sys.argv[1])
     log.info("Configuration loaded from %s", sys.argv[1])
 
+    # Auto-derive tower_endpoint from tower_proxy_port if not explicitly set.
+    if not cfg.tower_endpoint and cfg.tower_proxy_port:
+        cfg.tower_endpoint = f"http://localhost:{cfg.tower_proxy_port}"
+        log.info("Auto-derived tower_endpoint: %s", cfg.tower_endpoint)
+
     os.makedirs(cfg.work_base_dir, exist_ok=True)
     os.makedirs(cfg.dispatch_dir, exist_ok=True)
     os.makedirs(cfg.state_dir, exist_ok=True)
@@ -467,6 +515,9 @@ def main():
                 # Lockfile vanished or unreadable — retry
                 pass
     log.info("PID lockfile written: %s (PID=%d)", pid_lock_path, os.getpid())
+
+    # Launch dashboard and tower_proxy sidecars (ports from config).
+    sidecar_procs = _start_sidecars(cfg, sys.argv[1])
 
     db_path = os.path.join(cfg.state_dir, "dispatcher.db")
     state = StateStore(db_path)
@@ -557,6 +608,8 @@ def main():
                     "They will be recovered on next startup.", run_manager.running_count())
         run_manager.shutdown(wait=False)
     log.info("mussel-dispatcher stopped.")
+    for proc in sidecar_procs:
+        proc.terminate()
     try:
         os.unlink(pid_lock_path)
     except OSError:

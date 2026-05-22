@@ -331,30 +331,42 @@ def _load_secrets_env(path: str, watcher: WatcherConfig) -> None:
         log.warning("Could not read secrets_env_file %s: %s", path, exc)
 
 
-def _load_nf_secrets(secret_names: list[str], watcher: WatcherConfig) -> None:
-    """Resolve Nextflow secrets by name and populate watcher S3 credentials."""
-    _KEY_MAP = {
-        "ECS_ACCESS_KEY": "s3_access_key", "AWS_ACCESS_KEY_ID": "s3_access_key",
-        "ECS_SECRET_KEY": "s3_secret_key", "AWS_SECRET_ACCESS_KEY": "s3_secret_key",
-    }
-    for name in secret_names:
-        attr = _KEY_MAP.get(name)
-        if not attr or getattr(watcher, attr):
+def _load_nf_secrets(secret_names: list | dict, target: object) -> None:
+    """Resolve Nextflow secrets and set attributes on *target*.
+
+    *secret_names* can be:
+    - A **dict** ``{attr: secret_name}`` — explicit mapping, e.g.
+      ``{"s3_access_key": "ECS_ACCESS_KEY", "s3_secret_key": "ECS_SECRET_KEY"}``
+    - A **list** of secret names — looked up via a built-in KEY_MAP for
+      backward compatibility (ECS_ACCESS_KEY, AWS_ACCESS_KEY_ID, etc.)
+    """
+    if isinstance(secret_names, dict):
+        mapping = secret_names  # {attr: secret_name}
+    else:
+        # Legacy list form: map well-known names to config attrs
+        _KEY_MAP = {
+            "ECS_ACCESS_KEY": "s3_access_key", "AWS_ACCESS_KEY_ID": "s3_access_key",
+            "ECS_SECRET_KEY": "s3_secret_key", "AWS_SECRET_ACCESS_KEY": "s3_secret_key",
+        }
+        mapping = {_KEY_MAP[n]: n for n in secret_names if n in _KEY_MAP}
+
+    for attr, secret_name in mapping.items():
+        if getattr(target, attr, None):
             continue
         try:
             result = subprocess.run(
-                ["nextflow", "secrets", "get", name],
+                ["nextflow", "secrets", "get", secret_name],
                 capture_output=True, text=True, timeout=15,
             )
             value = result.stdout.strip()
             if result.returncode != 0 or not value:
-                log.warning("nextflow secrets get %s failed: %s", name,
+                log.warning("nextflow secrets get %s failed: %s", secret_name,
                             result.stderr.strip() or "empty output")
                 continue
-            setattr(watcher, attr, value)
-            log.debug("Loaded %s from Nextflow secrets → %s", name, attr)
+            setattr(target, attr, value)
+            log.debug("Loaded %s from Nextflow secret %s", attr, secret_name)
         except Exception as exc:
-            log.warning("Could not load Nextflow secret %s: %s", name, exc)
+            log.warning("Could not load Nextflow secret %s: %s", secret_name, exc)
 
 
 def _read_nf_model_types(repo_dir: str) -> list[str]:

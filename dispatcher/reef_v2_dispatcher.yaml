@@ -21,8 +21,8 @@ nextflow_params_file: ../reef_v2_params.yaml # optional: passed as -params-file 
 # S3/ECS credentials — inherited by all watchers
 s3_endpoint: http://pmindecs.mskcc.org:9020
 nextflow_secrets:
-  - ECS_ACCESS_KEY
-  - ECS_SECRET_KEY
+  s3_access_key: ECS_ACCESS_KEY
+  s3_secret_key: ECS_SECRET_KEY
 
 # Parallelism
 max_concurrent_runs: 4

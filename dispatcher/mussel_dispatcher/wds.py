@@ -403,11 +403,16 @@ def append_wds(
     already_indexed = set(index.keys())
     log.info("Loaded index: %d slides already in WDS", len(already_indexed))
 
-    # Remove any stale index entries for slides that are now known failures.
+    # Remove stale index entries only for slides in the CURRENT batch that are
+    # known permanent failures.  Scoping to slide_id_filter prevents cascade
+    # eviction: if slides from a *different* batch are temporarily FAILED (e.g.
+    # GPU node outage) while this batch's WDS hook runs, their previously-good
+    # index entries must not be deleted — the features are still safely in S3.
     if failed_slides:
-        stale = already_indexed & failed_slides
+        scope = failed_slides & slide_id_filter if slide_id_filter is not None else failed_slides
+        stale = already_indexed & scope
         if stale:
-            log.warning("Removing %d failed slides from wds_index: %s",
+            log.warning("Removing %d failed slides from wds_index (current-batch scope): %s",
                         len(stale), ", ".join(sorted(stale)[:10]))
             for sid in stale:
                 del index[sid]

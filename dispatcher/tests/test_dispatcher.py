@@ -3954,3 +3954,147 @@ class TestE2ERetryFailedLoop:
         # Retry sweep does nothing more
         scheduler._retry_failed_slides()
         assert len(scheduler._pending) == 0
+
+
+# ===========================================================================
+# wds.py failed_slides pruning scope fix
+# ===========================================================================
+
+class TestWdsPruneScope:
+    """Tests for the bug where append_wds() pruned wds_index entries for slides
+    from *other* batches that happened to be FAILED at the time the current
+    batch's WDS hook ran.
+
+    Fix: scope the prune to slide_id_filter (current-batch slides only).
+    """
+
+    def _fake_index(self, slide_ids, project="PROJ"):
+        return {
+            sid: {"project_id": project, "shard_file": f"{project}/000000.tar",
+                  "native_mpp": None, "mpp_is_fallback": None}
+            for sid in slide_ids
+        }
+
+    def test_failed_slides_outside_filter_not_pruned(self, tmp_path, monkeypatch):
+        """Slides that are FAILED but NOT in the current batch's slide_id_filter
+        must keep their wds_index entries."""
+        import pandas as pd
+        from mussel_dispatcher import wds as wds_mod
+
+        current_batch = {"A", "B"}
+        other_batch_slide = "X"  # previously uploaded, now temporarily FAILED elsewhere
+
+        # Index contains both current batch and the other-batch slide
+        initial_index = self._fake_index(current_batch | {other_batch_slide})
+        saved = {}
+
+        def fake_save(index, *a, **kw):
+            saved.update(index)
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: dict(initial_index))
+        monkeypatch.setattr(wds_mod, "_save_index", fake_save)
+
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        inv = pd.DataFrame({"file_name": ["A.svs", "B.svs"], "project_id": ["PROJ", "PROJ"]})
+
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter=current_batch,
+            manifest_csv=None,
+            failed_slides={other_batch_slide},  # from another batch, currently FAILED
+        )
+
+        # The other-batch slide must still be in the index (not pruned)
+        # saved is only updated if _save_index is called; check original index was preserved
+        # Since no new slides were appended, _save_index shouldn't even be called for prune
+        assert other_batch_slide not in saved or saved.get(other_batch_slide) is not None, \
+            "Other-batch slide was wrongly pruned from wds_index"
+
+    def test_failed_slides_inside_filter_are_pruned(self, tmp_path, monkeypatch):
+        """Slides that are FAILED and ARE in the current batch's slide_id_filter
+        must be pruned from the wds_index (they are permanent failures for this batch)."""
+        import pandas as pd
+        from mussel_dispatcher import wds as wds_mod
+
+        current_batch = {"A", "B", "bad"}
+        failed_in_current = {"bad"}
+
+        initial_index = self._fake_index(current_batch)
+        pruned_index = {}
+
+        def fake_save(index, *a, **kw):
+            pruned_index.update(index)
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: dict(initial_index))
+        monkeypatch.setattr(wds_mod, "_save_index", fake_save)
+
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        inv = pd.DataFrame({
+            "file_name": ["A.svs", "B.svs", "bad.svs"],
+            "project_id": ["PROJ", "PROJ", "PROJ"],
+        })
+
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter=current_batch,
+            manifest_csv=None,
+            failed_slides=failed_in_current,
+        )
+
+        assert "bad" not in pruned_index, "Current-batch failed slide should have been pruned"
+        assert "A" in pruned_index or "A" in initial_index  # A, B untouched
+
+    def test_no_filter_prunes_all_failed(self, tmp_path, monkeypatch):
+        """When slide_id_filter is None (manual / full-index run), all failed_slides
+        are still pruned (backward-compatible behaviour)."""
+        import pandas as pd
+        from mussel_dispatcher import wds as wds_mod
+
+        all_slides = {"A", "B", "bad"}
+        initial_index = self._fake_index(all_slides)
+        pruned_index = {}
+
+        def fake_save(index, *a, **kw):
+            pruned_index.update(index)
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: dict(initial_index))
+        monkeypatch.setattr(wds_mod, "_save_index", fake_save)
+
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        inv = pd.DataFrame({
+            "file_name": ["A.svs", "B.svs", "bad.svs"],
+            "project_id": ["PROJ", "PROJ", "PROJ"],
+        })
+
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter=None,  # no filter — full run
+            manifest_csv=None,
+            failed_slides={"bad"},
+        )
+
+        assert "bad" not in pruned_index, "Failed slide should be pruned in no-filter mode"

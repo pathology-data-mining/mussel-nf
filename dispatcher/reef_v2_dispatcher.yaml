@@ -9,6 +9,8 @@
 #   log_dir       → logs/
 # Override any of them by setting an absolute path below.
 work_base_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/work
+state_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/state
+log_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/logs
 
 dashboard_port: 9050
 tower_proxy_port: 9049
@@ -107,7 +109,7 @@ watchers:
     #   3. built-in template (impact_matched_slides JOIN slide_inventory) with optional filters:
     #      source_filter: [ECS2]         # limit to slide_inventory.source values
     #      additional_where: "m.IS_HNE = 1"
-    query_file: queries/impact_slides_default.sql
+    query_file: queries/impact_slides_test5.sql  # TODO: switch to impact_slides_default.sql for production
   #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
   #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).

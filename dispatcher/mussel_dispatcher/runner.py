@@ -215,7 +215,8 @@ class NextflowRunner:
 
         # Use the 8-char UUID hash as the NF run name so it fits within
         # Seqera Platform's 16-char workflow.id field limit.
-        nf_run_name = self.batch_id.rsplit("_", 1)[-1]  # e.g. "410bb3ce"
+        # Prefix with "r" to ensure it starts with a letter (Nextflow requirement).
+        nf_run_name = "r" + self.batch_id.rsplit("_", 1)[-1]  # e.g. "r410bb3ce"
         trace_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.trace.tsv")
         cmd = [
             "nextflow", "run", self.cfg.repo_dir,

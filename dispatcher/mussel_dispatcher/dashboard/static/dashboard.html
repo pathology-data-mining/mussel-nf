@@ -254,7 +254,7 @@ async function loadStatus() {
     document.getElementById('s-failed').textContent      = c.FAILED ?? 0;
     document.getElementById('s-pending').textContent     = c.PENDING ?? 0;
     document.getElementById('s-dispatched').textContent  = c.DISPATCHED ?? 0;
-    document.getElementById('s-pct').textContent         = (d.pct_done ?? 0) + '%';
+    document.getElementById('s-pct').textContent         = (d.pct_succeeded ?? 0) + '%';
     document.getElementById('s-running').textContent     = d.running_batches ?? 0;
     document.getElementById('s-blacklisted').textContent = d.blacklisted ?? 0;
     document.getElementById('progress-bar').style.width  = (d.pct_done ?? 0) + '%';
@@ -565,7 +565,7 @@ async function loadWds() {
     if (wdsPctEl && dbExpected > 0) {
       const activeKeys = keys.filter(function(m) { return (models[m].slides||0) > 0; });
       const minWds = activeKeys.length ? Math.min.apply(null, activeKeys.map(function(m) { return models[m].slides; })) : 0;
-      wdsPctEl.textContent = Math.min(100, Math.round(minWds / dbExpected * 100)) + '%';
+      wdsPctEl.textContent = Math.min(100, Math.round(Math.min(minWds, dbExpected) / dbExpected * 100)) + '%';
     }
     if (!keys.length) { el.innerHTML = '<span class="no-data">No WDS data yet.</span>'; return; }
     const header = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">' +

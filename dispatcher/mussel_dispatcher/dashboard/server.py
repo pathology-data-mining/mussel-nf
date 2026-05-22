@@ -231,12 +231,21 @@ def _build_handler(cfg: Config):
         # Use WDS manifest counts as the authoritative "done" tally — more reliable
         # than DB SUCCEEDED (which can be reset to PENDING by _verify_wds_coverage).
         wds_counts = _wds_done_counts()
-        # "done" = slides confirmed in WDS for EVERY required model (min across models)
-        wds_done = min(wds_counts.get(m, 0) for m in tcga_watcher.wds_destinations) if (
+        # "done" = slides confirmed in WDS for EVERY required model (min across models).
+        # Cap at _inventory_total: WDS manifests accumulate across all historical runs,
+        # so raw counts can exceed the current inventory and produce misleading >100% pct.
+        wds_done_raw = min(wds_counts.get(m, 0) for m in tcga_watcher.wds_destinations) if (
             tcga_watcher and tcga_watcher.wds_destinations and wds_counts
         ) else succeeded
-        # pct based on unique slides done (all models complete) vs inventory
-        pct = min(100.0, round(wds_done / _inventory_total * 100, 1)) if _inventory_total else 0
+        denom = _inventory_total or db_total
+        wds_done = min(wds_done_raw, denom)
+
+        # pct_wds: slides confirmed in WDS vs inventory
+        pct_wds = round(wds_done / denom * 100, 1) if denom else 0
+
+        # pct_succeeded: DB SUCCEEDED vs inventory — reflects features-extracted progress
+        # independently of WDS upload, and is never inflated by historical WDS entries.
+        pct_succeeded = round(min(succeeded, denom) / denom * 100, 1) if denom else 0
 
         with _db() as conn:
             running_rows = conn.execute(
@@ -247,10 +256,6 @@ def _build_handler(cfg: Config):
             ).fetchone()[0]
 
         n_running = len(running_rows)
-        # Note: no in-flight adjustment — WDS manifest is already authoritative for completed
-        # slides, so adding in-flight progress would double-count slides already in WDS.
-
-        pct = min(100.0, round(wds_done / _inventory_total * 100, 1)) if _inventory_total else 0
 
         with _db() as conn:
             tp = conn.execute(
@@ -290,7 +295,8 @@ def _build_handler(cfg: Config):
             "counts": counts,
             "total": _inventory_total,
             "wds_done": wds_done,
-            "pct_done": pct,
+            "pct_done": pct_wds,
+            "pct_succeeded": pct_succeeded,
             "running_batches": n_running,
             "blacklisted": n_blacklisted,
             "throughput_per_hour": throughput_per_hour,

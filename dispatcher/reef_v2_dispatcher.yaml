@@ -10,6 +10,9 @@
 # Override any of them by setting an absolute path below.
 work_base_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/work
 
+dashboard_port: 9050
+tower_proxy_port: 9049
+
 nextflow_profiles: cluster,conda
 outdir: reef-v2-results          # nextflow --outdir; manifest CSVs are written here
 # nextflow_config: custom.config        # optional: passed as -c to every nextflow run
@@ -92,13 +95,16 @@ watchers:
   - type: databricks
     # warehouse_id: 0b49b7d78734ad5c    # auto-detected if omitted
     poll_interval_seconds: 86400       # re-query once per day (default); use 259200 for every 3 days
+    # ECS S3 endpoint and credentials for slide access
+    s3_endpoint: http://pmindecs.mskcc.org:9020
+    secrets_env_file: /gpfs/mskmind_ess/limr/repos/Mussel-3/secrets.env
     # Query for slides. Three options (in priority order):
     #   1. query_file: path to a .sql file (relative to this config file)
     #   2. query: inline SQL string
     #   3. built-in template (impact_matched_slides JOIN slide_inventory) with optional filters:
-    source_filter: [ECS2]              # (built-in only) limit to slide_inventory.source values
-  #   # additional_where: "m.IS_HNE = 1"  # (built-in only) extra SQL WHERE clause
-  #   # query_file: queries/reef_v2_slides.sql   # custom query file (must return slide_id, slide_path, oncotree_code)
+    #      source_filter: [ECS2]         # limit to slide_inventory.source values
+    #      additional_where: "m.IS_HNE = 1"
+    query_file: queries/impact_slides_default.sql
   #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
   #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).

@@ -103,7 +103,7 @@ watchers:
        titan_slide: s3://reef-v2-0/wds
   #   #   uni2h: s3://your-bucket/wds/impact/uni2h
   #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
-  #   # Sync results back to Databricks after each batch:
-  #   # databricks_volume_folder: /Volumes/cdsi_prod/pathology_data_mining/impact_dispatcher
-  #   # databricks_table: cdsi_prod.pathology_data_mining.impact_slide_embeddings_v2
-  #   # databricks_job_id: "12345"
+     # Sync results back to Databricks after each batch.
+     # Volume folder and warehouse MERGE are auto-configured from the table name
+     # and the warehouse_id above — no job_id required.
+     databricks_table: cdsi_prod.pathology_data_mining.slide_embeddings_v2

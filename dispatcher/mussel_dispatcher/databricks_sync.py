@@ -24,6 +24,8 @@ log = logging.getLogger(__name__)
 _TERMINAL_STATES = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
 _POLL_INTERVAL_S  = 5
 _POLL_TIMEOUT_S   = 600  # 10 minutes
+_SQL_POLL_INTERVAL_S = 5
+_SQL_TIMEOUT_S       = 600
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +173,131 @@ def write_sync_status(
 
 
 # ---------------------------------------------------------------------------
+# Direct SQL warehouse MERGE (no pre-created job required)
+# ---------------------------------------------------------------------------
+
+def merge_via_warehouse(
+    volume_folder: str,
+    table: str,
+    host: str,
+    token: str,
+    warehouse_id: str,
+    *,
+    poll_interval_s: int = _SQL_POLL_INTERVAL_S,
+    timeout_s: int = _SQL_TIMEOUT_S,
+) -> tuple[bool, str]:
+    """MERGE parquet files from *volume_folder* into *table* via SQL warehouse.
+
+    Creates the table from the Parquet schema if it does not yet exist, then
+    runs a MERGE using dynamic column intersection so target-only columns are
+    preserved on UPDATE and set to NULL on INSERT (same approach as the TCGA
+    notebook fix for ``DELTA_MERGE_UNRESOLVED_EXPRESSION``).
+
+    Returns ``(success, message)`` matching the ``poll_job_run`` contract.
+    """
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    base = host.rstrip("/")
+
+    def _exec(statement: str) -> tuple[bool, str]:
+        """Submit a SQL statement and poll to completion. Returns (ok, message)."""
+        payload = {
+            "warehouse_id": warehouse_id,
+            "statement": statement,
+            "wait_timeout": "0s",  # async — poll below
+        }
+        resp = requests.post(f"{base}/api/2.0/sql/statements", headers=headers,
+                             json=payload, timeout=30)
+        resp.raise_for_status()
+        stmt_id = resp.json()["statement_id"]
+
+        deadline = time.monotonic() + timeout_s
+        while True:
+            r = requests.get(f"{base}/api/2.0/sql/statements/{stmt_id}",
+                             headers=headers, timeout=30)
+            r.raise_for_status()
+            body   = r.json()
+            state  = body.get("status", {}).get("state", "")
+            if state == "SUCCEEDED":
+                return True, f"Statement {stmt_id} succeeded"
+            if state in ("FAILED", "CANCELED", "CLOSED"):
+                err = body.get("status", {}).get("error", {})
+                return False, err.get("message", f"Statement {stmt_id} {state}")
+            if time.monotonic() > deadline:
+                return False, f"Statement {stmt_id} timed out after {timeout_s}s (state={state})"
+            time.sleep(poll_interval_s)
+
+    def _fetch_one(statement: str) -> list[list]:
+        """Run a query and return rows as list-of-lists."""
+        payload = {
+            "warehouse_id": warehouse_id,
+            "statement": statement,
+            "wait_timeout": "30s",
+        }
+        resp = requests.post(f"{base}/api/2.0/sql/statements", headers=headers,
+                             json=payload, timeout=60)
+        resp.raise_for_status()
+        body = resp.json()
+        return [r for r in (body.get("result", {}).get("data_array") or [])]
+
+    folder = volume_folder.rstrip("/")
+
+    # 1. Create table from Parquet schema if it doesn't exist yet.
+    ok, msg = _exec(
+        f"CREATE TABLE IF NOT EXISTS {table} "
+        f"USING DELTA AS SELECT * FROM parquet.`{folder}/` WHERE 1=0"
+    )
+    if not ok:
+        return False, f"CREATE TABLE failed: {msg}"
+
+    # 2. Get source columns from a sample row description.
+    source_cols: list[str] = []
+    try:
+        rows = _fetch_one(f"SELECT * FROM parquet.`{folder}/` LIMIT 0")
+        # Column names come from the schema, not data rows — use DESCRIBE instead.
+        desc_rows = _fetch_one(
+            f"DESCRIBE SELECT * FROM parquet.`{folder}/` LIMIT 0"
+        )
+        source_cols = [r[0] for r in desc_rows if r and r[0] and not r[0].startswith("#")]
+    except Exception:
+        pass
+
+    target_cols: list[str] = []
+    try:
+        desc_rows = _fetch_one(f"DESCRIBE TABLE {table}")
+        target_cols = [r[0] for r in desc_rows if r and r[0] and not r[0].startswith("#")]
+    except Exception:
+        pass
+
+    if source_cols and target_cols:
+        common = [c for c in source_cols if c in set(target_cols)]
+        extra_target = [c for c in target_cols if c not in set(source_cols)]
+        set_clause    = ", ".join(f"t.{c} = s.{c}" for c in common)
+        insert_cols   = ", ".join(common + [c for c in extra_target])
+        insert_vals   = ", ".join(
+            [f"s.{c}" for c in common] + ["NULL" for _ in extra_target]
+        )
+        merge_sql = (
+            f"MERGE INTO {table} t "
+            f"USING (SELECT * FROM parquet.`{folder}/`) s "
+            f"ON t.slide_id = s.slide_id AND t.model = s.model "
+            f"WHEN MATCHED THEN UPDATE SET {set_clause} "
+            f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
+        )
+    else:
+        # Fallback: optimistic wildcard MERGE (works when schemas match exactly).
+        merge_sql = (
+            f"MERGE INTO {table} t "
+            f"USING (SELECT * FROM parquet.`{folder}/`) s "
+            f"ON t.slide_id = s.slide_id AND t.model = s.model "
+            f"WHEN MATCHED THEN UPDATE SET * "
+            f"WHEN NOT MATCHED THEN INSERT *"
+        )
+
+    log.info("Running warehouse MERGE into %s from %s", table, folder)
+    return _exec(merge_sql)
+
+
+# ---------------------------------------------------------------------------
 # Shared argparse
 # ---------------------------------------------------------------------------
 
@@ -210,7 +337,12 @@ def add_upload_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--job-id", default=None,
-        help="Databricks job ID to trigger after upload (optional)",
+        help="Databricks job ID to trigger after upload (optional; "
+             "if omitted and --warehouse-id is set, MERGE runs directly via the warehouse)",
+    )
+    parser.add_argument(
+        "--warehouse-id", default=None,
+        help="Databricks SQL warehouse ID for direct MERGE (used when --job-id is not set)",
     )
     parser.add_argument(
         "--status-file", default=None,
@@ -297,6 +429,27 @@ def upload_and_trigger(
 
             if not success:
                 raise SystemExit(f"Databricks job {args.job_id} run {run_id} FAILED: {message}")
+
+        elif args.table and getattr(args, "warehouse_id", None):
+            # No pre-created job — run MERGE directly via the SQL warehouse.
+            folder = args.volume_folder.rstrip("/") if args.volume_folder else None
+            if not folder:
+                log.warning("--warehouse-id set but no --volume-folder; skipping MERGE")
+            else:
+                success, message = merge_via_warehouse(
+                    folder, args.table, host, token, args.warehouse_id
+                )
+                if getattr(args, "status_file", None):
+                    write_sync_status(
+                        args.status_file,
+                        job_id="warehouse:" + args.warehouse_id,
+                        run_id="direct",
+                        success=success,
+                        message=message,
+                        table=args.table,
+                    )
+                if not success:
+                    raise SystemExit(f"Warehouse MERGE into {args.table} FAILED: {message}")
 
     finally:
         if tmp_path and tmp_path.exists():

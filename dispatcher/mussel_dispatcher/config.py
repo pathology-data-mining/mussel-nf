@@ -142,6 +142,13 @@ class Config:
         for w in cfg.watchers:
             if not w.wds_staging_dir and w.wds_destinations:
                 w.wds_staging_dir = os.path.join(cfg.state_dir, "wds-staging")
+            # Auto-derive volume folder from table name so only databricks_table is required.
+            if not w.databricks_volume_folder and not w.databricks_volume_path and w.databricks_table:
+                parts = w.databricks_table.split(".")
+                if len(parts) == 3:
+                    catalog, schema, tbl = parts
+                    w.databricks_volume_folder = f"/Volumes/{catalog}/{schema}/{tbl}_sync"
+                    log.debug("Auto-derived databricks_volume_folder: %s", w.databricks_volume_folder)
 
         for w in cfg.watchers:
             if w.secrets_env_file and os.path.isfile(w.secrets_env_file):
@@ -189,8 +196,8 @@ class Config:
                             args.append("--also-delete-pt-dirs={outdir}/features/" + patch_enc)
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
-            # IMPACT Databricks sync hook
-            if w.type == "databricks" and (w.databricks_volume_folder or w.databricks_volume_path):
+            # IMPACT Databricks sync hook — fires when a table is configured
+            if w.type == "databricks" and (w.databricks_table or w.databricks_volume_folder or w.databricks_volume_path):
                 db_path = os.path.join(self.state_dir, "dispatcher.db")
                 extra_args = [
                     "--db=" + db_path,
@@ -253,13 +260,16 @@ def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str],
     args = list(extra_args)
     if w.databricks_volume_folder:
         args.append("--volume-folder=" + w.databricks_volume_folder)
-    else:
+    elif w.databricks_volume_path:
         args.append("--volume-path=" + w.databricks_volume_path)
     if w.databricks_table:
         args.append("--table=" + w.databricks_table)
     if w.databricks_job_id:
         args.append("--job-id=" + w.databricks_job_id)
-    if state_dir and w.databricks_job_id:
+    elif w.warehouse_id:
+        # No pre-created job — merge directly via the SQL warehouse.
+        args.append("--warehouse-id=" + w.warehouse_id)
+    if state_dir and (w.databricks_job_id or w.warehouse_id):
         status_file = os.path.join(state_dir, "sync_status.json")
         args.append("--status-file=" + status_file)
     return {"command": f"python -m {module}", "args": args}

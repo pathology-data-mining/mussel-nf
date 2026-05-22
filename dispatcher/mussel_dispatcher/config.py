@@ -137,6 +137,12 @@ class Config:
         raw["watchers"] = watcher_cfgs
         cfg = cls(**raw)
 
+        # Apply default wds_staging_dir after state_dir is resolved so the
+        # default path ({state_dir}/wds-staging) is always absolute.
+        for w in cfg.watchers:
+            if not w.wds_staging_dir and w.wds_destinations:
+                w.wds_staging_dir = os.path.join(cfg.state_dir, "wds-staging")
+
         for w in cfg.watchers:
             if w.secrets_env_file and os.path.isfile(w.secrets_env_file):
                 _load_secrets_env(w.secrets_env_file, w)

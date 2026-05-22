@@ -97,7 +97,9 @@ watchers:
     poll_interval_seconds: 86400       # re-query once per day (default); use 259200 for every 3 days
     # ECS S3 endpoint and credentials for slide access
     s3_endpoint: http://pmindecs.mskcc.org:9020
-    secrets_env_file: /gpfs/mskmind_ess/limr/repos/Mussel-3/secrets.env
+    nextflow_secrets:
+      - ECS_ACCESS_KEY
+      - ECS_SECRET_KEY
     # Query for slides. Three options (in priority order):
     #   1. query_file: path to a .sql file (relative to this config file)
     #   2. query: inline SQL string

@@ -12,7 +12,3 @@ featurize:
   slide_max_patches: 4096
   model_embedding_precision:
     hoptimus1: bfloat16
-prefetch:
-  local_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/s3-slides
-  s3_endpoint: http://pmindecs.mskcc.org:9020
-  max_concurrent: 16

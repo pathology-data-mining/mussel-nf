@@ -3814,7 +3814,7 @@ class TestUploadAndTrigger:
         assert call_url.endswith(".parquet")
 
     def test_upload_and_trigger_with_job(self, monkeypatch):
-        """When --job-id is set, trigger_job is also called."""
+        """When --job-id is set, trigger_job is called and poll_job_run is awaited."""
         import argparse
         from unittest.mock import MagicMock, patch
         import pandas as pd
@@ -3830,6 +3830,7 @@ class TestUploadAndTrigger:
             table="catalog.schema.table",
             job_id="99",
             output_parquet=None,
+            status_file=None,
         )
 
         put_resp = MagicMock()
@@ -3840,13 +3841,49 @@ class TestUploadAndTrigger:
         post_resp.json.return_value = {"run_id": 42}
 
         with patch("mussel_dispatcher.databricks_sync.requests.put", return_value=put_resp), \
-             patch("mussel_dispatcher.databricks_sync.requests.post", return_value=post_resp) as mock_post:
+             patch("mussel_dispatcher.databricks_sync.requests.post", return_value=post_resp) as mock_post, \
+             patch("mussel_dispatcher.databricks_sync.poll_job_run", return_value=(True, "Run 42 succeeded")) as mock_poll:
             upload_and_trigger(df, args, filename_prefix="test_inventory_")
 
         assert mock_post.called
         body = mock_post.call_args[1]["json"]
         assert body["job_id"] == 99
         assert body["notebook_params"]["target_table"] == "catalog.schema.table"
+        mock_poll.assert_called_once_with("42", "https://test.databricks.com", "test_token")
+
+    def test_upload_and_trigger_job_failure(self, monkeypatch):
+        """When poll_job_run returns failure, upload_and_trigger raises SystemExit."""
+        import argparse
+        import pytest
+        from unittest.mock import MagicMock, patch
+        import pandas as pd
+        from mussel_dispatcher.databricks_sync import upload_and_trigger
+
+        df = pd.DataFrame({"slide_id": ["s1"], "status": ["SUCCEEDED"]})
+
+        args = argparse.Namespace(
+            databricks_host="https://test.databricks.com",
+            token="test_token",
+            volume_folder="/Volumes/test/schema/folder",
+            volume_path=None,
+            table="catalog.schema.table",
+            job_id="99",
+            output_parquet=None,
+            status_file=None,
+        )
+
+        put_resp = MagicMock()
+        put_resp.raise_for_status = MagicMock()
+
+        post_resp = MagicMock()
+        post_resp.raise_for_status = MagicMock()
+        post_resp.json.return_value = {"run_id": 42}
+
+        with patch("mussel_dispatcher.databricks_sync.requests.put", return_value=put_resp), \
+             patch("mussel_dispatcher.databricks_sync.requests.post", return_value=post_resp), \
+             patch("mussel_dispatcher.databricks_sync.poll_job_run", return_value=(False, "MERGE failed: unresolved expression")):
+            with pytest.raises(SystemExit):
+                upload_and_trigger(df, args, filename_prefix="test_inventory_")
 
 
 # ===========================================================================

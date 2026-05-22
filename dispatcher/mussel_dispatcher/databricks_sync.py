@@ -7,9 +7,11 @@ resolution, HTTP upload, and argparse boilerplate.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +19,11 @@ import pandas as pd
 import requests
 
 log = logging.getLogger(__name__)
+
+# Terminal lifecycle states for a Databricks job run.
+_TERMINAL_STATES = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
+_POLL_INTERVAL_S  = 5
+_POLL_TIMEOUT_S   = 600  # 10 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +91,85 @@ def trigger_job(job_id: str, host: str, token: str, params: dict | None = None) 
     return run_id
 
 
+def poll_job_run(
+    run_id: str,
+    host: str,
+    token: str,
+    *,
+    timeout_s: float = _POLL_TIMEOUT_S,
+    interval_s: float = _POLL_INTERVAL_S,
+) -> tuple[bool, str]:
+    """Poll a Databricks job run until it reaches a terminal state.
+
+    Returns (success, message) where success is True iff result_state == SUCCESS.
+    """
+    url = f"{host.rstrip('/')}/api/2.1/jobs/runs/get"
+    headers = {"Authorization": f"Bearer {token}"}
+    deadline = time.monotonic() + timeout_s
+
+    while time.monotonic() < deadline:
+        try:
+            resp = requests.get(url, headers=headers, params={"run_id": run_id}, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            log.warning("poll_job_run: request error (will retry): %s", exc)
+            time.sleep(interval_s)
+            continue
+
+        state      = data.get("state", {})
+        lifecycle  = state.get("life_cycle_state", "")
+        result     = state.get("result_state", "")
+        message    = state.get("state_message", "")
+
+        if lifecycle not in _TERMINAL_STATES:
+            log.debug("Job run %s: %s — waiting…", run_id, lifecycle)
+            time.sleep(interval_s)
+            continue
+
+        succeeded = result == "SUCCESS"
+        if not succeeded:
+            # Try to get task-level error for a cleaner message
+            for task in data.get("tasks", []):
+                task_msg = task.get("state", {}).get("state_message", "")
+                if task_msg:
+                    message = task_msg
+                    break
+            log.error("Job run %s FAILED (%s): %s", run_id, result, message)
+        else:
+            log.info("Job run %s succeeded", run_id)
+        return succeeded, message
+
+    msg = f"Job run {run_id} did not finish within {timeout_s}s"
+    log.error(msg)
+    return False, msg
+
+
+def write_sync_status(
+    status_file: str,
+    *,
+    job_id: str,
+    run_id: str,
+    success: bool,
+    message: str,
+    table: str = "",
+) -> None:
+    """Write a JSON status file so the dashboard can surface sync health."""
+    payload = {
+        "job_id":     job_id,
+        "run_id":     run_id,
+        "status":     "SUCCESS" if success else "FAILED",
+        "message":    message,
+        "table":      table,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        Path(status_file).write_text(json.dumps(payload, indent=2))
+        log.debug("Wrote sync status to %s", status_file)
+    except OSError as exc:
+        log.warning("Could not write sync status file %s: %s", status_file, exc)
+
+
 # ---------------------------------------------------------------------------
 # Shared argparse
 # ---------------------------------------------------------------------------
@@ -125,6 +211,11 @@ def add_upload_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--job-id", default=None,
         help="Databricks job ID to trigger after upload (optional)",
+    )
+    parser.add_argument(
+        "--status-file", default=None,
+        help="Path to write a JSON sync-status file (read by the dashboard). "
+             "If omitted no file is written.",
     )
     parser.add_argument(
         "--output-parquet", default=None,
@@ -189,7 +280,23 @@ def upload_and_trigger(
                 job_params["volume_folder"] = args.volume_folder
             if args.table:
                 job_params["target_table"] = args.table
-            trigger_job(args.job_id, host, token, params=job_params or None)
+            run_id = trigger_job(args.job_id, host, token, params=job_params or None)
+
+            # Poll to completion so the dispatcher hook fails visibly when the MERGE fails.
+            success, message = poll_job_run(run_id, host, token)
+
+            if getattr(args, "status_file", None):
+                write_sync_status(
+                    args.status_file,
+                    job_id=args.job_id,
+                    run_id=run_id,
+                    success=success,
+                    message=message,
+                    table=args.table or "",
+                )
+
+            if not success:
+                raise SystemExit(f"Databricks job {args.job_id} run {run_id} FAILED: {message}")
 
     finally:
         if tmp_path and tmp_path.exists():

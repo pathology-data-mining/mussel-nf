@@ -99,6 +99,7 @@ def _build_handler(cfg: Config):
     db_path = os.path.join(cfg.state_dir, "dispatcher.db")
     wds_manifest = os.path.join(cfg.outdir, "wds_manifest.csv")
     nf_log_path = os.path.join(cfg.repo_dir, ".nextflow.log")
+    sync_status_path = os.path.join(cfg.state_dir, "sync_status.json")
 
     tcga_watcher = None
     for w in cfg.watchers:
@@ -158,6 +159,24 @@ def _build_handler(cfg: Config):
         _wds_manifest_cache[0] = now
         _wds_manifest_cache[1] = counts
         return counts
+
+    _sync_status_cache: list = [0.0, None]  # [last_read_time, payload|None]
+
+    def _read_sync_status() -> dict | None:
+        """Read sync_status.json written by the Databricks sync hook (60s cache)."""
+        now = time.time()
+        if now - _sync_status_cache[0] < 60:
+            return _sync_status_cache[1]
+        payload = None
+        if os.path.exists(sync_status_path):
+            try:
+                import json as _json
+                payload = _json.loads(Path(sync_status_path).read_text())
+            except Exception:
+                pass
+        _sync_status_cache[0] = now
+        _sync_status_cache[1] = payload
+        return payload
 
     # Persistent registry: Tower state survives dashboard restarts.
     _run_store = _RunStore(os.path.join(cfg.state_dir, "turret_runs.db"))
@@ -278,6 +297,7 @@ def _build_handler(cfg: Config):
             "eta_seconds": eta_seconds,
             "remaining": total_remaining,
             "completed_in_window": completed_in_window,
+            "sync_status": _read_sync_status(),
         }
 
     def _api_batches():

@@ -195,7 +195,8 @@ class Config:
                         "--model-types=" + ",".join(w.wds_destinations.keys())
                     )
                 db_hooks.append(
-                    _build_db_sync_hook(w, "mussel_dispatcher.impact.sync_databricks", extra_args)
+                    _build_db_sync_hook(w, "mussel_dispatcher.impact.sync_databricks",
+                                        extra_args, state_dir=self.state_dir)
                 )
 
             if w.type != "tcga":
@@ -229,17 +230,19 @@ class Config:
             if w.databricks_volume_folder or w.databricks_volume_path:
                 extra_args = ["--inventory=" + w.inventory_csv, "--status=" + w.status_csv]
                 db_hooks.append(
-                    _build_db_sync_hook(w, "mussel_dispatcher.tcga.sync_databricks", extra_args)
+                    _build_db_sync_hook(w, "mussel_dispatcher.tcga.sync_databricks",
+                                        extra_args, state_dir=self.state_dir)
                 )
 
         return hooks + db_hooks
 
 
-def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str]) -> dict:
+def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str],
+                        *, state_dir: str = "") -> dict:
     """Build a post-batch hook dict for a Databricks sync script.
 
-    Appends the common volume-folder/path, table, and job-id args from
-    *w* to *extra_args* and returns a hook dict.
+    Appends the common volume-folder/path, table, job-id, and status-file args
+    from *w* to *extra_args* and returns a hook dict.
     """
     args = list(extra_args)
     if w.databricks_volume_folder:
@@ -250,6 +253,9 @@ def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str]) 
         args.append("--table=" + w.databricks_table)
     if w.databricks_job_id:
         args.append("--job-id=" + w.databricks_job_id)
+    if state_dir and w.databricks_job_id:
+        status_file = os.path.join(state_dir, "sync_status.json")
+        args.append("--status-file=" + status_file)
     return {"command": f"python -m {module}", "args": args}
 
 

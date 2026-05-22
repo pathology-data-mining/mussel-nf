@@ -125,6 +125,7 @@
       <div class="stat" title="Slides permanently excluded after exceeding the retry limit (fail_count ≥ 10). Require manual investigation."><div class="val" id="s-blacklisted" style="color:#fb923c">--</div><div class="lbl">Blacklisted</div></div>
       <div class="stat" title="Slides reaching SUCCEEDED status per hour, computed over a 6-hour rolling window."><div class="val" id="s-throughput" style="color:#a78bfa">--</div><div class="lbl">Slides/hr</div></div>
       <div class="stat" title="Estimated wall-clock time until all remaining slides are processed, based on current throughput."><div class="val" id="s-eta" style="color:#fbbf24">--</div><div class="lbl">ETA</div></div>
+      <div class="stat" id="s-sync-tile" title="Status of the last Databricks metadata sync job run."><div class="val" id="s-sync">--</div><div class="lbl">DB Sync</div></div>
     </div>
     <div class="pbar-wrap-main" style="margin-top:12px">
       <div class="pbar-main" id="progress-bar" style="width:0%"></div>
@@ -266,6 +267,37 @@ async function loadStatus() {
     } else {
       etaEl.textContent = '--';
       etaEl.title = 'Not enough data yet';
+    }
+    // Databricks sync status
+    const syncEl  = document.getElementById('s-sync');
+    const syncTile = document.getElementById('s-sync-tile');
+    const ss = d.sync_status;
+    if (!ss) {
+      syncEl.textContent = '--';
+      syncEl.style.color = '#94a3b8';
+      syncTile.title = 'No sync status recorded yet. Sync runs after each successful batch.';
+    } else {
+      const ok  = ss.status === 'SUCCESS';
+      const ago = ss.updated_at ? Math.round((Date.now() - new Date(ss.updated_at)) / 60000) : null;
+      const stale = ago != null && ago > 24 * 60;  // >24h since last write
+      if (ok && !stale) {
+        syncEl.textContent = '✔ OK';
+        syncEl.style.color = '#4ade80';
+      } else if (ok && stale) {
+        syncEl.textContent = '⚠ Stale';
+        syncEl.style.color = '#fbbf24';
+      } else {
+        syncEl.textContent = '✗ Failed';
+        syncEl.style.color = '#f87171';
+      }
+      const agoStr = ago != null ? (ago < 60 ? ago + 'm ago' : Math.round(ago/60) + 'h ago') : '';
+      syncTile.title = [
+        'Status: ' + ss.status,
+        ss.message ? 'Message: ' + ss.message : '',
+        ss.table   ? 'Table: ' + ss.table     : '',
+        ss.run_id  ? 'Run ID: ' + ss.run_id   : '',
+        agoStr     ? 'Updated: ' + agoStr      : '',
+      ].filter(Boolean).join('\n');
     }
     const labels = Object.keys(c);
     const values = Object.values(c);

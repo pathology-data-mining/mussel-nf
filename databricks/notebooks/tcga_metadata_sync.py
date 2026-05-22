@@ -136,7 +136,30 @@ source_df.createOrReplaceTempView("_tcga_metadata_source")
 # When not matched:        insert new row
 # When not matched by src: delete (removes rows no longer in the export,
 #                          e.g. non-DX slides filtered out of a later run)
+#
+# UPDATE SET * / INSERT * require ALL target columns to exist in the source.
+# If the target has columns not in the source Parquet (e.g. wds_index_path
+# added directly to the table but never emitted by the export), the star
+# syntax raises DELTA_MERGE_UNRESOLVED_EXPRESSION.  Instead we build
+# explicit SET and INSERT clauses from the intersection of source and target
+# columns, leaving target-only columns untouched on UPDATE and NULL on INSERT.
 # ---------------------------------------------------------------------------
+
+source_col_set  = set(source_df.columns)
+target_col_set  = {
+    row["col_name"]
+    for row in spark.sql(f"DESCRIBE TABLE {target_table}").collect()  # noqa: F821
+    if not row["col_name"].startswith("#")
+}
+common_cols  = sorted(source_col_set & target_col_set)
+extra_target = sorted(target_col_set - source_col_set)
+
+if extra_target:
+    print(f"Target-only columns (preserved on UPDATE, NULL on INSERT): {extra_target}")
+
+update_set  = ",\n    ".join(f"target.{c} = source.{c}" for c in common_cols)
+insert_cols = ", ".join(common_cols + extra_target)
+insert_vals = ", ".join([f"source.{c}" for c in common_cols] + ["NULL"] * len(extra_target))
 
 merge_sql = f"""
 MERGE INTO {target_table} AS target
@@ -144,9 +167,11 @@ USING _tcga_metadata_source AS source
 ON target.file_id = source.file_id
    AND target.model = source.model
 WHEN MATCHED THEN
-    UPDATE SET *
+    UPDATE SET
+    {update_set}
 WHEN NOT MATCHED THEN
-    INSERT *
+    INSERT ({insert_cols})
+    VALUES ({insert_vals})
 WHEN NOT MATCHED BY SOURCE THEN
     DELETE
 """

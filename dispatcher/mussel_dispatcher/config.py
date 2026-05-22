@@ -149,6 +149,14 @@ class Config:
                     catalog, schema, tbl = parts
                     w.databricks_volume_folder = f"/Volumes/{catalog}/{schema}/{tbl}_sync"
                     log.debug("Auto-derived databricks_volume_folder: %s", w.databricks_volume_folder)
+            # Auto-detect SQL warehouse when a Databricks watcher has no warehouse_id.
+            if w.type == "databricks" and not w.warehouse_id:
+                from mussel_dispatcher.databricks_sync import resolve_warehouse_id
+                w.warehouse_id = resolve_warehouse_id()
+                if w.warehouse_id:
+                    log.info("Auto-detected warehouse_id: %s", w.warehouse_id)
+                else:
+                    log.warning("Could not auto-detect warehouse_id; set it explicitly in the config")
 
         for w in cfg.watchers:
             if w.secrets_env_file and os.path.isfile(w.secrets_env_file):

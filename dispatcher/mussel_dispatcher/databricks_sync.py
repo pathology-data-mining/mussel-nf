@@ -65,6 +65,51 @@ def _load_databrickscfg(host: str, token: str) -> tuple[str, str]:
     return host, token
 
 
+def resolve_warehouse_id(host: str = "", token: str = "") -> str:
+    """Auto-detect the best available SQL warehouse for this workspace.
+
+    Prefers RUNNING warehouses, then SERVERLESS > PRO > CLASSIC by type.
+    Returns the warehouse ID string, or ``""`` if none found or credentials
+    are unavailable (non-fatal — caller should warn and continue).
+    """
+    host, token = resolve_credentials(host, token)
+    if not host or not token:
+        return ""
+    try:
+        resp = requests.get(
+            f"{host.rstrip('/')}/api/2.0/sql/warehouses",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        warehouses = resp.json().get("warehouses", [])
+    except Exception as exc:
+        log.debug("resolve_warehouse_id: could not list warehouses: %s", exc)
+        return ""
+
+    active = [w for w in warehouses if w.get("state") != "DELETED"]
+    if not active:
+        return ""
+
+    _state_rank = {"RUNNING": 0, "STARTING": 1, "STOPPING": 2, "STOPPED": 3}
+    _type_rank  = {"SERVERLESS": 0, "PRO": 1, "CLASSIC": 2}
+    active.sort(key=lambda w: (
+        _state_rank.get(w.get("state", ""), 9),
+        _type_rank.get(w.get("warehouse_type", ""), 9),
+        w.get("name", ""),
+    ))
+    chosen = active[0]
+    if len(active) > 1:
+        log.info(
+            "Multiple SQL warehouses available; auto-selected %r (%s). "
+            "Set warehouse_id explicitly to suppress this message.",
+            chosen.get("name"), chosen["id"],
+        )
+    else:
+        log.debug("Auto-selected SQL warehouse %r (%s)", chosen.get("name"), chosen["id"])
+    return chosen["id"]
+
+
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------

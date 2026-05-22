@@ -91,7 +91,7 @@ watchers:
   # Requires: pip install databricks-sdk
   #
    - type: databricks
-     warehouse_id: 0b49b7d78734ad5c    # Databricks SQL warehouse ID
+     # warehouse_id: 0b49b7d78734ad5c    # auto-detected if omitted
      poll_interval_seconds: 86400       # re-query once per day (default); use 259200 for every 3 days
      source_filter: [ECS2]              # limit to slide_inventory.source values; [] = all
   #   # additional_where: "m.IS_HNE = 1"  # optional extra SQL WHERE clause
@@ -105,5 +105,5 @@ watchers:
   #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
      # Sync results back to Databricks after each batch.
      # Volume folder and warehouse MERGE are auto-configured from the table name
-     # and the warehouse_id above — no job_id required.
+     # and the auto-detected warehouse — no job_id or warehouse_id required.
      databricks_table: cdsi_prod.pathology_data_mining.slide_embeddings_v2

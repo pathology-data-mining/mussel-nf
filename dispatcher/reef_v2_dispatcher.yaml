@@ -1,0 +1,109 @@
+# mussel-dispatcher configuration
+# Copy this file into mussel-nf/dispatcher/ and edit before running.
+#
+# Directory defaults (relative to this file's location):
+#   repo_dir      → ../          (mussel-nf root)
+#   work_base_dir → work/
+#   dispatch_dir  → batches/
+#   state_dir     → state/
+#   log_dir       → logs/
+# Override any of them by setting an absolute path below.
+work_base_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/work
+
+nextflow_profiles: cluster,conda
+outdir: reef-v2-results          # nextflow --outdir; manifest CSVs are written here
+# nextflow_config: custom.config        # optional: passed as -c to every nextflow run
+nextflow_params_file: ../reef_v2_params.yaml # optional: passed as -params-file to every nextflow run
+
+# Parallelism
+max_concurrent_runs: 4
+
+# Batching
+batch_size: 1000           # dispatch when this many slides accumulate
+min_batch_size: 1        # don't dispatch fewer than this (unless forced on shutdown)
+max_wait_seconds: 300    # dispatch after this many seconds regardless of batch_size
+
+# Behaviour
+retry_failed: true       # re-queue slides whose batch failed on restart
+cleanup_work_dir: true   # delete per-batch work/ dirs after success (required for large runs — staged SVS files accumulate ~650 MB/slide)
+cleanup_results: true    # delete local .pt files after WDS push to S3 (required for large runs — ~103 MB/slide)
+
+# Optional: run extra commands after each successful Nextflow batch.
+# Auto-generated hooks (e.g. WDS append when wds_dest is set on a tcga watcher)
+# run first; these run after.
+# Template vars: {batch_csv}, {batch_id}, {outdir}, {repo_dir}
+# post_batch_hooks:
+#   - command: "python {repo_dir}/scripts/tcga/tcga_sync_databricks.py"
+#     args:
+#       - "--inventory=/path/to/tcga_inventory.csv"
+#       - "--status=/path/to/tcga_status.csv"
+#       - "--volume-path=/dbfs/mnt/your-volume/tcga"
+
+watchers:
+  #- type: local
+    #path: /path/to/incoming/slides
+    #poll_interval_seconds: 60
+    #extensions: [.svs, .tiff, .tif, .ndpi, .scn]
+    #recursive: true
+    #stability_wait_seconds: 30   # seconds between two identical size+mtime polls
+    #min_file_size_mb: 10         # skip files smaller than this
+
+  # Uncomment and edit to add an S3 (or on-prem ECS) watcher:
+  # - type: s3
+  #   bucket: my-bucket
+  #   prefix: incoming/slides/
+  #   poll_interval_seconds: 120
+  #   extensions: [.svs, .ndpi]
+  #   min_file_size_bytes: 10000000
+  #   # aws_profile: my-profile
+  #   # endpoint_url: http://pmindecs.mskcc.org:9020
+
+  # Uncomment to watch TCGA GDC for new slides.
+  # See tcga_dispatcher.yaml for a fully annotated TCGA example.
+  #
+  # - type: tcga
+  #   inventory_csv: /path/to/tcga_inventory.csv   # managed by tcga_sync_inventory.py
+  #   status_csv: /path/to/tcga_status.csv         # managed by tcga_update_status.py
+  #   # models: []   # auto-discover from results dir (matches nextflow.config model_types)
+  #   local_slides_dir: /path/to/slides
+  #   # s3_base: s3://bucket/slides
+  #   slide_type: DX1
+  #   # project: TCGA-BRCA
+  #   poll_interval_seconds: 3600
+  #   gdc_max_age_hours: 24.0
+  #   download_enabled: false
+  #   download_dir: /path/to/downloads
+  #   download_concurrency: 4
+  #   # gdc_token_file: /path/to/gdc-user-token.txt
+  #   # Per-model WDS destinations (one mussel_dispatcher.wds hook auto-generated each):
+  #   # wds_destinations:
+  #   #   ctranspath: s3://your-bucket/wds/ctranspath
+  #   #   uni2h: s3://your-bucket/wds/uni2h
+  #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
+  #   # Set databricks_volume_path to auto-generate a tcga_sync_databricks.py hook:
+  #   # databricks_volume_path: /Volumes/catalog/schema/volume/tcga_inventory.parquet
+  #   # databricks_job_id: "12345"   # optional
+
+  # Uncomment to watch a Databricks SQL warehouse for IMPACT slides.
+  # Queries the join of impact_matched_slides + slide_inventory to get S3 paths.
+  # Credentials come from DATABRICKS_HOST + DATABRICKS_TOKEN env vars
+  # (or ~/.databrickscfg DEFAULT profile).
+  # Requires: pip install databricks-sdk
+  #
+   - type: databricks
+     warehouse_id: 0b49b7d78734ad5c    # Databricks SQL warehouse ID
+     poll_interval_seconds: 86400       # re-query once per day (default); use 259200 for every 3 days
+     source_filter: [ECS2]              # limit to slide_inventory.source values; [] = all
+  #   # additional_where: "m.IS_HNE = 1"  # optional extra SQL WHERE clause
+  #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
+  #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
+  #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).
+     wds_destinations:
+       hoptimus1: s3://reef-v2-0/wds
+       titan_slide: s3://reef-v2-0/wds
+  #   #   uni2h: s3://your-bucket/wds/impact/uni2h
+  #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
+  #   # Sync results back to Databricks after each batch:
+  #   # databricks_volume_folder: /Volumes/cdsi_prod/pathology_data_mining/impact_dispatcher
+  #   # databricks_table: cdsi_prod.pathology_data_mining.impact_slide_embeddings_v2
+  #   # databricks_job_id: "12345"

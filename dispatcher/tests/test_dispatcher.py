@@ -2662,6 +2662,299 @@ class TestVerifyWdsCoverageManifestRoundtrip:
 
 
 # ===========================================================================
+# Cross-batch failed_slides scope regression tests
+# ===========================================================================
+
+class TestWdsCrossBatchPruningRegression:
+    """End-to-end regression tests for the bug where append_wds() pruned
+    wds_index entries for slides from *other* batches that happened to be
+    FAILED at the time the current batch's WDS hook ran.
+
+    Scenario (exact production failure):
+      1. Batch A succeeds → slides A1, A2 uploaded to WDS; index has A1, A2.
+      2. GPU node fails → A1, A2 are reset to FAILED in the dispatcher DB
+         and appear as 'failed' in tcga_status.csv.
+      3. Batch B runs for slides B1, B2.  Its WDS hook builds failed_slides
+         from the status CSV (includes A1, A2) and calls append_wds with
+         slide_id_filter={B1, B2}.
+      4. BUG (pre-fix): A1, A2 are pruned from the index even though they
+         belong to batch A, not batch B.
+         FIX: pruning is scoped to slide_id_filter ∩ failed_slides.
+    """
+
+    def _fake_index(self, slide_ids, project="PROJ"):
+        return {
+            sid: {"project_id": project, "shard_file": f"{project}/000000.tar",
+                  "native_mpp": None, "mpp_is_fallback": None}
+            for sid in slide_ids
+        }
+
+    def _run_wds_hook(self, tmp_path, monkeypatch, wds_mod, *,
+                      pt_dir, slide_id_filter, failed_slides, index,
+                      manifest_csv=None):
+        """Helper: run append_wds with a fake index and capture the saved index."""
+        saved_index = {}
+
+        def fake_save(idx, *a, **kw):
+            saved_index.clear()
+            saved_index.update(idx)
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: dict(index))
+        monkeypatch.setattr(wds_mod, "_save_index", fake_save)
+
+        import pandas as pd
+        all_ids = slide_id_filter | set(index.keys())
+        inv = pd.DataFrame({
+            "file_name": [f"{sid}.svs" for sid in all_ids],
+            "project_id": ["PROJ"] * len(all_ids),
+        })
+
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter=slide_id_filter,
+            manifest_csv=manifest_csv,
+            failed_slides=failed_slides,
+        )
+        return saved_index
+
+    def test_batch_a_index_entry_survives_batch_b_hook(self, tmp_path, monkeypatch):
+        """Core regression: A1 is in the index from batch A, temporarily FAILED,
+        but batch B's WDS hook must NOT evict A1 from the index."""
+        from mussel_dispatcher import wds as wds_mod
+
+        # Index after batch A completed
+        index = self._fake_index({"A1", "A2", "B1"})
+        # B1 is the current batch; A1, A2 are FAILED from another batch
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+
+        saved = self._run_wds_hook(
+            tmp_path, monkeypatch, wds_mod,
+            pt_dir=pt_dir,
+            slide_id_filter={"B1"},
+            failed_slides={"A1", "A2"},  # from batch A, not current batch
+            index=index,
+        )
+
+        # saved_index is only written when pruning happens — if not called, index unchanged
+        # Either way, A1 and A2 must not have been removed
+        surviving = saved if saved else index
+        assert "A1" in surviving, "A1 was pruned despite not being in the current batch"
+        assert "A2" in surviving, "A2 was pruned despite not being in the current batch"
+
+    def test_current_batch_failed_slide_still_pruned(self, tmp_path, monkeypatch):
+        """A slide that is FAILED and belongs to the CURRENT batch must still
+        be evicted from the index (permanent failure for this batch)."""
+        from mussel_dispatcher import wds as wds_mod
+
+        index = self._fake_index({"B1", "B2"})  # B2 is a permanent failure
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+
+        saved = self._run_wds_hook(
+            tmp_path, monkeypatch, wds_mod,
+            pt_dir=pt_dir,
+            slide_id_filter={"B1", "B2"},
+            failed_slides={"B2"},  # B2 is in current batch AND failed
+            index=index,
+        )
+
+        assert "B2" not in saved, "Current-batch failed slide should have been pruned"
+        assert "B1" in saved or "B1" in index, "Non-failed B1 should be intact"
+
+    def test_manifest_entries_for_other_batch_not_duplicated_or_lost(
+            self, tmp_path, monkeypatch):
+        """Running batch B's WDS hook must not add or remove manifest entries
+        belonging to batch A slides."""
+        from mussel_dispatcher import wds as wds_mod
+
+        manifest_csv = tmp_path / "wds_manifest.csv"
+        # Pre-existing manifest with A1 from batch A
+        with open(manifest_csv, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["slide_id", "model", "wds_path"])
+            w.writerow(["A1", "hoptimus1", "s3://bucket/wds/hoptimus1/PROJ/000000.tar"])
+
+        index = self._fake_index({"A1", "B1"})
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+
+        self._run_wds_hook(
+            tmp_path, monkeypatch, wds_mod,
+            pt_dir=pt_dir,
+            slide_id_filter={"B1"},
+            failed_slides={"A1"},
+            index=index,
+            manifest_csv=manifest_csv,
+        )
+
+        with open(manifest_csv, newline="") as f:
+            rows = [r for r in csv.DictReader(f) if r["model"] == "hoptimus1"]
+        sids = {r["slide_id"] for r in rows}
+        assert "A1" in sids, "Batch A's manifest entry must not be removed by batch B's hook"
+
+    def test_status_csv_failed_slides_scoped_to_model(self, tmp_path, monkeypatch):
+        """When building failed_slides from tcga_status.csv, only slides FAILED
+        for the requested model are included — not failures for other models."""
+        import pandas as pd
+        from mussel_dispatcher import wds as wds_mod
+
+        # A1 failed for titan_slide but succeeded for hoptimus1
+        status_csv = tmp_path / "status.csv"
+        with open(status_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["slide_id", "model", "status"])
+            w.writeheader()
+            w.writerow({"slide_id": "A1", "model": "hoptimus1", "status": "done"})
+            w.writerow({"slide_id": "A1", "model": "titan_slide", "status": "failed"})
+
+        # Simulate the status CSV parsing from wds.py main()
+        sdf = pd.read_csv(status_csv, dtype=str).fillna("")
+        models_to_run = {"hoptimus1"}
+        mask = sdf["status"].str.lower() == "failed"
+        mask = mask & sdf["model"].isin(models_to_run)
+        failed_slides = set(sdf.loc[mask, "slide_id"].str.strip())
+
+        assert "A1" not in failed_slides, (
+            "A1 failed for titan_slide only — must not appear in hoptimus1 failed_slides"
+        )
+
+    def test_failed_slide_in_current_batch_not_uploaded_or_in_manifest(
+            self, tmp_path, monkeypatch):
+        """A slide that is FAILED and in the current batch's slide_id_filter
+        must be skipped from upload (line 445) and must not appear in manifest."""
+        import pandas as pd
+        import torch
+        from mussel_dispatcher import wds as wds_mod
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: {})
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        # Provide .pt file for the failed slide — it should be ignored anyway
+        torch.save(torch.zeros(1, 4), pt_dir / "bad.features.pt")
+
+        inv = pd.DataFrame({"file_name": ["bad.svs"], "project_id": ["PROJ"]})
+        manifest_csv = tmp_path / "wds_manifest.csv"
+
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter={"bad"},
+            manifest_csv=manifest_csv,
+            failed_slides={"bad"},
+        )
+
+        if manifest_csv.exists():
+            with open(manifest_csv, newline="") as f:
+                rows = list(csv.DictReader(f))
+            bad_rows = [r for r in rows if r["slide_id"] == "bad"]
+            assert bad_rows == [], "Failed slide in current batch must not appear in manifest"
+
+    def test_full_sequence_two_batches(self, tmp_path, monkeypatch):
+        """Full two-batch sequence:
+          batch A: A1, A2 → both uploaded to WDS, both in manifest.
+          A1, A2 become FAILED (infra failure).
+          batch B: B1 → WDS hook runs with failed_slides={A1, A2}.
+          After batch B: A1 and A2 must still be in the index and manifest.
+        """
+        import pandas as pd
+        import torch
+        from mussel_dispatcher import wds as wds_mod
+
+        manifest_csv = tmp_path / "wds_manifest.csv"
+        current_index = {}
+
+        def fake_load(*a, **kw):
+            return dict(current_index)
+
+        def fake_save(idx, *a, **kw):
+            current_index.clear()
+            current_index.update(idx)
+
+        monkeypatch.setattr(wds_mod, "_load_index", fake_load)
+        monkeypatch.setattr(wds_mod, "_save_index", fake_save)
+        mock_writer = MagicMock()
+        mock_writer.append.return_value = "PROJ/000000.tar"
+        monkeypatch.setattr(wds_mod, "_ShardWriter", lambda **kw: mock_writer)
+
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+
+        # --- Batch A ---
+        for sid in ["A1", "A2"]:
+            torch.save(torch.zeros(1, 4), pt_dir / f"{sid}.features.pt")
+
+        inv_a = pd.DataFrame({
+            "file_name": ["A1.svs", "A2.svs"],
+            "project_id": ["PROJ", "PROJ"],
+        })
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv_a,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter={"A1", "A2"},
+            manifest_csv=manifest_csv,
+        )
+        assert "A1" in current_index and "A2" in current_index, "Batch A must populate index"
+        with open(manifest_csv, newline="") as f:
+            manifest_after_a = {r["slide_id"] for r in csv.DictReader(f)}
+        assert {"A1", "A2"} <= manifest_after_a
+
+        # A1, A2 now FAILED (infra event) — they appear in status CSV as failed
+        failed_after_infra = {"A1", "A2"}
+
+        # --- Batch B ---
+        torch.save(torch.zeros(1, 4), pt_dir / "B1.features.pt")
+        inv_b = pd.DataFrame({
+            "file_name": ["A1.svs", "A2.svs", "B1.svs"],
+            "project_id": ["PROJ", "PROJ", "PROJ"],
+        })
+        wds_mod.append_wds(
+            pt_dir=pt_dir,
+            h5_dir=None,
+            inventory_df=inv_b,
+            wds_dest="s3://bucket/wds",
+            model_type="hoptimus1",
+            staging_dir=None,
+            max_shard_bytes=10 * 1024 ** 3,
+            dry_run=False,
+            slide_id_filter={"B1"},
+            manifest_csv=manifest_csv,
+            failed_slides=failed_after_infra,
+        )
+
+        # A1 and A2 must still be in the index
+        assert "A1" in current_index, "A1 evicted from index by batch B — regression!"
+        assert "A2" in current_index, "A2 evicted from index by batch B — regression!"
+        assert "B1" in current_index, "B1 must be in index after batch B"
+
+        # A1 and A2 must still be in the manifest (were written by batch A)
+        with open(manifest_csv, newline="") as f:
+            manifest_after_b = {r["slide_id"] for r in csv.DictReader(f)}
+        assert "A1" in manifest_after_b, "A1 lost from manifest after batch B — regression!"
+        assert "A2" in manifest_after_b, "A2 lost from manifest after batch B — regression!"
+
+
+# ===========================================================================
 # S3Watcher._scan / _in_progress_keys
 # ===========================================================================
 

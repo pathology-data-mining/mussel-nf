@@ -127,6 +127,15 @@ class TestStateStore:
         paths = {r["slide_path"] for r in pending}
         assert paths == {"/slides/a.svs", "/slides/b.svs"}
 
+    def test_get_pending_slides_includes_oncotree_code(self, store):
+        """oncotree_code stored via add_slide must survive the round-trip through
+        get_pending_slides() so that the batch CSV is populated correctly."""
+        store.add_slide("/slides/a.svs", "a", oncotree_code="PAAD")
+        store.add_slide("/slides/b.svs", "b", oncotree_code="BRCA")
+        pending = store.get_pending_slides()
+        codes = {r["slide_id"]: r.get("oncotree_code") for r in pending}
+        assert codes == {"a": "PAAD", "b": "BRCA"}
+
     def test_mark_dispatched_removes_from_pending(self, store):
         store.add_slide("/slides/a.svs", "a")
         claimed = store.mark_dispatched(["/slides/a.svs"], "batch-001")
@@ -700,6 +709,25 @@ class TestNextflowRunnerWriteCsv:
         assert len(rows) == 2
         assert rows[0] == {"slide_id": "a", "slide_path": "/slides/a.svs", "oncotree_code": "BRCA"}
         assert rows[1]["oncotree_code"] == ""  # missing key defaults to empty string
+
+    def test_csv_oncotree_code_roundtrip_via_state(self, tmp_path):
+        """oncotree_code added via StateStore must appear in the batch CSV.
+
+        This is the integration test that would have caught the get_pending_slides()
+        SELECT omitting oncotree_code: store → get_pending_slides → _write_csv → CSV.
+        """
+        from mussel_dispatcher.state import StateStore
+        state = StateStore(str(tmp_path / "dispatcher.db"))
+        state.add_slide("/slides/a.svs", "a", oncotree_code="PAAD")
+        state.add_slide("/slides/b.svs", "b", oncotree_code="BRCA")
+        slides = state.get_pending_slides()
+
+        cfg = make_config(dispatch_dir=str(tmp_path))
+        runner = NextflowRunner(cfg, "batch-rt", slides, MagicMock())
+        csv_path = runner._write_csv()
+        with open(csv_path, newline="") as f:
+            rows = {r["slide_id"]: r["oncotree_code"] for r in csv.DictReader(f)}
+        assert rows == {"a": "PAAD", "b": "BRCA"}
 
     def test_csv_backfills_file_id_from_gdc_uri(self, tmp_path):
         """_write_csv extracts file_id/file_name from gdc:// URI when empty."""

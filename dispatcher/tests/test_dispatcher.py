@@ -4098,6 +4098,28 @@ class TestTowerShimServerRoutes:
         body = json.loads(responses[0])
         assert "user" in body
 
+    def test_trace_create_r_prefix_run_name(self, tmp_path):
+        """dispatcher_r{hash8} run names (with r-prefix) must resolve to the correct batch_id."""
+        import json, sqlite3
+        Handler = self._make_server(tmp_path)
+        # Insert a batch with the full timestamped ID
+        db_path = tmp_path / "state" / "dispatcher.db"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO batches (batch_id, status, slide_count) VALUES (?,?,?)",
+                ("20260523T041220_4c59c6c7", "RUNNING", 5),
+            )
+        # Tower sends create with the r-prefixed short run name
+        h, responses = self._fake_request(
+            Handler, "POST", "/trace/create",
+            body={"runName": "dispatcher_r4c59c6c7", "sessionId": "sess-xyz"}
+        )
+        assert h._response_code == 200
+        # Must resolve to the full batch_id, not "r4c59c6c7"
+        state = Handler.tower_registry.get_by_batch("20260523T041220_4c59c6c7")
+        assert state is not None, "r-prefix run name not resolved to batch_id"
+        assert state["batch_id"] == "20260523T041220_4c59c6c7"
+
     def test_trace_create_route(self, tmp_path):
         import json
         Handler = self._make_server(tmp_path)

@@ -235,18 +235,35 @@ def _build_handler(cfg: Config):
     def _run_name_to_batch_id(run_name: str) -> str:
         """Map NF run name → dispatcher batch_id.
 
-        Supports two formats:
-          - Legacy: ``dispatcher_{batch_id}``  (pre-fix, full 35-char name)
-          - Modern: ``{hash8}``                (8-char UUID suffix, e.g. "410bb3ce")
+        Supports three formats:
+          - Legacy: ``dispatcher_{batch_id}``      (pre-fix, full 35-char name)
+          - Modern: ``dispatcher_r{hash8}``        (r-prefixed 8-char UUID suffix)
+          - Short:  ``r{hash8}`` or ``{hash8}``   (bare hash, no dispatcher_ prefix)
         """
         if run_name.startswith("dispatcher_"):
-            return run_name[len("dispatcher_"):]
-        # Modern short hash: look up batch whose batch_id ends with _{hash}
+            suffix = run_name[len("dispatcher_"):]
+            # If suffix is r+8hex (modern format), look up by the hex part
+            import re as _re
+            m = _re.fullmatch(r"r([0-9a-f]{8})", suffix)
+            if m:
+                try:
+                    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                        row = conn.execute(
+                            "SELECT batch_id FROM batches WHERE batch_id LIKE ?",
+                            (f"%_{m.group(1)}",)
+                        ).fetchone()
+                        if row:
+                            return row[0]
+                except Exception:
+                    pass
+            return suffix
+        # Bare hash (with or without r-prefix): look up batch whose batch_id ends with _{hash}
+        run = run_name.lstrip("r") if len(run_name) == 9 and run_name.startswith("r") else run_name
         try:
             with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
                 row = conn.execute(
                     "SELECT batch_id FROM batches WHERE batch_id LIKE ?",
-                    (f"%_{run_name}",)
+                    (f"%_{run}",)
                 ).fetchone()
                 if row:
                     return row[0]

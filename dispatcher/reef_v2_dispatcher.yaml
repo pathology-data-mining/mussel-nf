@@ -36,7 +36,7 @@ max_wait_seconds: 300    # dispatch after this many seconds regardless of batch_
 
 # Behaviour
 retry_failed: true       # re-queue slides whose batch failed on restart
-cleanup_work_dir: true   # delete per-batch work/ dirs after success (required for large runs — staged SVS files accumulate ~650 MB/slide)
+cleanup_work_dir: true
 cleanup_results: true    # delete local .pt files after WDS push to S3 (required for large runs — ~103 MB/slide)
 
 # Optional: run extra commands after each successful Nextflow batch.

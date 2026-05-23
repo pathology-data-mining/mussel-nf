@@ -114,6 +114,42 @@ def resolve_warehouse_id(host: str = "", token: str = "") -> str:
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
+def ensure_volume_exists(
+    volume_folder: str, host: str, token: str, warehouse_id: str
+) -> None:
+    """CREATE VOLUME IF NOT EXISTS for the UC volume backing *volume_folder*.
+
+    *volume_folder* must start with ``/Volumes/<catalog>/<schema>/<volume>``.
+    The three-part name is extracted and used in the DDL statement so the
+    volume is created as a managed volume if it does not already exist.
+    """
+    parts = [p for p in volume_folder.strip("/").split("/") if p]
+    # parts[0] == "Volumes", parts[1..3] == catalog / schema / volume
+    if len(parts) < 4 or parts[0].lower() != "volumes":
+        log.warning("Cannot parse volume path for auto-create: %s", volume_folder)
+        return
+    fqn = ".".join(parts[1:4])
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "warehouse_id": warehouse_id,
+        "statement": f"CREATE VOLUME IF NOT EXISTS {fqn}",
+        "wait_timeout": "30s",
+    }
+    resp = requests.post(
+        f"{host.rstrip('/')}/api/2.0/sql/statements",
+        headers=headers,
+        json=payload,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    state = resp.json().get("status", {}).get("state", "")
+    if state == "SUCCEEDED":
+        log.info("Volume ready: %s", fqn)
+    else:
+        err = resp.json().get("status", {}).get("error", {})
+        log.warning("CREATE VOLUME %s: %s", fqn, err.get("message", state))
+
+
 def upload_parquet(local_path: Path, volume_path: str, host: str, token: str) -> None:
     """PUT a local file to the Databricks Files API (UC volume)."""
     url = f"{host.rstrip('/')}/api/2.0/fs/files{volume_path}"
@@ -446,6 +482,10 @@ def upload_and_trigger(
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
             folder = args.volume_folder.rstrip("/")
             volume_path = f"{folder}/{filename_prefix}{ts}.parquet"
+            # Auto-create the UC volume if it doesn't exist yet
+            warehouse_id = getattr(args, "warehouse_id", None)
+            if warehouse_id:
+                ensure_volume_exists(args.volume_folder, host, token, warehouse_id)
         else:
             volume_path = args.volume_path
 

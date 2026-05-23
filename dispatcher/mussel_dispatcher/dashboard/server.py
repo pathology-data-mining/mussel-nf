@@ -143,19 +143,22 @@ def _build_handler(cfg: Config):
     _wds_manifest_cache: list = [0.0, {}]  # [last_read_time, {model: count}]
 
     def _wds_done_counts() -> dict[str, int]:
-        """Return {model: slide_count} from wds_manifest, with 60s caching."""
+        """Return {model: unique_slide_count} from wds_manifest, with 60s caching."""
         now = time.time()
         if now - _wds_manifest_cache[0] < 60:
             return _wds_manifest_cache[1]
-        counts: dict[str, int] = {}
+        slides: dict[str, set] = {}
         if os.path.exists(wds_manifest):
             try:
                 with open(wds_manifest, newline="") as f:
                     for row in csv.DictReader(f):
                         m = row.get("model", "")
-                        counts[m] = counts.get(m, 0) + 1
+                        slide_id = row.get("slide_id", "")
+                        if m and slide_id:
+                            slides.setdefault(m, set()).add(slide_id)
             except Exception:
                 pass
+        counts = {m: len(ids) for m, ids in slides.items()}
         _wds_manifest_cache[0] = now
         _wds_manifest_cache[1] = counts
         return counts

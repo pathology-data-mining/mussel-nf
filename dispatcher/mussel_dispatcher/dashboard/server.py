@@ -428,15 +428,19 @@ def _build_handler(cfg: Config):
         import glob as _glob
 
         # WDS manifest counts + per-shard distribution
-        wds_counts: dict = {}
-        shard_slide_counts: dict = {}  # model → {shard_path: slide_count}
+        # unique_slides: deduplicated slide_id per model (correct denominator for % done)
+        # shard_slide_counts: row count per shard path (used for shard distribution stats only)
+        unique_slides: dict[str, set] = {}
+        shard_slide_counts: dict = {}  # model → {shard_path: row_count}
         if os.path.exists(wds_manifest):
             try:
                 with open(wds_manifest, newline="") as f:
                     for row in csv.DictReader(f):
                         model = row.get("model", "unknown")
+                        slide_id = row.get("slide_id", "")
                         shard = row.get("wds_path", "")
-                        wds_counts[model] = wds_counts.get(model, 0) + 1
+                        if slide_id:
+                            unique_slides.setdefault(model, set()).add(slide_id)
                         if model not in shard_slide_counts:
                             shard_slide_counts[model] = {}
                         shard_slide_counts[model][shard] = shard_slide_counts[model].get(shard, 0) + 1
@@ -476,8 +480,8 @@ def _build_handler(cfg: Config):
         configured_models = set(tcga_watcher.wds_destinations.keys()) if (
             tcga_watcher and tcga_watcher.wds_destinations
         ) else set()
-        for m in sorted(set(wds_counts) | configured_models):
-            wds_slides = wds_counts.get(m, 0)
+        for m in sorted(set(unique_slides) | configured_models):
+            wds_slides = len(unique_slides.get(m, set()))
             per_shard = list((shard_slide_counts.get(m) or {}).values())
             manifest_shards = len(per_shard)
             shard_stats = {}
@@ -501,7 +505,8 @@ def _build_handler(cfg: Config):
             db_succeeded = conn.execute(
                 "SELECT COUNT(*) FROM slides WHERE status='SUCCEEDED'"
             ).fetchone()[0]
-        return {"models": models, "total": sum(wds_counts.values()),
+        total_rows = sum(len(s) for s in unique_slides.values())
+        return {"models": models, "total": total_rows,
                 "inventory_total": _inventory_total, "db_succeeded": db_succeeded}
 
     class Handler(_TowerHandlerMixin, BaseHTTPRequestHandler):

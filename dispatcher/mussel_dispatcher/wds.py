@@ -287,20 +287,44 @@ class _ShardWriter:
 
     def _init_current_shard(self) -> None:
         shards = sorted(self._work_dir.glob("*.tar"))
-        if not shards:
-            return
-        last = shards[-1]
-        size = last.stat().st_size
+        if shards:
+            last = shards[-1]
+            size = last.stat().st_size
+            try:
+                idx = int(last.stem)
+            except ValueError:
+                idx = len(shards) - 1
+            if size < self._max_shard_bytes:
+                self._current_path = last
+                self._current_index = idx
+                self._current_bytes = size
+            else:
+                self._current_index = idx + 1
+        elif self._use_s3:
+            # No local staging — check S3 to avoid overwriting existing shards.
+            # Start the shard index at max_existing_s3_index + 1 so we never
+            # clobber shards from a previous run that were already uploaded.
+            self._current_index = self._next_s3_shard_index()
+
+    def _next_s3_shard_index(self) -> int:
+        """Return the next shard index that doesn't collide with existing S3 objects."""
         try:
-            idx = int(last.stem)
-        except ValueError:
-            idx = len(shards) - 1
-        if size < self._max_shard_bytes:
-            self._current_path = last
-            self._current_index = idx
-            self._current_bytes = size
-        else:
-            self._current_index = idx + 1
+            client = _s3_client()
+            bucket, prefix = _s3_parts(
+                f"{self._wds_dest.rstrip('/')}/{self._model}/{self._project_id}/"
+            )
+            paginator = client.get_paginator("list_objects_v2")
+            max_idx = -1
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    stem = obj["Key"].split("/")[-1].replace(".tar", "")
+                    try:
+                        max_idx = max(max_idx, int(stem))
+                    except ValueError:
+                        pass
+            return max_idx + 1 if max_idx >= 0 else 0
+        except Exception:
+            return 0
 
     def _active_path(self) -> Path:
         return self._work_dir / f"{self._current_index:06d}.tar"

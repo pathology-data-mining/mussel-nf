@@ -160,6 +160,38 @@ def upload_parquet(local_path: Path, volume_path: str, host: str, token: str) ->
     log.info("Uploaded to Databricks: %s", volume_path)
 
 
+def purge_volume_folder(folder: str, host: str, token: str) -> None:
+    """Delete all parquet files in the UC volume folder before uploading a fresh one.
+
+    This prevents the MERGE from reading stale parquets with incompatible schemas
+    or duplicate rows from prior runs.
+    """
+    base = host.rstrip("/")
+    headers = {"Authorization": f"Bearer {token}"}
+    list_url = f"{base}/api/2.0/fs/directories{folder.rstrip('/')}"
+    try:
+        resp = requests.get(list_url, headers=headers, timeout=30)
+        if resp.status_code == 404:
+            return  # folder doesn't exist yet — nothing to purge
+        resp.raise_for_status()
+        files = resp.json().get("contents", [])
+    except Exception as exc:
+        log.warning("purge_volume_folder: could not list %s: %s", folder, exc)
+        return
+
+    for f in files:
+        path = f.get("path", "")
+        if path.endswith(".parquet"):
+            del_url = f"{base}/api/2.0/fs/files{path}"
+            try:
+                r = requests.delete(del_url, headers=headers, timeout=30)
+                r.raise_for_status()
+                log.debug("Deleted stale parquet: %s", path)
+            except Exception as exc:
+                log.warning("purge_volume_folder: could not delete %s: %s", path, exc)
+    log.info("Purged old parquets from %s", folder)
+
+
 def trigger_job(job_id: str, host: str, token: str, params: dict | None = None) -> str:
     """POST to jobs/run-now; return run_id as str."""
     url = f"{host.rstrip('/')}/api/2.1/jobs/run-now"
@@ -486,6 +518,8 @@ def upload_and_trigger(
             warehouse_id = getattr(args, "warehouse_id", None)
             if warehouse_id:
                 ensure_volume_exists(args.volume_folder, host, token, warehouse_id)
+            # Remove stale parquets so MERGE always sees exactly one source file
+            purge_volume_folder(folder, host, token)
         else:
             volume_path = args.volume_path
 

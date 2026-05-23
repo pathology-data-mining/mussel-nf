@@ -4820,7 +4820,7 @@ class TestImpactBuildExport:
 
         s2 = df[df["slide_id"] == "slide2"].iloc[0]
         assert s2["status"] == "PENDING"
-        assert s2["wds_path"] is None
+        assert s2["wds_path"] == ""
 
         s3 = df[df["slide_id"] == "slide3"].iloc[0]
         assert s3["status"] == "FAILED"
@@ -4837,7 +4837,7 @@ class TestImpactBuildExport:
 
         df = build_export(db_path, str(tmp_path / "nonexistent.csv"), ["titan_slide"])
         assert len(df) == 1
-        assert df.iloc[0]["wds_path"] is None
+        assert df.iloc[0]["wds_path"] == ""
 
 
 # ===========================================================================

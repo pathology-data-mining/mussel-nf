@@ -119,17 +119,16 @@ def build_export(
             failure_reason = ""
 
         for model in model_types:
-            wds_path = wds_index.get((slide_id, model)) or None
             rows.append({
-                "slide_id": slide_id,
+                "slide_id": str(slide_id),
                 "oncotree_code": slide.get("oncotree_code") or "",
                 "slide_path": slide.get("slide_path") or "",
                 "model": model,
                 "status": status,
                 "failure_reason": failure_reason,
-                "wds_path": wds_path,
-                "first_seen_at": slide.get("first_seen_at"),
-                "completed_at": slide.get("completed_at"),
+                "wds_path": wds_index.get((slide_id, model)) or "",
+                "first_seen_at": slide.get("first_seen_at") or "",
+                "completed_at": slide.get("completed_at") or "",
             })
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[

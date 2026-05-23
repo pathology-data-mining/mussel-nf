@@ -2434,11 +2434,114 @@ class TestCountUniqueSlidesFromManifest:
         assert counts.get("hoptimus1", 0) == 1  # only S2
 
 
-# ===========================================================================
-# append_wds manifest write — already-indexed slides
-# ===========================================================================
+class TestParseWdsManifest:
+    """Tests for _parse_wds_manifest() — the extracted two-value manifest parser.
 
-class TestAppendWdsManifest:
+    This is the module-level function that _api_wds() now delegates to, enabling
+    unit testing of the unique-slide counting and shard distribution logic that
+    was previously locked inside a closure.
+    """
+
+    def _write_manifest(self, path, rows):
+        import csv as _csv
+        with open(path, "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
+            w.writeheader()
+            w.writerows(rows)
+
+    def test_unique_slides_deduplicates_across_shards(self, tmp_path):
+        """A slide appearing in 3 shards is counted once, not 3 times."""
+        from mussel_dispatcher.dashboard.server import _parse_wds_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        self._write_manifest(manifest, [
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/000000.tar"},
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/000001.tar"},
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/000002.tar"},
+            {"slide_id": "S2", "model": "hoptimus1", "wds_path": "s3://b/000000.tar"},
+        ])
+        unique, shards = _parse_wds_manifest(str(manifest))
+        assert len(unique["hoptimus1"]) == 2  # S1 + S2
+
+    def test_shard_counts_are_row_counts_not_unique(self, tmp_path):
+        """shard_slide_counts tracks row count per shard path (for distribution stats)."""
+        from mussel_dispatcher.dashboard.server import _parse_wds_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        self._write_manifest(manifest, [
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/000000.tar"},
+            {"slide_id": "S2", "model": "hoptimus1", "wds_path": "s3://b/000000.tar"},
+            {"slide_id": "S3", "model": "hoptimus1", "wds_path": "s3://b/000001.tar"},
+        ])
+        _, shards = _parse_wds_manifest(str(manifest))
+        assert shards["hoptimus1"]["s3://b/000000.tar"] == 2
+        assert shards["hoptimus1"]["s3://b/000001.tar"] == 1
+
+    def test_multiple_models_tracked_independently(self, tmp_path):
+        """Two models get separate unique sets and shard dicts."""
+        from mussel_dispatcher.dashboard.server import _parse_wds_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        self._write_manifest(manifest, [
+            {"slide_id": "S1", "model": "hoptimus1",  "wds_path": "s3://b/h/000000.tar"},
+            {"slide_id": "S1", "model": "titan_slide", "wds_path": "s3://b/t/000000.tar"},
+            {"slide_id": "S2", "model": "hoptimus1",  "wds_path": "s3://b/h/000000.tar"},
+        ])
+        unique, shards = _parse_wds_manifest(str(manifest))
+        assert len(unique["hoptimus1"]) == 2
+        assert len(unique["titan_slide"]) == 1
+        assert "hoptimus1" in shards
+        assert "titan_slide" in shards
+
+    def test_models_filter_excludes_other_models(self, tmp_path):
+        """Optional models allowlist excludes unlisted models from both outputs."""
+        from mussel_dispatcher.dashboard.server import _parse_wds_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        self._write_manifest(manifest, [
+            {"slide_id": "S1", "model": "hoptimus1",  "wds_path": "x"},
+            {"slide_id": "S2", "model": "titan_slide", "wds_path": "x"},
+        ])
+        unique, shards = _parse_wds_manifest(str(manifest), models=["hoptimus1"])
+        assert "hoptimus1" in unique
+        assert "titan_slide" not in unique
+        assert "titan_slide" not in shards
+
+    def test_missing_file_returns_empty_dicts(self, tmp_path):
+        from mussel_dispatcher.dashboard.server import _parse_wds_manifest
+        unique, shards = _parse_wds_manifest(str(tmp_path / "nonexistent.csv"))
+        assert unique == {}
+        assert shards == {}
+
+    def test_corrupt_file_returns_empty_dicts(self, tmp_path):
+        from mussel_dispatcher.dashboard.server import _parse_wds_manifest
+        bad = tmp_path / "bad.csv"
+        bad.write_bytes(b"\x00\x01\x02 not csv \xff\xfe")
+        unique, shards = _parse_wds_manifest(str(bad))
+        assert unique == {}
+        assert shards == {}
+
+    def test_slides_per_inventory_never_exceeds_inventory_when_rows_inflated(self, tmp_path):
+        """The original bug: 12502 manifest rows for 11802 unique slides pushed pct > 100.
+
+        With _parse_wds_manifest, unique count stays at 3 even with 6 duplicate rows.
+        """
+        from mussel_dispatcher.dashboard.server import _parse_wds_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        # 3 unique slides, each appearing twice (simulating two pipeline runs)
+        self._write_manifest(manifest, [
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/000000.tar"},
+            {"slide_id": "S2", "model": "hoptimus1", "wds_path": "s3://b/000000.tar"},
+            {"slide_id": "S3", "model": "hoptimus1", "wds_path": "s3://b/000000.tar"},
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/000001.tar"},
+            {"slide_id": "S2", "model": "hoptimus1", "wds_path": "s3://b/000001.tar"},
+            {"slide_id": "S3", "model": "hoptimus1", "wds_path": "s3://b/000001.tar"},
+        ])
+        unique, _ = _parse_wds_manifest(str(manifest))
+        inventory_total = 3
+        wds_slides = len(unique["hoptimus1"])
+        pct = min(100.0, wds_slides / inventory_total * 100)
+        assert wds_slides == 3        # unique count, not 6
+        assert pct == 100.0           # exactly 100, not 200
+
+
+
     """Tests for the manifest write path in append_wds().
 
     These cover the bug where slides already present in the WDS S3 index were

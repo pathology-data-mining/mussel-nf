@@ -57,20 +57,42 @@ def _count_unique_slides_from_manifest(
     ``models`` is an optional allowlist; if None, all models in the file are
     counted.  Returns ``{}`` if the file does not exist or cannot be read.
     """
-    slides: dict[str, set] = {}
+    unique_slides, _ = _parse_wds_manifest(manifest_path, models=models)
+    return {m: len(ids) for m, ids in unique_slides.items()}
+
+
+def _parse_wds_manifest(
+    manifest_path: str,
+    models: "list[str] | None" = None,
+) -> "tuple[dict[str, set], dict[str, dict[str, int]]]":
+    """Parse a WDS manifest CSV and return (unique_slides, shard_slide_counts).
+
+    * ``unique_slides``: ``{model: set(slide_id)}`` — deduplicated.
+    * ``shard_slide_counts``: ``{model: {shard_path: row_count}}`` — one entry
+      per manifest row, used for per-shard distribution stats.
+
+    Returns empty dicts if the file does not exist or cannot be read.
+    ``models`` is an optional allowlist; if None, all models are included.
+    """
+    unique_slides: dict[str, set] = {}
+    shard_slide_counts: dict[str, dict[str, int]] = {}
     if not os.path.exists(manifest_path):
-        return {}
+        return unique_slides, shard_slide_counts
     try:
         with open(manifest_path, newline="") as f:
             for row in csv.DictReader(f):
-                m = row.get("model", "")
+                m = row.get("model", "unknown")
                 slide_id = row.get("slide_id", "")
-                if m and slide_id:
-                    if models is None or m in models:
-                        slides.setdefault(m, set()).add(slide_id)
+                shard = row.get("wds_path", "")
+                if models is not None and m not in models:
+                    continue
+                if slide_id:
+                    unique_slides.setdefault(m, set()).add(slide_id)
+                model_shards = shard_slide_counts.setdefault(m, {})
+                model_shards[shard] = model_shards.get(shard, 0) + 1
     except Exception:
-        return {}
-    return {m: len(ids) for m, ids in slides.items()}
+        return {}, {}
+    return unique_slides, shard_slide_counts
 
 # ---------------------------------------------------------------------------
 # HTML template — loaded from static/dashboard.html at startup
@@ -430,22 +452,7 @@ def _build_handler(cfg: Config):
         # WDS manifest counts + per-shard distribution
         # unique_slides: deduplicated slide_id per model (correct denominator for % done)
         # shard_slide_counts: row count per shard path (used for shard distribution stats only)
-        unique_slides: dict[str, set] = {}
-        shard_slide_counts: dict = {}  # model → {shard_path: row_count}
-        if os.path.exists(wds_manifest):
-            try:
-                with open(wds_manifest, newline="") as f:
-                    for row in csv.DictReader(f):
-                        model = row.get("model", "unknown")
-                        slide_id = row.get("slide_id", "")
-                        shard = row.get("wds_path", "")
-                        if slide_id:
-                            unique_slides.setdefault(model, set()).add(slide_id)
-                        if model not in shard_slide_counts:
-                            shard_slide_counts[model] = {}
-                        shard_slide_counts[model][shard] = shard_slide_counts[model].get(shard, 0) + 1
-            except Exception as exc:
-                return {"models": {}, "total": 0, "error": str(exc)}
+        unique_slides, shard_slide_counts = _parse_wds_manifest(wds_manifest)
 
         # Local .pt file counts per model (fast glob; shows cleanup status)
         local_pt: dict = {}

@@ -39,6 +39,39 @@ s3_stats      = _helpers.s3_stats
 _s3_cache     = _helpers._s3_cache
 _S3_CACHE_TTL = _helpers._S3_CACHE_TTL
 
+
+# ---------------------------------------------------------------------------
+# Manifest helpers (module-level so they can be unit-tested)
+# ---------------------------------------------------------------------------
+
+def _count_unique_slides_from_manifest(
+    manifest_path: str, models: "list[str] | None" = None
+) -> "dict[str, int]":
+    """Return {model: unique_slide_count} from a WDS manifest CSV.
+
+    Counts unique *slide_ids* per model — not rows — because each slide may
+    appear in multiple shards (and across multiple pipeline runs) producing
+    duplicate entries.  Over-counting rows would inflate the WDS progress
+    percentage past 100 % when shards accumulate across runs.
+
+    ``models`` is an optional allowlist; if None, all models in the file are
+    counted.  Returns ``{}`` if the file does not exist or cannot be read.
+    """
+    slides: dict[str, set] = {}
+    if not os.path.exists(manifest_path):
+        return {}
+    try:
+        with open(manifest_path, newline="") as f:
+            for row in csv.DictReader(f):
+                m = row.get("model", "")
+                slide_id = row.get("slide_id", "")
+                if m and slide_id:
+                    if models is None or m in models:
+                        slides.setdefault(m, set()).add(slide_id)
+    except Exception:
+        return {}
+    return {m: len(ids) for m, ids in slides.items()}
+
 # ---------------------------------------------------------------------------
 # HTML template — loaded from static/dashboard.html at startup
 # ---------------------------------------------------------------------------
@@ -147,18 +180,7 @@ def _build_handler(cfg: Config):
         now = time.time()
         if now - _wds_manifest_cache[0] < 60:
             return _wds_manifest_cache[1]
-        slides: dict[str, set] = {}
-        if os.path.exists(wds_manifest):
-            try:
-                with open(wds_manifest, newline="") as f:
-                    for row in csv.DictReader(f):
-                        m = row.get("model", "")
-                        slide_id = row.get("slide_id", "")
-                        if m and slide_id:
-                            slides.setdefault(m, set()).add(slide_id)
-            except Exception:
-                pass
-        counts = {m: len(ids) for m, ids in slides.items()}
+        counts = _count_unique_slides_from_manifest(wds_manifest)
         _wds_manifest_cache[0] = now
         _wds_manifest_cache[1] = counts
         return counts

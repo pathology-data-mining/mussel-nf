@@ -588,12 +588,18 @@ def append_wds(
 
     if n_missing_project:
         log.warning("%d slides skipped (no project_id in inventory)", n_missing_project)
-    log.info("Done: %d appended, %d already indexed", n_appended, n_skipped)
+    log.info("Done: %d appended, %d already indexed, %d missing project",
+             n_appended, n_skipped, n_missing_project)
 
     if n_appended > 0 and not dry_run:
         _save_index(index, wds_dest, model_type, staging_dir, s3_max_concurrency)
         log.info("Updated wds_index.json (%d total entries)", len(index))
 
+    index["_stats"] = {
+        "n_appended": n_appended,
+        "n_skipped": n_skipped,
+        "n_missing_project": n_missing_project,
+    }
     return index
 
 

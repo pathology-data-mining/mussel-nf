@@ -2261,6 +2261,180 @@ class TestVerifyWdsCoverage:
 
 
 # ===========================================================================
+# append_wds silent skip detection (n_missing_project)
+# ===========================================================================
+
+class TestAppendWdsMissingProject:
+    """Tests for the silent-skip failure mode in append_wds().
+
+    When slide_to_project maps no slides (e.g. oncotree_code was missing from
+    the batch CSV), append_wds returns n_appended=0 with no exception.  The
+    _stats key in the returned index must expose n_missing_project so callers
+    can detect and surface the data quality issue.
+    """
+
+    def _make_pt(self, tmp_path, slide_id):
+        import torch
+        pt = tmp_path / f"{slide_id}.features.pt"
+        torch.save(torch.zeros(1, 4), pt)
+        return pt
+
+    def test_stats_key_present_on_success(self, tmp_path, monkeypatch):
+        """_stats is always present in the returned index."""
+        import torch
+        from mussel_dispatcher import wds as wds_mod
+        import pandas as pd
+
+        self._make_pt(tmp_path, "SLIDE-A")
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: {})
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+        monkeypatch.setattr(wds_mod, "_ShardWriter", MagicMock(
+            return_value=MagicMock(append=MagicMock(return_value="PROJ/000000.tar"),
+                                   flush=MagicMock())
+        ))
+
+        result = wds_mod.append_wds(
+            pt_dir=tmp_path, h5_dir=None,
+            inventory_df=pd.DataFrame({"file_name": ["SLIDE-A.svs"], "project_id": ["PROJ"]}),
+            wds_dest="local_wds", model_type="hoptimus1",
+            staging_dir=None, max_shard_bytes=10 * 1024 ** 3,
+            slide_to_project={"SLIDE-A": "PROJ"},
+        )
+        assert "_stats" in result
+        assert result["_stats"]["n_appended"] == 1
+        assert result["_stats"]["n_missing_project"] == 0
+
+    def test_n_missing_project_counted_when_no_routing(self, tmp_path, monkeypatch):
+        """Slides with no project_id are counted in n_missing_project."""
+        import torch
+        from mussel_dispatcher import wds as wds_mod
+        import pandas as pd
+
+        for sid in ["SLIDE-A", "SLIDE-B", "SLIDE-C"]:
+            self._make_pt(tmp_path, sid)
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: {})
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+
+        # All slides missing from routing dict — simulates empty oncotree_code
+        result = wds_mod.append_wds(
+            pt_dir=tmp_path, h5_dir=None,
+            inventory_df=pd.DataFrame({"file_name": [], "project_id": []}),
+            wds_dest="local_wds", model_type="hoptimus1",
+            staging_dir=None, max_shard_bytes=10 * 1024 ** 3,
+            slide_to_project={},  # empty: all slides will be skipped
+        )
+        assert result["_stats"]["n_appended"] == 0
+        assert result["_stats"]["n_missing_project"] == 3
+
+    def test_mixed_some_missing_project(self, tmp_path, monkeypatch):
+        """Only slides with a project_id are appended; others counted as missing."""
+        import torch
+        from mussel_dispatcher import wds as wds_mod
+        import pandas as pd
+
+        for sid in ["SLIDE-GOOD", "SLIDE-BAD"]:
+            self._make_pt(tmp_path, sid)
+
+        mock_writer = MagicMock()
+        mock_writer.append.return_value = "PROJ/000000.tar"
+        mock_writer.flush = MagicMock()
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: {})
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+        monkeypatch.setattr(wds_mod, "_ShardWriter", MagicMock(return_value=mock_writer))
+
+        result = wds_mod.append_wds(
+            pt_dir=tmp_path, h5_dir=None,
+            inventory_df=pd.DataFrame({"file_name": [], "project_id": []}),
+            wds_dest="local_wds", model_type="hoptimus1",
+            staging_dir=None, max_shard_bytes=10 * 1024 ** 3,
+            slide_to_project={"SLIDE-GOOD": "PROJ"},  # SLIDE-BAD has no entry
+        )
+        assert result["_stats"]["n_appended"] == 1
+        assert result["_stats"]["n_missing_project"] == 1
+
+
+# ===========================================================================
+# _count_unique_slides_from_manifest (module-level helper in dashboard/server)
+# ===========================================================================
+
+class TestCountUniqueSlidesFromManifest:
+    """Tests for the refactored _count_unique_slides_from_manifest() helper.
+
+    The core bug: counting manifest rows (not unique slide_ids) inflated WDS %
+    past 100 % when slides span multiple shards or runs produce duplicate rows.
+    """
+
+    def _write_manifest(self, path, rows):
+        import csv as _csv
+        with open(path, "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
+            w.writeheader()
+            w.writerows(rows)
+
+    def test_unique_count_not_row_count(self, tmp_path):
+        """A slide in 3 shards counts as 1, not 3."""
+        from mussel_dispatcher.dashboard.server import _count_unique_slides_from_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        self._write_manifest(manifest, [
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/wds/PROJ/000000.tar"},
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/wds/PROJ/000001.tar"},
+            {"slide_id": "S1", "model": "hoptimus1", "wds_path": "s3://b/wds/PROJ/000002.tar"},
+            {"slide_id": "S2", "model": "hoptimus1", "wds_path": "s3://b/wds/PROJ/000000.tar"},
+        ])
+        counts = _count_unique_slides_from_manifest(str(manifest))
+        assert counts["hoptimus1"] == 2  # S1 + S2, not 4 rows
+
+    def test_counts_per_model_independently(self, tmp_path):
+        """Each model gets its own unique count."""
+        from mussel_dispatcher.dashboard.server import _count_unique_slides_from_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        self._write_manifest(manifest, [
+            {"slide_id": "S1", "model": "hoptimus1",  "wds_path": "s3://b/wds/PROJ/000000.tar"},
+            {"slide_id": "S2", "model": "hoptimus1",  "wds_path": "s3://b/wds/PROJ/000000.tar"},
+            {"slide_id": "S1", "model": "titan_slide", "wds_path": "s3://b/wds/PROJ/000000.tar"},
+        ])
+        counts = _count_unique_slides_from_manifest(str(manifest))
+        assert counts["hoptimus1"] == 2
+        assert counts["titan_slide"] == 1
+
+    def test_models_filter_restricts_output(self, tmp_path):
+        """When models allowlist is given, other models are excluded."""
+        from mussel_dispatcher.dashboard.server import _count_unique_slides_from_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        self._write_manifest(manifest, [
+            {"slide_id": "S1", "model": "hoptimus1",  "wds_path": "x"},
+            {"slide_id": "S2", "model": "titan_slide", "wds_path": "x"},
+        ])
+        counts = _count_unique_slides_from_manifest(str(manifest), models=["hoptimus1"])
+        assert "hoptimus1" in counts
+        assert "titan_slide" not in counts
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        from mussel_dispatcher.dashboard.server import _count_unique_slides_from_manifest
+        counts = _count_unique_slides_from_manifest(str(tmp_path / "nonexistent.csv"))
+        assert counts == {}
+
+    def test_corrupt_file_returns_empty(self, tmp_path):
+        from mussel_dispatcher.dashboard.server import _count_unique_slides_from_manifest
+        bad = tmp_path / "bad.csv"
+        bad.write_bytes(b"\x00\x01\x02 not csv \xff\xfe")
+        counts = _count_unique_slides_from_manifest(str(bad))
+        assert counts == {}
+
+    def test_empty_slide_id_rows_ignored(self, tmp_path):
+        from mussel_dispatcher.dashboard.server import _count_unique_slides_from_manifest
+        manifest = tmp_path / "wds_manifest.csv"
+        self._write_manifest(manifest, [
+            {"slide_id": "",   "model": "hoptimus1", "wds_path": "x"},
+            {"slide_id": "S1", "model": "",          "wds_path": "x"},
+            {"slide_id": "S2", "model": "hoptimus1", "wds_path": "x"},
+        ])
+        counts = _count_unique_slides_from_manifest(str(manifest))
+        assert counts.get("hoptimus1", 0) == 1  # only S2
+
+
+# ===========================================================================
 # append_wds manifest write — already-indexed slides
 # ===========================================================================
 
@@ -2664,6 +2838,88 @@ class TestShardWriterInit:
             max_shard_bytes=10 * 1024 ** 3,
         )
         assert writer._current_index == 0  # falls back gracefully
+
+
+# ===========================================================================
+# _load_features / _load_slide_meta silent failure modes
+# ===========================================================================
+
+class TestWdsFeatureLoading:
+    """Tests for _load_features(), _load_coords(), _load_slide_meta().
+
+    These functions swallow exceptions and return None/fallback values.
+    The tests verify: (a) the silent-return contract is upheld, (b) the
+    warning is logged so operators can see corrupt files, and (c) a valid
+    file returns correct data.
+    """
+
+    def test_load_slide_meta_corrupt_h5_returns_nones(self, tmp_path, caplog):
+        import logging
+        from mussel_dispatcher import wds as wds_mod
+
+        corrupt = tmp_path / "corrupt.h5"
+        corrupt.write_bytes(b"not an hdf5 file")
+
+        with caplog.at_level(logging.WARNING, logger="mussel_dispatcher.wds"):
+            coords, mpp, fallback = wds_mod._load_slide_meta(corrupt)
+
+        assert coords is None
+        assert mpp is None
+        assert fallback is None
+        assert any("Could not read" in r.message for r in caplog.records)
+
+    def test_load_slide_meta_valid_h5(self, tmp_path):
+        import h5py, numpy as np
+        from mussel_dispatcher import wds as wds_mod
+
+        h5_path = tmp_path / "slide.h5"
+        arr = np.array([[100, 200], [300, 400]], dtype=np.int64)
+        with h5py.File(h5_path, "w") as f:
+            ds = f.create_dataset("coords", data=arr)
+            ds.attrs["native_mpp"] = 0.5
+            ds.attrs["mpp_is_fallback"] = False
+
+        coords, mpp, fallback = wds_mod._load_slide_meta(h5_path)
+        assert coords is not None
+        assert coords.shape == (2, 2)
+        assert mpp == pytest.approx(0.5)
+        assert fallback is False
+
+    def test_load_coords_corrupt_h5_returns_none(self, tmp_path, caplog):
+        import logging
+        from mussel_dispatcher import wds as wds_mod
+
+        corrupt = tmp_path / "corrupt.h5"
+        corrupt.write_bytes(b"\xff\xfe bad data")
+
+        with caplog.at_level(logging.WARNING, logger="mussel_dispatcher.wds"):
+            result = wds_mod._load_coords(corrupt)
+
+        assert result is None
+        assert any("Could not read coords" in r.message for r in caplog.records)
+
+    def test_load_features_1d_tensor_unsqueezed(self, tmp_path):
+        """1-D feature tensor should be reshaped to (1, N)."""
+        import torch, numpy as np
+        from mussel_dispatcher import wds as wds_mod
+
+        pt_path = tmp_path / "slide.features.pt"
+        torch.save(torch.ones(768), pt_path)
+
+        arr = wds_mod._load_features(pt_path)
+        assert arr.ndim == 2
+        assert arr.shape == (1, 768)
+
+    def test_load_features_bfloat16_stored_as_uint16(self, tmp_path):
+        """bfloat16 tensors must be reinterpreted as uint16 (no native numpy bfloat16)."""
+        import torch, numpy as np
+        from mussel_dispatcher import wds as wds_mod
+
+        pt_path = tmp_path / "slide.features.pt"
+        torch.save(torch.ones(1, 4, dtype=torch.bfloat16), pt_path)
+
+        arr = wds_mod._load_features(pt_path)
+        assert arr.dtype == np.uint16
 
 
 # ===========================================================================
@@ -3924,6 +4180,316 @@ class TestTowerProcessToSlurmName:
         derived = tower_process_to_slurm_name(tower_name)
         # derived strips trailing _, squeue proc_short has trailing _
         assert proc_short.rstrip("_") == derived
+
+
+# ===========================================================================
+# Shared Databricks utilities (databricks_sync.py)
+# ===========================================================================
+
+class TestEnsureVolumeExists:
+    """Tests for ensure_volume_exists() — new function, completely untested before."""
+
+    def test_success_logs_volume_ready(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": {"state": "SUCCEEDED"}}
+        mock_post = MagicMock(return_value=mock_resp)
+        monkeypatch.setattr(ds.requests, "post", mock_post)
+
+        ds.ensure_volume_exists(
+            "/Volumes/cat/sch/vol", host="https://host", token="tok", warehouse_id="wh1"
+        )
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs[1]["json"] if "json" in call_kwargs[1] else call_kwargs[0][1]
+        assert "CREATE VOLUME IF NOT EXISTS cat.sch.vol" in payload["statement"]
+        assert payload["warehouse_id"] == "wh1"
+
+    def test_parses_three_part_fqn_correctly(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+        captured = {}
+        def fake_post(url, headers, json, timeout):
+            captured["payload"] = json
+            r = MagicMock()
+            r.json.return_value = {"status": {"state": "SUCCEEDED"}}
+            return r
+        monkeypatch.setattr(ds.requests, "post", fake_post)
+
+        ds.ensure_volume_exists(
+            "/Volumes/my_catalog/my_schema/my_volume/subdir",
+            host="https://host", token="tok", warehouse_id="wh"
+        )
+        assert "my_catalog.my_schema.my_volume" in captured["payload"]["statement"]
+
+    def test_bad_path_logs_warning_and_returns(self, monkeypatch, caplog):
+        import logging
+        from mussel_dispatcher import databricks_sync as ds
+        mock_post = MagicMock()
+        monkeypatch.setattr(ds.requests, "post", mock_post)
+
+        with caplog.at_level(logging.WARNING, logger="mussel_dispatcher.databricks_sync"):
+            ds.ensure_volume_exists(
+                "/not/a/volume/path", host="https://host", token="tok", warehouse_id="wh"
+            )
+
+        mock_post.assert_not_called()
+        assert any("Cannot parse" in r.message for r in caplog.records)
+
+    def test_http_error_raises(self, monkeypatch):
+        import requests as req_lib
+        from mussel_dispatcher import databricks_sync as ds
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = req_lib.HTTPError("403")
+        monkeypatch.setattr(ds.requests, "post", MagicMock(return_value=mock_resp))
+
+        with pytest.raises(req_lib.HTTPError):
+            ds.ensure_volume_exists(
+                "/Volumes/a/b/c", host="https://host", token="tok", warehouse_id="wh"
+            )
+
+    def test_non_succeeded_state_logs_warning(self, monkeypatch, caplog):
+        import logging
+        from mussel_dispatcher import databricks_sync as ds
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": {"state": "FAILED", "error": {"message": "Permission denied"}}
+        }
+        monkeypatch.setattr(ds.requests, "post", MagicMock(return_value=mock_resp))
+
+        with caplog.at_level(logging.WARNING, logger="mussel_dispatcher.databricks_sync"):
+            ds.ensure_volume_exists(
+                "/Volumes/a/b/c", host="https://host", token="tok", warehouse_id="wh"
+            )
+        assert any("Permission denied" in r.message for r in caplog.records)
+
+
+class TestResolveWarehouseId:
+    """Tests for resolve_warehouse_id() — silently returns '' on any error."""
+
+    def test_returns_empty_when_no_credentials(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+        monkeypatch.setattr(ds, "resolve_credentials", lambda h, t: ("", ""))
+        assert ds.resolve_warehouse_id() == ""
+
+    def test_returns_empty_on_http_error(self, monkeypatch):
+        import requests as req_lib
+        from mussel_dispatcher import databricks_sync as ds
+        monkeypatch.setattr(ds, "resolve_credentials", lambda h, t: ("https://host", "tok"))
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = req_lib.HTTPError("500")
+        monkeypatch.setattr(ds.requests, "get", MagicMock(return_value=mock_resp))
+        assert ds.resolve_warehouse_id() == ""
+
+    def test_returns_empty_when_no_warehouses(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+        monkeypatch.setattr(ds, "resolve_credentials", lambda h, t: ("https://host", "tok"))
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"warehouses": []}
+        monkeypatch.setattr(ds.requests, "get", MagicMock(return_value=mock_resp))
+        assert ds.resolve_warehouse_id() == ""
+
+    def test_prefers_running_over_stopped(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+        monkeypatch.setattr(ds, "resolve_credentials", lambda h, t: ("https://host", "tok"))
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"warehouses": [
+            {"id": "stopped-wh", "state": "STOPPED",  "warehouse_type": "SERVERLESS", "name": "a"},
+            {"id": "running-wh", "state": "RUNNING",  "warehouse_type": "CLASSIC",    "name": "b"},
+        ]}
+        monkeypatch.setattr(ds.requests, "get", MagicMock(return_value=mock_resp))
+        assert ds.resolve_warehouse_id() == "running-wh"
+
+    def test_prefers_serverless_over_classic_same_state(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+        monkeypatch.setattr(ds, "resolve_credentials", lambda h, t: ("https://host", "tok"))
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"warehouses": [
+            {"id": "classic-wh",    "state": "RUNNING", "warehouse_type": "CLASSIC",    "name": "a"},
+            {"id": "serverless-wh", "state": "RUNNING", "warehouse_type": "SERVERLESS", "name": "b"},
+        ]}
+        monkeypatch.setattr(ds.requests, "get", MagicMock(return_value=mock_resp))
+        assert ds.resolve_warehouse_id() == "serverless-wh"
+
+    def test_skips_deleted_warehouses(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+        monkeypatch.setattr(ds, "resolve_credentials", lambda h, t: ("https://host", "tok"))
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"warehouses": [
+            {"id": "deleted-wh", "state": "DELETED",  "warehouse_type": "SERVERLESS", "name": "a"},
+            {"id": "live-wh",    "state": "STOPPED",  "warehouse_type": "CLASSIC",    "name": "b"},
+        ]}
+        monkeypatch.setattr(ds.requests, "get", MagicMock(return_value=mock_resp))
+        assert ds.resolve_warehouse_id() == "live-wh"
+
+
+class TestMergeViaWarehouse:
+    """Tests for merge_via_warehouse() — 120 lines of SQL generation, untested before."""
+
+    def _make_mock_post(self, monkeypatch, ds, responses):
+        """responses: list of (status_code_ok, json_body) in call order."""
+        call_iter = iter(responses)
+        def fake_post(url, headers, json, timeout):
+            body = next(call_iter)
+            r = MagicMock()
+            r.json.return_value = body
+            return r
+        monkeypatch.setattr(ds.requests, "post", fake_post)
+
+    def _make_mock_get(self, monkeypatch, ds, body):
+        monkeypatch.setattr(ds.requests, "get",
+            MagicMock(return_value=MagicMock(json=MagicMock(return_value=body))))
+
+    def test_create_table_failure_returns_false(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+
+        # POST for CREATE TABLE → FAILED immediately
+        self._make_mock_post(monkeypatch, ds, [
+            {"statement_id": "s1"},  # submit
+        ])
+        # GET poll → FAILED
+        self._make_mock_get(monkeypatch, ds, {
+            "status": {"state": "FAILED", "error": {"message": "Table error"}}
+        })
+
+        ok, msg = ds.merge_via_warehouse(
+            "/Volumes/a/b/c", "cat.sch.table",
+            host="https://host", token="tok", warehouse_id="wh",
+            poll_interval_s=0,
+        )
+        assert not ok
+        assert "Table error" in msg or "CREATE TABLE" in msg
+
+    def test_merge_success_returns_true(self, monkeypatch):
+        from mussel_dispatcher import databricks_sync as ds
+
+        call_count = [0]
+        def fake_post(url, headers, json, timeout):
+            call_count[0] += 1
+            r = MagicMock()
+            if "CREATE TABLE" in json.get("statement", ""):
+                r.json.return_value = {"statement_id": "s-create"}
+            elif "DESCRIBE" in json.get("statement", "") and "parquet" in json.get("statement", ""):
+                r.json.return_value = {
+                    "result": {"data_array": [["slide_id"], ["model"], ["embedding"]]}
+                }
+            elif "DESCRIBE TABLE" in json.get("statement", ""):
+                r.json.return_value = {
+                    "result": {"data_array": [["slide_id"], ["model"], ["embedding"]]}
+                }
+            elif "MERGE" in json.get("statement", ""):
+                r.json.return_value = {"statement_id": "s-merge"}
+            else:
+                r.json.return_value = {"statement_id": "s-other"}
+            return r
+
+        get_responses = iter([
+            # poll for CREATE TABLE
+            {"status": {"state": "SUCCEEDED"}},
+            # poll for MERGE
+            {"status": {"state": "SUCCEEDED"}},
+        ])
+        monkeypatch.setattr(ds.requests, "post", fake_post)
+        monkeypatch.setattr(ds.requests, "get",
+            MagicMock(side_effect=lambda *a, **kw: MagicMock(
+                json=MagicMock(return_value=next(get_responses))
+            )))
+
+        ok, msg = ds.merge_via_warehouse(
+            "/Volumes/a/b/c", "cat.sch.table",
+            host="https://host", token="tok", warehouse_id="wh",
+            poll_interval_s=0,
+        )
+        assert ok
+
+    def test_merge_sql_uses_column_intersection(self, monkeypatch):
+        """When source and target schemas differ, only common cols appear in SET clause."""
+        from mussel_dispatcher import databricks_sync as ds
+
+        merge_statements = []
+        def fake_post(url, headers, json, timeout):
+            stmt = json.get("statement", "")
+            if "MERGE" in stmt:
+                merge_statements.append(stmt)
+            r = MagicMock()
+            if "CREATE TABLE" in stmt:
+                r.json.return_value = {"statement_id": "s1"}
+            elif "DESCRIBE" in stmt and "parquet" in stmt:
+                r.json.return_value = {
+                    "result": {"data_array": [["slide_id"], ["model"]]}
+                }
+            elif "DESCRIBE TABLE" in stmt:
+                r.json.return_value = {
+                    "result": {"data_array": [["slide_id"], ["model"], ["extra_target_col"]]}
+                }
+            elif "MERGE" in stmt:
+                r.json.return_value = {"statement_id": "s2"}
+            else:
+                r.json.return_value = {"statement_id": "sx"}
+            return r
+
+        get_responses = iter([
+            {"status": {"state": "SUCCEEDED"}},  # CREATE TABLE
+            {"status": {"state": "SUCCEEDED"}},  # MERGE
+        ])
+        monkeypatch.setattr(ds.requests, "post", fake_post)
+        monkeypatch.setattr(ds.requests, "get",
+            MagicMock(side_effect=lambda *a, **kw: MagicMock(
+                json=MagicMock(return_value=next(get_responses))
+            )))
+
+        ds.merge_via_warehouse(
+            "/Volumes/a/b/c", "cat.sch.table",
+            host="https://host", token="tok", warehouse_id="wh",
+            poll_interval_s=0,
+        )
+
+        assert merge_statements, "No MERGE statement was issued"
+        sql = merge_statements[0]
+        # extra_target_col is target-only → should appear as NULL in INSERT
+        assert "NULL" in sql
+        # common cols slide_id and model should be in SET clause
+        assert "t.slide_id = s.slide_id" in sql or "t.model = s.model" in sql
+
+    def test_fallback_wildcard_merge_when_schema_unavailable(self, monkeypatch):
+        """When DESCRIBE fails, falls back to MERGE … UPDATE SET * INSERT *."""
+        from mussel_dispatcher import databricks_sync as ds
+
+        merge_statements = []
+        def fake_post(url, headers, json, timeout):
+            stmt = json.get("statement", "")
+            if "MERGE" in stmt:
+                merge_statements.append(stmt)
+            r = MagicMock()
+            if "CREATE TABLE" in stmt:
+                r.json.return_value = {"statement_id": "s1"}
+            elif "DESCRIBE" in stmt:
+                raise Exception("DESCRIBE unavailable")
+            elif "MERGE" in stmt:
+                r.json.return_value = {"statement_id": "s2"}
+            else:
+                r.json.return_value = {"statement_id": "sx"}
+            return r
+
+        get_responses = iter([
+            {"status": {"state": "SUCCEEDED"}},
+            {"status": {"state": "SUCCEEDED"}},
+        ])
+        monkeypatch.setattr(ds.requests, "post", fake_post)
+        monkeypatch.setattr(ds.requests, "get",
+            MagicMock(side_effect=lambda *a, **kw: MagicMock(
+                json=MagicMock(return_value=next(get_responses))
+            )))
+
+        ok, _ = ds.merge_via_warehouse(
+            "/Volumes/a/b/c", "cat.sch.table",
+            host="https://host", token="tok", warehouse_id="wh",
+            poll_interval_s=0,
+        )
+        assert ok
+        assert merge_statements
+        assert "UPDATE SET *" in merge_statements[0]
+        assert "INSERT *" in merge_statements[0]
 
 
 # ===========================================================================

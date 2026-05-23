@@ -122,7 +122,7 @@ class StateStore:
 
     def get_pending_slides(self) -> list:
         rows = self._conn().execute(
-            """SELECT slide_path, slide_id, download_path, file_id, file_name, needs_download
+            """SELECT slide_path, slide_id, oncotree_code, download_path, file_id, file_name, needs_download
                FROM slides WHERE status='PENDING' AND slide_path != ''"""
         ).fetchall()
         slides = [dict(r) for r in rows]

@@ -2529,6 +2529,144 @@ class TestS3Download:
 
 
 # ===========================================================================
+# _ShardWriter — shard index initialisation
+# ===========================================================================
+
+class TestShardWriterInit:
+    """Unit tests for _ShardWriter._init_current_shard().
+
+    The critical invariant: when local staging is empty but S3 already has
+    shards for a (model, project) prefix, new shards must start at
+    max_existing_s3_index + 1 so the existing S3 shards are never overwritten.
+    This is the root cause of the TCGA titan_slide data-loss incident where a
+    partial re-run uploaded 000000.tar and clobbered thousands of slides.
+    """
+
+    def _make_writer(self, tmp_path, wds_dest, mock_s3_list, **kwargs):
+        """Create a _ShardWriter with _s3_client patched to return mock listings."""
+        from mussel_dispatcher import wds as wds_mod
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        mock_client = MagicMock()
+        mock_paginator = MagicMock()
+        mock_client.get_paginator.return_value = mock_paginator
+        mock_paginator.paginate.return_value = mock_s3_list
+
+        writer = wds_mod._ShardWriter(
+            wds_dest=wds_dest,
+            model="titan_slide",
+            project_id="TCGA-PROJ",
+            staging_dir=staging,
+            max_shard_bytes=10 * 1024 ** 3,
+            **kwargs,
+        )
+        return writer, staging / "titan_slide" / "TCGA-PROJ"
+
+    def test_empty_staging_no_s3_shards_starts_at_zero(self, tmp_path, monkeypatch):
+        """With empty staging and no S3 shards, start at index 0 (normal first run)."""
+        from mussel_dispatcher import wds as wds_mod
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        mock_client = MagicMock()
+        mock_client.get_paginator.return_value.paginate.return_value = [{"Contents": []}]
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+        writer = wds_mod._ShardWriter(
+            wds_dest="s3://bucket/wds",
+            model="titan_slide",
+            project_id="TCGA-PROJ",
+            staging_dir=staging,
+            max_shard_bytes=10 * 1024 ** 3,
+        )
+        assert writer._current_index == 0
+        assert writer._current_path is None
+
+    def test_empty_staging_existing_s3_shards_starts_after_max(self, tmp_path, monkeypatch):
+        """Empty staging + S3 has 000000-000004 → new index must be 5, not 0.
+
+        Without this guard, the writer would upload 000000.tar and overwrite
+        all slides that were in the existing S3 shard.
+        """
+        from mussel_dispatcher import wds as wds_mod
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        existing_keys = [
+            {"Key": "wds/titan_slide/TCGA-PROJ/000000.tar"},
+            {"Key": "wds/titan_slide/TCGA-PROJ/000001.tar"},
+            {"Key": "wds/titan_slide/TCGA-PROJ/000002.tar"},
+            {"Key": "wds/titan_slide/TCGA-PROJ/000003.tar"},
+            {"Key": "wds/titan_slide/TCGA-PROJ/000004.tar"},
+        ]
+        mock_client = MagicMock()
+        mock_client.get_paginator.return_value.paginate.return_value = [
+            {"Contents": existing_keys}
+        ]
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+        writer = wds_mod._ShardWriter(
+            wds_dest="s3://bucket/wds",
+            model="titan_slide",
+            project_id="TCGA-PROJ",
+            staging_dir=staging,
+            max_shard_bytes=10 * 1024 ** 3,
+        )
+        assert writer._current_index == 5  # not 0 — would overwrite 000000.tar
+        assert writer._current_path is None
+
+    def test_local_staging_present_takes_priority_over_s3(self, tmp_path, monkeypatch):
+        """If local staging has a partial shard, resume from it (don't call S3)."""
+        from mussel_dispatcher import wds as wds_mod
+
+        staging = tmp_path / "staging"
+        work_dir = staging / "titan_slide" / "TCGA-PROJ"
+        work_dir.mkdir(parents=True)
+        # Write a partial local shard at index 3
+        partial = work_dir / "000003.tar"
+        partial.write_bytes(b"x" * 1024)
+
+        mock_client = MagicMock()
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+        writer = wds_mod._ShardWriter(
+            wds_dest="s3://bucket/wds",
+            model="titan_slide",
+            project_id="TCGA-PROJ",
+            staging_dir=staging,
+            max_shard_bytes=10 * 1024 ** 3,
+        )
+        # Should resume from local shard, no S3 listing needed
+        assert writer._current_index == 3
+        assert writer._current_path == partial
+        mock_client.get_paginator.assert_not_called()
+
+    def test_s3_listing_error_falls_back_to_zero(self, tmp_path, monkeypatch):
+        """If S3 listing fails, fall back to index 0 (best-effort, don't crash)."""
+        from mussel_dispatcher import wds as wds_mod
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        mock_client = MagicMock()
+        mock_client.get_paginator.side_effect = Exception("S3 unavailable")
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+        writer = wds_mod._ShardWriter(
+            wds_dest="s3://bucket/wds",
+            model="titan_slide",
+            project_id="TCGA-PROJ",
+            staging_dir=staging,
+            max_shard_bytes=10 * 1024 ** 3,
+        )
+        assert writer._current_index == 0  # falls back gracefully
+
+
+# ===========================================================================
 # _verify_wds_coverage + WDS hook end-to-end manifest interaction
 # ===========================================================================
 

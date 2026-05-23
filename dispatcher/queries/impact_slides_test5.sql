@@ -9,6 +9,4 @@ JOIN cdsi_eng_phi.pdm_base_tables.slide_inventory i
 WHERE i.path IS NOT NULL
   AND i.size >= 10000000
   AND i.source IN ('ECS2')
-  AND m.ONCOTREE_CODE IS NOT NULL
-  AND m.ONCOTREE_CODE != ''
 LIMIT 5

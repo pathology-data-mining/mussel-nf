@@ -2851,6 +2851,97 @@ class TestS3Download:
 
 
 # ===========================================================================
+# _s3_upload post-upload verification
+# ===========================================================================
+
+class TestS3Upload:
+    """_s3_upload must verify the object exists on S3 after upload.
+
+    Some S3-compatible backends (e.g. ECS under storage pressure) return a
+    successful upload response while silently failing to persist the object.
+    If the head_object check fails the upload must raise so the manifest is
+    never written with a path that doesn't exist.
+    """
+
+    def test_head_object_called_after_upload(self, tmp_path, monkeypatch):
+        """_s3_upload calls head_object to verify the shard landed."""
+        from mussel_dispatcher import wds as wds_mod
+
+        mock_client = MagicMock()
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+        f = tmp_path / "shard.tar"
+        f.write_bytes(b"x")
+        wds_mod._s3_upload(f, "s3://bucket/wds/hoptimus1/shard.tar")
+
+        mock_client.upload_file.assert_called_once()
+        mock_client.head_object.assert_called_once_with(
+            Bucket="bucket", Key="wds/hoptimus1/shard.tar"
+        )
+
+    def test_raises_if_head_object_fails_after_upload(self, tmp_path, monkeypatch):
+        """If head_object fails after upload, _s3_upload raises so the manifest
+        is never written with a stale path."""
+        from botocore.exceptions import ClientError
+        from mussel_dispatcher import wds as wds_mod
+
+        mock_client = MagicMock()
+        mock_client.head_object.side_effect = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
+        )
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+        f = tmp_path / "shard.tar"
+        f.write_bytes(b"x")
+        with pytest.raises(ClientError):
+            wds_mod._s3_upload(f, "s3://bucket/wds/hoptimus1/shard.tar")
+
+    def test_manifest_not_written_if_upload_verification_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """When shard upload verification fails, manifest_csv must not be written
+        (prevents stale manifest entries pointing to non-existent S3 shards)."""
+        import pandas as pd
+        import torch
+        from botocore.exceptions import ClientError
+        from mussel_dispatcher import wds as wds_mod
+
+        monkeypatch.setattr(wds_mod, "_load_index", lambda *a, **kw: {})
+        monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
+
+        pt_dir = tmp_path / "pt"
+        pt_dir.mkdir()
+        torch.save(torch.zeros(1, 4), pt_dir / "SLIDE1.features.pt")
+
+        mock_client = MagicMock()
+        mock_client.head_object.side_effect = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
+        )
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+        inv = pd.DataFrame({"file_name": ["SLIDE1.svs"], "project_id": ["PROJ"]})
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        manifest_csv = tmp_path / "wds_manifest.csv"
+
+        with pytest.raises(ClientError):
+            wds_mod.append_wds(
+                pt_dir=pt_dir,
+                h5_dir=None,
+                inventory_df=inv,
+                wds_dest="s3://bucket/wds",
+                model_type="hoptimus1",
+                staging_dir=staging,
+                max_shard_bytes=10 * 1024**3,
+                manifest_csv=manifest_csv,
+            )
+
+        assert not manifest_csv.exists(), (
+            "manifest_csv must not be written when shard upload verification fails"
+        )
+
+
+# ===========================================================================
 # _ShardWriter — shard index initialisation
 # ===========================================================================
 

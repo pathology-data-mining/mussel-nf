@@ -191,6 +191,11 @@ def _s3_upload(local_path: Path, s3_uri: str, max_concurrency: int = 4) -> None:
     _s3_client().upload_file(
         str(local_path), bucket, key, Config=_s3_transfer_config(max_concurrency)
     )
+    # Verify the object is accessible after upload.  Some S3-compatible backends
+    # (e.g. ECS under storage pressure) can return a successful upload response
+    # while silently failing to persist the object.  A head_object check here
+    # ensures the manifest is only written for shards that actually exist on S3.
+    _s3_client().head_object(Bucket=bucket, Key=key)
     log.debug("Uploaded %s → %s", local_path.name, s3_uri)
 
 

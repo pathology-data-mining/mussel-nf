@@ -18,6 +18,10 @@ from .state import StateStore
 
 MANIFEST_HEADER = ["slide_id", "workflow_id", "key", "value"]
 
+# Nextflow run name must match this pattern (validated before launch to catch
+# regressions in name generation before NF rejects them at invocation time).
+_NF_RUN_NAME_RE = re.compile(r'^[a-z](?:[a-z\d]|[-_](?=[a-z\d])){0,79}$')
+
 log = logging.getLogger("mussel-dispatcher")
 
 def collect_manifests(outdir: str, combined_path: str) -> int:
@@ -217,6 +221,12 @@ class NextflowRunner:
         # Seqera Platform's 16-char workflow.id field limit.
         # Prefix with "r" to ensure it starts with a letter (Nextflow requirement).
         nf_run_name = "r" + self.batch_id.rsplit("_", 1)[-1]  # e.g. "r410bb3ce"
+        if not _NF_RUN_NAME_RE.match(nf_run_name):
+            raise ValueError(
+                f"Generated NF run name {nf_run_name!r} does not match Nextflow's "
+                f"required pattern {_NF_RUN_NAME_RE.pattern!r}. "
+                f"This is a bug in run name generation (batch_id={self.batch_id!r})."
+            )
         trace_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.trace.tsv")
         cmd = [
             "nextflow", "run", self.cfg.repo_dir,

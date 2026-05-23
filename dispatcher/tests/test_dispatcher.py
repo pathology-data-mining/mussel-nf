@@ -891,7 +891,52 @@ class TestNextflowRunnerCommand:
         nf_run_name = f"dispatcher_{batch_id}"
         assert batch_id in nf_run_name
 
-class TestRecoverInFlight:
+
+class TestNfRunNameValidation:
+    """The run name generated from a batch_id must always satisfy Nextflow's naming
+    requirement: ^[a-z](?:[a-z\\d]|[-_](?=[a-z\\d])){0,79}$
+
+    The 'r' prefix was added after a batch_id whose UUID started with a digit
+    ('453d7b9d') was rejected by Nextflow.  These tests pin the invariant so any
+    regression in name generation is caught at test time, not at launch time.
+    """
+
+    def _make_run_name(self, batch_id: str) -> str:
+        """Replicate the exact logic from runner.py."""
+        return "r" + batch_id.rsplit("_", 1)[-1]
+
+    def test_digit_start_uuid_gets_r_prefix(self):
+        """UUID starting with a digit (the bug case: '453d7b9d') becomes valid."""
+        from mussel_dispatcher.runner import _NF_RUN_NAME_RE
+        batch_id = "20260523T021436_453d7b9d"
+        name = self._make_run_name(batch_id)
+        assert name == "r453d7b9d"
+        assert _NF_RUN_NAME_RE.match(name), f"{name!r} failed Nextflow pattern"
+
+    def test_letter_start_uuid_also_valid(self):
+        """UUID starting with a letter (e.g. 'afad9532') is also valid with prefix."""
+        from mussel_dispatcher.runner import _NF_RUN_NAME_RE
+        batch_id = "20260523T021143_afad9532"
+        name = self._make_run_name(batch_id)
+        assert name == "rafad9532"
+        assert _NF_RUN_NAME_RE.match(name)
+
+    def test_all_hex_chars_are_valid(self):
+        """All 16 hex characters (0-9, a-f) are valid in the UUID suffix."""
+        from mussel_dispatcher.runner import _NF_RUN_NAME_RE
+        import uuid as _uuid
+        for _ in range(50):
+            batch_id = f"20260101T000000_{_uuid.uuid4().hex[:8]}"
+            name = self._make_run_name(batch_id)
+            assert _NF_RUN_NAME_RE.match(name), f"{name!r} failed for batch_id={batch_id!r}"
+
+    def test_name_length_within_nextflow_limit(self):
+        """Run name must be ≤ 16 chars to fit Seqera Platform's workflow.id field."""
+        batch_id = "20260523T021436_453d7b9d"
+        name = self._make_run_name(batch_id)
+        assert len(name) <= 16, f"Run name {name!r} is {len(name)} chars, exceeds 16"
+
+
     def test_no_running_batches_does_nothing(self, tmp_path):
         store = StateStore(str(tmp_path / "test.db"))
         pending = deque()

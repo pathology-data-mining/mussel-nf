@@ -24,6 +24,15 @@ from .runner import NextflowRunner, collect_manifests, MANIFEST_HEADER
 log = logging.getLogger("mussel-dispatcher")
 
 
+import socket as _socket
+
+
+def _port_in_use(port: int) -> bool:
+    """Return True if *port* is already bound on localhost."""
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
 def _launch_sidecar(name: str, cmd: list[str]) -> subprocess.Popen:
     """Launch a sidecar process (dashboard / tower_proxy), logging its output."""
     log.info("Launching %s: %s", name, " ".join(cmd))
@@ -38,6 +47,9 @@ def _start_sidecars(cfg: Config, config_path: str) -> list[subprocess.Popen]:
     """Start dashboard and tower_proxy subprocesses using ports from config.
 
     Both are optional — if dashboard_port is 0 neither is started.
+    If a port is already in use (e.g. from a previous dispatcher instance that
+    was killed without taking its children), we reuse the existing process
+    instead of launching a new one that would immediately fail to bind.
     Returns the list of started Popen objects so main() can terminate them on exit.
     """
     if not cfg.dashboard_port:
@@ -46,20 +58,32 @@ def _start_sidecars(cfg: Config, config_path: str) -> list[subprocess.Popen]:
     python = sys.executable
     procs: list[subprocess.Popen] = []
 
-    dashboard = _launch_sidecar("dashboard", [
-        python, "-m", "mussel_dispatcher.dashboard",
-        config_path,
-        "--port", str(cfg.dashboard_port),
-    ])
-    procs.append(dashboard)
+    if _port_in_use(cfg.dashboard_port):
+        log.warning(
+            "Dashboard port %d already in use — reusing existing process.",
+            cfg.dashboard_port,
+        )
+    else:
+        dashboard = _launch_sidecar("dashboard", [
+            python, "-m", "mussel_dispatcher.dashboard",
+            config_path,
+            "--port", str(cfg.dashboard_port),
+        ])
+        procs.append(dashboard)
 
     if cfg.tower_proxy_port:
-        proxy = _launch_sidecar("tower_proxy", [
-            python, "-m", "mussel_dispatcher.tower_proxy",
-            "--upstream", f"http://localhost:{cfg.dashboard_port}",
-            "--port", str(cfg.tower_proxy_port),
-        ])
-        procs.append(proxy)
+        if _port_in_use(cfg.tower_proxy_port):
+            log.warning(
+                "Tower proxy port %d already in use — reusing existing process.",
+                cfg.tower_proxy_port,
+            )
+        else:
+            proxy = _launch_sidecar("tower_proxy", [
+                python, "-m", "mussel_dispatcher.tower_proxy",
+                "--upstream", f"http://localhost:{cfg.dashboard_port}",
+                "--port", str(cfg.tower_proxy_port),
+            ])
+            procs.append(proxy)
 
     return procs
 

@@ -359,7 +359,7 @@ def merge_via_warehouse(
         )
         merge_sql = (
             f"MERGE INTO {table} t "
-            f"USING (SELECT * FROM parquet.`{folder}/`) s "
+            f"USING (SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY slide_id, model ORDER BY completed_at DESC NULLS LAST) AS _rn FROM parquet.`{folder}/`) WHERE _rn = 1) s "
             f"ON t.slide_id = s.slide_id AND t.model = s.model "
             f"WHEN MATCHED THEN UPDATE SET {set_clause} "
             f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
@@ -368,7 +368,7 @@ def merge_via_warehouse(
         # Fallback: optimistic wildcard MERGE (works when schemas match exactly).
         merge_sql = (
             f"MERGE INTO {table} t "
-            f"USING (SELECT * FROM parquet.`{folder}/`) s "
+            f"USING (SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY slide_id, model ORDER BY completed_at DESC NULLS LAST) AS _rn FROM parquet.`{folder}/`) WHERE _rn = 1) s "
             f"ON t.slide_id = s.slide_id AND t.model = s.model "
             f"WHEN MATCHED THEN UPDATE SET * "
             f"WHEN NOT MATCHED THEN INSERT *"

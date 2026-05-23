@@ -188,15 +188,24 @@ def _s3_client():
 
 def _s3_upload(local_path: Path, s3_uri: str, max_concurrency: int = 4) -> None:
     bucket, key = _s3_parts(s3_uri)
+    local_size = local_path.stat().st_size
     _s3_client().upload_file(
         str(local_path), bucket, key, Config=_s3_transfer_config(max_concurrency)
     )
-    # Verify the object is accessible after upload.  Some S3-compatible backends
-    # (e.g. ECS under storage pressure) can return a successful upload response
-    # while silently failing to persist the object.  A head_object check here
-    # ensures the manifest is only written for shards that actually exist on S3.
-    _s3_client().head_object(Bucket=bucket, Key=key)
-    log.debug("Uploaded %s → %s", local_path.name, s3_uri)
+    # Verify the object exists and has the correct size after upload.
+    # Some S3-compatible backends (e.g. ECS under storage pressure) can return a
+    # successful upload response while buffering the write — if storage is full the
+    # object is silently evicted from cache and never committed to disk.  Checking
+    # ContentLength here detects both "key not found" and "partial write" cases and
+    # ensures the manifest is never written with a path pointing to a missing shard.
+    head = _s3_client().head_object(Bucket=bucket, Key=key)
+    remote_size = head["ContentLength"]
+    if remote_size != local_size:
+        raise RuntimeError(
+            f"Upload size mismatch for {s3_uri}: "
+            f"uploaded {local_size} bytes but S3 reports {remote_size} bytes"
+        )
+    log.debug("Uploaded %s → %s (%d bytes)", local_path.name, s3_uri, local_size)
 
 
 def _s3_download(s3_uri: str, local_path: Path, max_concurrency: int = 4) -> bool:

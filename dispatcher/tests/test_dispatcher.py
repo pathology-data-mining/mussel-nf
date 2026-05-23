@@ -2815,11 +2815,19 @@ class TestS3Download:
         mock_client.download_file.side_effect = fake_download
 
         upload_calls = []
+        uploaded_sizes: dict[str, int] = {}
 
         def fake_upload(path, bucket, key, **kw):
+            from pathlib import Path as _Path
             upload_calls.append(key)
+            uploaded_sizes[key] = _Path(path).stat().st_size
 
         mock_client.upload_file.side_effect = fake_upload
+
+        def fake_head(Bucket, Key, **kw):
+            return {"ContentLength": uploaded_sizes.get(Key, 0)}
+
+        mock_client.head_object.side_effect = fake_head
         monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
         monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **kw: None)
 
@@ -2855,23 +2863,26 @@ class TestS3Download:
 # ===========================================================================
 
 class TestS3Upload:
-    """_s3_upload must verify the object exists on S3 after upload.
+    """_s3_upload must verify the object exists and has the correct size after upload.
 
     Some S3-compatible backends (e.g. ECS under storage pressure) return a
-    successful upload response while silently failing to persist the object.
-    If the head_object check fails the upload must raise so the manifest is
-    never written with a path that doesn't exist.
+    successful upload response while buffering the write — if storage is full the
+    object is silently evicted from cache and never committed to disk.  Checking
+    ContentLength catches both "key not found" and "partial write / cache eviction"
+    cases and ensures the manifest is never written with a stale path.
     """
 
     def test_head_object_called_after_upload(self, tmp_path, monkeypatch):
-        """_s3_upload calls head_object to verify the shard landed."""
+        """_s3_upload calls head_object to verify the shard landed with correct size."""
         from mussel_dispatcher import wds as wds_mod
 
+        f = tmp_path / "shard.tar"
+        f.write_bytes(b"hello")
+
         mock_client = MagicMock()
+        mock_client.head_object.return_value = {"ContentLength": len(b"hello")}
         monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
 
-        f = tmp_path / "shard.tar"
-        f.write_bytes(b"x")
         wds_mod._s3_upload(f, "s3://bucket/wds/hoptimus1/shard.tar")
 
         mock_client.upload_file.assert_called_once()
@@ -2880,8 +2891,8 @@ class TestS3Upload:
         )
 
     def test_raises_if_head_object_fails_after_upload(self, tmp_path, monkeypatch):
-        """If head_object fails after upload, _s3_upload raises so the manifest
-        is never written with a stale path."""
+        """If head_object raises after upload, _s3_upload propagates the error so
+        the manifest is never written with a stale path."""
         from botocore.exceptions import ClientError
         from mussel_dispatcher import wds as wds_mod
 
@@ -2894,6 +2905,22 @@ class TestS3Upload:
         f = tmp_path / "shard.tar"
         f.write_bytes(b"x")
         with pytest.raises(ClientError):
+            wds_mod._s3_upload(f, "s3://bucket/wds/hoptimus1/shard.tar")
+
+    def test_raises_if_remote_size_wrong(self, tmp_path, monkeypatch):
+        """If ContentLength doesn't match the local file, _s3_upload raises.
+        This catches ECS write-buffer scenarios where head_object returns 200 but
+        the reported size reflects a partially-committed or cache-evicted object."""
+        from mussel_dispatcher import wds as wds_mod
+
+        f = tmp_path / "shard.tar"
+        f.write_bytes(b"hello")  # 5 bytes
+
+        mock_client = MagicMock()
+        mock_client.head_object.return_value = {"ContentLength": 3}  # wrong
+        monkeypatch.setattr(wds_mod, "_s3_client", lambda: mock_client)
+
+        with pytest.raises(RuntimeError, match="size mismatch"):
             wds_mod._s3_upload(f, "s3://bucket/wds/hoptimus1/shard.tar")
 
     def test_manifest_not_written_if_upload_verification_fails(

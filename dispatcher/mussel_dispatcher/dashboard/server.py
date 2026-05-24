@@ -518,7 +518,7 @@ def _build_handler(cfg: Config):
                 }
             models[m] = {
                 "slides": wds_slides,
-                "gap": max(0, _inventory_total - wds_slides),
+                "gap": 0,  # recalculated below using db_succeeded
                 "shards": cached_s3.get(m, {}).get("shards", 0),
                 "manifest_shards": manifest_shards,
                 "shard_stats": shard_stats,
@@ -529,9 +529,17 @@ def _build_handler(cfg: Config):
             db_succeeded = conn.execute(
                 "SELECT COUNT(*) FROM slides WHERE status='SUCCEEDED'"
             ).fetchone()[0]
+            db_total = conn.execute(
+                "SELECT COUNT(*) FROM slides"
+            ).fetchone()[0]
+        # Rebuild models with correct gap = db_succeeded - wds_slides (not _inventory_total)
+        for m, mv in models.items():
+            wds_slides = mv["slides"]
+            mv["gap"] = max(0, db_succeeded - wds_slides)
         total_rows = sum(len(s) for s in unique_slides.values())
         return {"models": models, "total": total_rows,
-                "inventory_total": _inventory_total, "db_succeeded": db_succeeded}
+                "inventory_total": _inventory_total, "db_total": db_total,
+                "db_succeeded": db_succeeded}
 
     class Handler(_TowerHandlerMixin, BaseHTTPRequestHandler):
         # Expose registry and router so tests and external callers can inspect Tower state.

@@ -48,7 +48,6 @@ class WatcherConfig:
     download_dir: str = ""          # local directory for downloaded slides (required if download_enabled)
     scripts_dir: str = ""
     wds_destinations: dict = field(default_factory=dict)
-    wds_patch_encoders: dict = field(default_factory=dict)  # slide_model → patch_encoder_model
     wds_staging_dir: str = ""
     wds_s3_max_concurrency: int = 4
     secrets_env_file: str = ""
@@ -226,9 +225,6 @@ class Config:
                         args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
                     if self.cleanup_results:
                         args.append("--delete-local")
-                        patch_enc = w.wds_patch_encoders.get(model)
-                        if patch_enc:
-                            args.append("--also-delete-pt-dirs={outdir}/features/" + patch_enc)
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
             # IMPACT Databricks sync hook — fires when a table is configured
@@ -244,7 +240,8 @@ class Config:
                     )
                 db_hooks.append(
                     _build_db_sync_hook(w, "mussel_dispatcher.impact.sync_databricks",
-                                        extra_args, state_dir=self.state_dir)
+                                        extra_args, state_dir=self.state_dir,
+                                        phase="db_sync")
                 )
 
             if w.type != "tcga":
@@ -270,23 +267,21 @@ class Config:
                         args.append("--s3-endpoint=" + w.s3_endpoint)
                     if self.cleanup_results:
                         args.append("--delete-local")
-                        patch_enc = w.wds_patch_encoders.get(model)
-                        if patch_enc:
-                            args.append("--also-delete-pt-dirs={outdir}/features/" + patch_enc)
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
             if w.databricks_volume_folder or w.databricks_volume_path:
                 extra_args = ["--inventory=" + w.inventory_csv, "--status=" + w.status_csv]
                 db_hooks.append(
                     _build_db_sync_hook(w, "mussel_dispatcher.tcga.sync_databricks",
-                                        extra_args, state_dir=self.state_dir)
+                                        extra_args, state_dir=self.state_dir,
+                                        phase="db_sync")
                 )
 
         return hooks + db_hooks
 
 
 def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str],
-                        *, state_dir: str = "") -> dict:
+                        *, state_dir: str = "", phase: str = "") -> dict:
     """Build a post-batch hook dict for a Databricks sync script.
 
     Appends the common volume-folder/path, table, job-id, and status-file args
@@ -307,7 +302,10 @@ def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str],
     if state_dir and (w.databricks_job_id or w.warehouse_id):
         status_file = os.path.join(state_dir, "sync_status.json")
         args.append("--status-file=" + status_file)
-    return {"command": f"python -m {module}", "args": args}
+    hook: dict = {"command": f"python -m {module}", "args": args}
+    if phase:
+        hook["_phase"] = phase
+    return hook
 
 
 def _load_secrets_env(path: str, watcher: WatcherConfig) -> None:

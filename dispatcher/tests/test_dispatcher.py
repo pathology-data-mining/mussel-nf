@@ -1399,6 +1399,62 @@ class TestPostBatchHooks:
         runner = self._make_runner(tmp_path, [])
         runner._run_post_batch_hooks("/batch.csv")  # must not raise or call anything
 
+    def test_wds_phase_runs_untagged_hooks(self, tmp_path):
+        """Hooks with no _phase are treated as wds phase (backward compat)."""
+        import unittest.mock as mock
+        calls = []
+        hook = {"command": "echo", "args": ["untagged"]}  # no _phase key
+        runner = self._make_runner(tmp_path, [hook])
+        fake = mock.Mock(returncode=0, stderr="")
+        with mock.patch("subprocess.run", return_value=fake) as m:
+            runner._run_post_batch_hooks("/batch.csv", phase="wds")
+        assert m.called
+
+    def test_wds_phase_skips_db_sync_hooks(self, tmp_path):
+        """phase='wds' must not run hooks tagged _phase='db_sync'."""
+        import unittest.mock as mock
+        hook = {"command": "echo", "args": [], "_phase": "db_sync"}
+        runner = self._make_runner(tmp_path, [hook])
+        with mock.patch("subprocess.run") as m:
+            runner._run_post_batch_hooks("/batch.csv", phase="wds")
+        m.assert_not_called()
+
+    def test_db_sync_phase_runs_tagged_hooks(self, tmp_path):
+        """phase='db_sync' runs only hooks tagged _phase='db_sync'."""
+        import unittest.mock as mock
+        hook = {"command": "echo", "args": ["sync"], "_phase": "db_sync"}
+        runner = self._make_runner(tmp_path, [hook])
+        fake = mock.Mock(returncode=0, stderr="")
+        with mock.patch("subprocess.run", return_value=fake) as m:
+            runner._run_post_batch_hooks("/batch.csv", phase="db_sync")
+        assert m.called
+
+    def test_db_sync_phase_skips_untagged_hooks(self, tmp_path):
+        """phase='db_sync' must not run hooks that have no _phase (wds hooks)."""
+        import unittest.mock as mock
+        hook = {"command": "echo", "args": ["wds-hook"]}  # no _phase
+        runner = self._make_runner(tmp_path, [hook])
+        with mock.patch("subprocess.run") as m:
+            runner._run_post_batch_hooks("/batch.csv", phase="db_sync")
+        m.assert_not_called()
+
+    def test_mixed_phases_only_runs_matching(self, tmp_path):
+        """With wds + db_sync hooks, each phase runs exactly its own subset."""
+        import unittest.mock as mock
+        wds_hook = {"command": "echo", "args": ["wds"]}
+        db_hook = {"command": "echo", "args": ["db"], "_phase": "db_sync"}
+        runner = self._make_runner(tmp_path, [wds_hook, db_hook])
+        fake = mock.Mock(returncode=0, stderr="")
+        with mock.patch("subprocess.run", return_value=fake) as m:
+            runner._run_post_batch_hooks("/batch.csv", phase="wds")
+        assert m.call_count == 1
+        assert m.call_args[0][0][-1] == "wds"
+
+        with mock.patch("subprocess.run", return_value=fake) as m:
+            runner._run_post_batch_hooks("/batch.csv", phase="db_sync")
+        assert m.call_count == 1
+        assert m.call_args[0][0][-1] == "db"
+
 
 # ---------------------------------------------------------------------------
 # Auto post-batch hook generation
@@ -1573,6 +1629,42 @@ class TestAutoHooks:
         )
         args = cfg.post_batch_hooks[0]["args"]
         assert "--delete-local" not in args
+
+    def test_wds_auto_hook_has_no_phase_tag(self, tmp_path):
+        """WDS auto-hooks have no _phase key (they run in the default wds phase)."""
+        cfg = self._load_config(tmp_path, watcher_extra={
+            "wds_destinations": {"ctranspath": "s3://bucket/wds"},
+        })
+        hook = cfg.post_batch_hooks[0]
+        assert "mussel_dispatcher.wds" in hook["command"]
+        assert "_phase" not in hook
+
+    def test_tcga_db_sync_hook_tagged_db_sync(self, tmp_path):
+        """TCGA Databricks sync auto-hook is tagged _phase='db_sync'."""
+        cfg = self._load_config(tmp_path, watcher_extra={
+            "databricks_volume_path": "/Volumes/cat/schema/vol/tcga.parquet",
+        })
+        hook = cfg.post_batch_hooks[0]
+        assert "sync_databricks" in hook["command"]
+        assert hook.get("_phase") == "db_sync"
+
+    def test_impact_db_sync_hook_tagged_db_sync(self, tmp_path):
+        """IMPACT (databricks watcher type) Databricks sync auto-hook is tagged _phase='db_sync'."""
+        import yaml as _yaml
+        cfg_path = tmp_path / "test.yaml"
+        cfg_path.write_text(_yaml.dump({
+            "nextflow_profiles": "standard",
+            "outdir": str(tmp_path / "results"),
+            "watchers": [{
+                "type": "databricks",
+                "databricks_table": "cat.schema.slide_embeddings_v2",
+                "wds_destinations": {"hoptimus1": "s3://bucket/wds"},
+            }],
+        }))
+        cfg = Config.load(str(cfg_path))
+        db_hooks = [h for h in cfg.post_batch_hooks if "sync_databricks" in h.get("command", "")]
+        assert db_hooks, "expected a db sync hook"
+        assert all(h.get("_phase") == "db_sync" for h in db_hooks)
 
 
 # ---------------------------------------------------------------------------
@@ -1795,6 +1887,113 @@ class TestCleanup:
         )
 
         assert not log_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_intermediate_features tests
+# ---------------------------------------------------------------------------
+
+class TestCleanupIntermediateFeatures:
+    """_cleanup_intermediate_features removes features dirs not in wds_destinations."""
+
+    def _make_runner(self, tmp_path, wds_destinations, cleanup_results=True):
+        import yaml as _yaml
+        watcher = {
+            "type": "databricks",
+            "databricks_table": "cat.schema.tbl",
+            "wds_destinations": wds_destinations,
+        }
+        cfg_path = tmp_path / "cfg.yaml"
+        cfg_path.write_text(_yaml.dump({
+            "nextflow_profiles": "standard",
+            "outdir": str(tmp_path / "results"),
+            "cleanup_results": cleanup_results,
+            "watchers": [watcher],
+        }))
+        cfg = Config.load(str(cfg_path))
+        state = StateStore(str(tmp_path / "state.db"))
+        return NextflowRunner(cfg, "batch-001", [], state)
+
+    def test_removes_intermediate_dir_not_in_wds_destinations(self, tmp_path):
+        """conch1_5 (patch encoder) dir is removed; titan_slide (wds dest) dir is left."""
+        features = tmp_path / "results" / "features"
+        titan = features / "titan_slide"
+        conch = features / "conch1_5"
+        titan.mkdir(parents=True)
+        conch.mkdir(parents=True)
+        (conch / "slide.patch_features.h5").touch()
+
+        runner = self._make_runner(
+            tmp_path,
+            wds_destinations={"titan_slide": "s3://bucket/wds"},
+        )
+        runner._cleanup_intermediate_features()
+
+        assert titan.exists()
+        assert not conch.exists()
+
+    def test_noop_when_cleanup_results_false(self, tmp_path):
+        """cleanup_results=False leaves intermediate dirs untouched."""
+        features = tmp_path / "results" / "features"
+        conch = features / "conch1_5"
+        conch.mkdir(parents=True)
+        (conch / "slide.patch_features.h5").touch()
+
+        runner = self._make_runner(
+            tmp_path,
+            wds_destinations={"titan_slide": "s3://bucket/wds"},
+            cleanup_results=False,
+        )
+        runner._cleanup_intermediate_features()
+
+        assert conch.exists()
+
+    def test_noop_when_features_dir_absent(self, tmp_path):
+        """No error when features/ directory doesn't exist yet."""
+        runner = self._make_runner(
+            tmp_path,
+            wds_destinations={"titan_slide": "s3://bucket/wds"},
+        )
+        runner._cleanup_intermediate_features()  # must not raise
+
+    def test_all_wds_dest_dirs_preserved(self, tmp_path):
+        """Every model listed in wds_destinations keeps its features dir."""
+        features = tmp_path / "results" / "features"
+        for model in ("hoptimus1", "titan_slide"):
+            (features / model).mkdir(parents=True)
+
+        runner = self._make_runner(
+            tmp_path,
+            wds_destinations={
+                "hoptimus1": "s3://bucket/wds",
+                "titan_slide": "s3://bucket/wds",
+            },
+        )
+        runner._cleanup_intermediate_features()
+
+        assert (features / "hoptimus1").exists()
+        assert (features / "titan_slide").exists()
+
+    def test_noop_when_no_wds_destinations(self, tmp_path):
+        """No wds_destinations configured → nothing is removed."""
+        features = tmp_path / "results" / "features"
+        some_dir = features / "some_model"
+        some_dir.mkdir(parents=True)
+
+        import yaml as _yaml
+        cfg_path = tmp_path / "cfg.yaml"
+        cfg_path.write_text(_yaml.dump({
+            "nextflow_profiles": "standard",
+            "outdir": str(tmp_path / "results"),
+            "cleanup_results": True,
+        }))
+        cfg = Config.load(str(cfg_path))
+        state = StateStore(str(tmp_path / "state.db"))
+        runner = NextflowRunner(cfg, "batch-001", [], state)
+
+        runner._cleanup_intermediate_features()
+
+        assert some_dir.exists()
 
 
 # ===========================================================================

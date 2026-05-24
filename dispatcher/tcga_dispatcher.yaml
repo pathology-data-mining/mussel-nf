@@ -82,10 +82,6 @@ watchers:
       hoptimus1: s3://reef-tcga-v2-0/wds
       titan_slide: s3://reef-tcga-v2-0/wds
       # uni2h: s3://your-bucket/wds
-    # Maps slide encoder → patch encoder whose .pt files can be deleted after
-    # the slide encoder is safely written to WDS (cleanup_results: true required).
-    wds_patch_encoders:
-      titan_slide: conch1_5
     wds_staging_dir: tcga-results/wds-staging   # local staging base for S3 uploads; each model uses {staging}/{model}/
 
     # When set, a tcga_sync_databricks.py post-batch hook is generated automatically.

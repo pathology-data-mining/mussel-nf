@@ -327,8 +327,10 @@ class NextflowRunner:
         if exit_code == 0:
             log.info("Batch %s completed successfully.", self.batch_id)
             self._collect_manifest(run_started_at)
-            self._run_post_batch_hooks(csv_path)
+            self._run_post_batch_hooks(csv_path, phase="wds")
+            self._cleanup_intermediate_features()
             self._verify_wds_coverage(csv_path)
+            self._run_post_batch_hooks(csv_path, phase="db_sync")
             self._cleanup(csv_path, log_path, work_dir, succeeded=True)
         else:
             log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
@@ -336,8 +338,12 @@ class NextflowRunner:
 
         return exit_code
 
-    def _run_post_batch_hooks(self, batch_csv: str) -> None:
-        """Run any configured post-batch hooks after a successful NF run."""
+    def _run_post_batch_hooks(self, batch_csv: str, phase: str = "") -> None:
+        """Run any configured post-batch hooks after a successful NF run.
+
+        If *phase* is given, only hooks whose ``_phase`` key matches are run.
+        Hooks with no ``_phase`` key are treated as phase ``"wds"`` (legacy/user hooks).
+        """
         if not self.cfg.post_batch_hooks:
             return
 
@@ -360,6 +366,9 @@ class NextflowRunner:
                 hook_env.setdefault("ECS_ENDPOINT_URL", w.s3_endpoint)
 
         for hook in self.cfg.post_batch_hooks:
+            hook_phase = hook.get("_phase", "wds")
+            if phase and hook_phase != phase:
+                continue
             cmd_str = hook.get("command", "")
             if not cmd_str:
                 log.warning("Post-batch hook has no 'command' key — skipping")
@@ -379,6 +388,34 @@ class NextflowRunner:
                     log.info("Post-batch hook succeeded")
             except Exception as exc:
                 log.error("Post-batch hook raised: %s", exc)
+
+    def _cleanup_intermediate_features(self) -> None:
+        """Remove features subdirectories that are not WDS destinations.
+
+        After WDS push hooks run, the only remaining features dirs are those whose
+        model has no wds_destination — i.e. intermediate patch encoders (e.g. conch1_5
+        used by titan_slide). This is generic: no per-model mapping is needed.
+        """
+        if not self.cfg.cleanup_results:
+            return
+
+        features_dir = os.path.join(self.cfg.outdir, "features")
+        if not os.path.isdir(features_dir):
+            return
+
+        wds_models: set[str] = set()
+        for w in self.cfg.watchers:
+            if hasattr(w, "wds_destinations") and w.wds_destinations:
+                wds_models.update(w.wds_destinations.keys())
+
+        if not wds_models:
+            return
+
+        import shutil as _shutil
+        for entry in os.scandir(features_dir):
+            if entry.is_dir() and entry.name not in wds_models:
+                log.info("Removing intermediate features directory: %s", entry.path)
+                _shutil.rmtree(entry.path, ignore_errors=True)
 
     def _verify_wds_coverage(self, batch_csv: str) -> None:
         """After append_wds hooks, verify all batch slides appear in WDS for every

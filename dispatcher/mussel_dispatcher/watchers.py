@@ -296,7 +296,7 @@ WHERE i.path IS NOT NULL
     def _poll(self):
         log.info("DatabricksWatcher: querying Databricks warehouse %s…", self.cfg.warehouse_id)
         try:
-            from databricks.sdk.service.sql import StatementState
+            from databricks.sdk.service.sql import Disposition, StatementState
             client = self._get_client()
             query = self._build_query()
             log.debug("DatabricksWatcher SQL:\n%s", query)
@@ -305,6 +305,7 @@ WHERE i.path IS NOT NULL
                 warehouse_id=self.cfg.warehouse_id,
                 statement=query,
                 wait_timeout="50s",
+                disposition=Disposition.EXTERNAL_LINKS,
             )
 
             # Poll until terminal state if not already done
@@ -328,37 +329,60 @@ WHERE i.path IS NOT NULL
             cols = [c.name for c in resp.manifest.schema.columns]
             n_new = 0
 
-            # Iterate over all result chunks
+            # Iterate over all result chunks.
+            # With EXTERNAL_LINKS disposition, rows are downloaded from presigned
+            # URLs in chunk.external_links; with INLINE they're in chunk.data_array.
             chunk = resp.result
             while chunk is not None:
-                for row_arr in chunk.data_array or []:
-                    row = dict(zip(cols, row_arr))
-                    slide_path = row.get("slide_path") or ""
-                    slide_id = row.get("slide_id") or ""
-                    oncotree_code = row.get("oncotree_code") or ""
+                if chunk.external_links:
+                    import requests as _req
+                    for link in chunk.external_links:
+                        r = _req.get(link.external_link, headers=link.http_headers or {})
+                        r.raise_for_status()
+                        row_arrays = r.json()
+                        for row_arr in row_arrays:
+                            row = dict(zip(cols, row_arr))
+                            slide_path = row.get("slide_path") or ""
+                            slide_id = row.get("slide_id") or ""
+                            oncotree_code = row.get("oncotree_code") or ""
+                            if not slide_path or not slide_id:
+                                continue
+                            if self.state.is_known(slide_path):
+                                continue
+                            log.info("DatabricksWatcher: new slide %s → %s", slide_id, slide_path)
+                            self.state.add_slide(slide_path, slide_id, oncotree_code=oncotree_code)
+                            self.pending.append({
+                                "slide_id": slide_id,
+                                "slide_path": slide_path,
+                                "oncotree_code": oncotree_code,
+                            })
+                            n_new += 1
+                    next_chunk_index = getattr(chunk.external_links[-1], "next_chunk_index", None)
+                else:
+                    for row_arr in (chunk.data_array or []):
+                        row = dict(zip(cols, row_arr))
+                        slide_path = row.get("slide_path") or ""
+                        slide_id = row.get("slide_id") or ""
+                        oncotree_code = row.get("oncotree_code") or ""
+                        if not slide_path or not slide_id:
+                            continue
+                        if self.state.is_known(slide_path):
+                            continue
+                        log.info("DatabricksWatcher: new slide %s → %s", slide_id, slide_path)
+                        self.state.add_slide(slide_path, slide_id, oncotree_code=oncotree_code)
+                        self.pending.append({
+                            "slide_id": slide_id,
+                            "slide_path": slide_path,
+                            "oncotree_code": oncotree_code,
+                        })
+                        n_new += 1
+                    next_chunk_index = getattr(chunk, "next_chunk_index", None)
 
-                    if not slide_path or not slide_id:
-                        continue
-                    if self.state.is_known(slide_path):
-                        continue
-
-                    log.info("DatabricksWatcher: new slide %s → %s", slide_id, slide_path)
-                    self.state.add_slide(slide_path, slide_id, oncotree_code=oncotree_code)
-                    self.pending.append({
-                        "slide_id": slide_id,
-                        "slide_path": slide_path,
-                        "oncotree_code": oncotree_code,
-                    })
-                    n_new += 1
-
-                # Advance to next chunk (if result was paginated)
-                next_chunk_index = getattr(chunk, "next_chunk_index", None)
                 if next_chunk_index is None:
                     break
-                chunk_resp = client.statement_execution.get_statement_result_chunk_n(
+                chunk = client.statement_execution.get_statement_result_chunk_n(
                     resp.statement_id, next_chunk_index
                 )
-                chunk = chunk_resp
 
             log.info("DatabricksWatcher: poll complete — %d new slide(s) enqueued", n_new)
 

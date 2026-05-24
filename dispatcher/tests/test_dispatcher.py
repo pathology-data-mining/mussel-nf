@@ -2021,6 +2021,7 @@ def _make_sdk_mock(rows, *, fail=False):
         mock_resp.status.state = StatementState.SUCCEEDED
         mock_resp.manifest.schema.columns = cols
         mock_resp.result.data_array = [[r["slide_id"], r["slide_path"], r.get("oncotree_code", "")] for r in rows]
+        mock_resp.result.external_links = None  # INLINE disposition; no external links
         # No next chunk
         mock_resp.result.next_chunk_index = None
 

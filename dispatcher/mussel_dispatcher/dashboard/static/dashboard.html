@@ -279,7 +279,8 @@ async function loadStatus() {
     } else {
       const ok  = ss.status === 'SUCCESS';
       const ago = ss.updated_at ? Math.round((Date.now() - new Date(ss.updated_at)) / 60000) : null;
-      const stale = ago != null && ago > 24 * 60;  // >24h since last write
+      const runActive = (c.PENDING || 0) + (c.DISPATCHED || 0) + (d.running_batches || 0) > 0;
+      const stale = ago != null && ago > 24 * 60 && runActive;  // >24h stale only if run still active
       if (ok && !stale) {
         syncEl.textContent = '✔ OK';
         syncEl.style.color = '#4ade80';

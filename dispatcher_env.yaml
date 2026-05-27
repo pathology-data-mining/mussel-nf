@@ -1,0 +1,19 @@
+name: mussel-dispatcher
+# Environment for mussel-nf dispatcher and helper scripts (runs outside Nextflow).
+# Uses CPU-only torch — no GPU required for WDS append / manifest scripts.
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - pyyaml
+      - pandas
+      - requests
+      - h5py
+      - numpy
+      - boto3
+      - databricks-sdk
+      - pytest
+      - torch --index-url https://download.pytorch.org/whl/cpu

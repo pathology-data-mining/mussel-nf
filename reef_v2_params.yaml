@@ -7,6 +7,7 @@ featurize:
     - hoptimus1
     - titan_slide
   slide_max_patches: 4096
-  model_embedding_precision:
+  model_precision_overrides:
     hoptimus1: bfloat16
 use_one_step_workflow: false  # two-step: TESSELLATE (GPU, neural seg) then FEATURIZE_BATCH (GPU)
+publish_mode: symlink

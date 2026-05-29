@@ -286,10 +286,32 @@ nextflow secrets set HF_TOKEN your-hf-token
 
 ### Azure Batch
 
-```bash
-nextflow secrets set AZURE_STORAGE_KEY your-storage-key
-nextflow secrets set AZURE_BATCH_KEY   your-batch-key
-```
+1. Create an Azure storage account and batch account.
+
+2. Modify the Nextflow configuration files as necessary (see <https://www.nextflow.io/docs/latest/azure.html>).
+
+3. Set the required secrets:
+   ```bash
+   nextflow secrets set AZURE_STORAGE_KEY your-storage-key
+   nextflow secrets set AZURE_BATCH_KEY   your-batch-key
+   ```
+
+4. Launch Nextflow:
+   ```bash
+   nextflow run main.nf -bucket-dir az://your-container/nfwork -profile docker,cloud
+   ```
+
+#### Disk management and unusable nodes
+
+Azure Batch nodes have poor disk space management — after many jobs they can run out of disk
+and enter an unusable state. Options:
+
+- Delete unusable nodes automatically with a PowerShell script.
+- Mount Azure File Shares for large files via `params.azure.storage.fileShares` to avoid local
+  disk pressure.
+
+It's a good idea to run the cleanup script periodically regardless, as nodes can end up unusable
+for various reasons and will linger (costing money) until deleted.
 
 ---
 

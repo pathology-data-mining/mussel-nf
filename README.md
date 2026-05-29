@@ -87,7 +87,7 @@ See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 ## Misc Notes
 
 * See full parameters with `--help` or `--helpFull`.
-* **Credentials & Secrets**: For S3 access, HuggingFace gated models, and Azure, see the
+* **Credentials & Secrets**: For S3 access and HuggingFace gated models, see the
   [Credentials & Secrets](dispatcher/README.md#credentials--secrets) section of the dispatcher README.
   Quick start for S3:
   ```bash
@@ -513,32 +513,7 @@ make test MUSSEL_TEST_SLIDE=/path/to/other.svs
 
 ## Azure Batch support
 
-1. Create an Azure storage account and batch account.
-
-2. Modify the nextflow configuration files as necessary (see <https://www.nextflow.io/docs/edge/azure.html>)
-
-3. Set the necessary secrets using `nextflow secrets set`. At a minimum set `AZURE_BATCH_KEY` and `AZURE_STORAGE_KEY`.
-
-4. Launch nextflow:
-    ```
-    nextflow -Dcom.amazonaws.sdk.disableCertChecking=true run main.nf -bucket-dir {azure_bucket_dir} -profile docker,cloud
-    ```
-    where `{azure_bucket_dir}` is an azure path like `az://test/nftest`.
-
-5. When the execution completes, results will be in the `results` directory
-
-### Azure notes
-
-#### Disk management and unusable nodes
-
-The Azure Batch nodes have poor disk space management such that if you run a
-lot of jobs, they will inevitably run out of disk space, putting the node into
-the unusable state. One possible solution is to delete the unusable nodes
-which can be done automatically with a powershell script. A better solution is
-to mount Azure file shares with large files to the batch nodes using
-`params.azure.storage.fileShares`. It's a good idea to periodically run the
-powershell script either way as nodes end up in the unusable state for a variety of
-reasons and will linger (costing $) until deleted.
+See [Credentials & Secrets — Azure Batch](dispatcher/README.md#azure-batch) in the dispatcher documentation.
 
 ## Troubleshooting
 

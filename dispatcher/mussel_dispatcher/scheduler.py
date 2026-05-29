@@ -402,6 +402,44 @@ class RunManager:
 # Recovery
 # ---------------------------------------------------------------------------
 
+def _kill_orphaned_nf(batch_id: str, pid: int, sigterm_wait: float = 10.0) -> None:
+    """SIGTERM then SIGKILL an orphaned NF process so its run name is freed.
+
+    NF registers the run name in ~/.nextflow/history as 'active' for the lifetime
+    of the process.  If the dispatcher crashes while NF is running, NF continues
+    as an orphan and keeps the name locked.  Attempting to ``-resume -name <same>``
+    from a new dispatcher process fails with "Run name already used".  Killing the
+    orphan first releases the lock so the resume succeeds.
+    """
+    try:
+        os.kill(pid, 0)  # Check if process exists
+    except OSError:
+        log.debug("Batch %s: orphaned NF PID %d already gone", batch_id, pid)
+        return
+
+    log.info("Batch %s: terminating orphaned NF process PID=%d", batch_id, pid)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return  # Already gone
+
+    # Wait up to sigterm_wait seconds for graceful exit, then SIGKILL.
+    deadline = time.monotonic() + sigterm_wait
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            log.debug("Batch %s: PID %d exited after SIGTERM", batch_id, pid)
+            return
+        time.sleep(0.5)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+        log.warning("Batch %s: PID %d did not exit after SIGTERM; sent SIGKILL", batch_id, pid)
+    except OSError:
+        pass
+
+
 def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: bool = True,
                       max_slide_retries: int = 0, cleanup_work_dir: bool = False):
     """
@@ -440,6 +478,13 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
             csv_path = batch.get("csv_path")
 
             if work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path):
+                # Kill any orphaned NF process from the previous dispatcher run.
+                # Without this, NF refuses to resume with "-name <same_name>" because the
+                # original process still holds the run name in ~/.nextflow/history.
+                nf_pid = batch.get("nf_pid")
+                if nf_pid:
+                    _kill_orphaned_nf(batch_id, nf_pid)
+
                 log.info("  Batch %s: work dir intact — will resume with -resume", batch_id)
                 resume_specs.append((batch_id, csv_path, work_dir))
                 # Leave slides in DISPATCHED state; they'll transition to DONE/FAILED on resume completion

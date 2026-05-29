@@ -75,6 +75,12 @@ class StateStore:
         ).fetchone()
         if has_nf_session_id and not has_session_id:
             conn.execute("ALTER TABLE batches RENAME COLUMN nf_session_id TO session_id")
+        # Migrate existing DBs that predate the nf_pid column.
+        has_nf_pid = conn.execute(
+            "SELECT name FROM pragma_table_info('batches') WHERE name='nf_pid'"
+        ).fetchone()
+        if not has_nf_pid:
+            conn.execute("ALTER TABLE batches ADD COLUMN nf_pid INTEGER")
         conn.commit()
 
     # -----------------------------------------------------------------------
@@ -381,6 +387,18 @@ class StateStore:
             "SELECT session_id FROM batches WHERE batch_id=?", (batch_id,)
         ).fetchone()
         return row["session_id"] if row else None
+
+    def set_batch_nf_pid(self, batch_id: str, pid: int):
+        self._conn().execute(
+            "UPDATE batches SET nf_pid=? WHERE batch_id=?", (pid, batch_id)
+        )
+        self._conn().commit()
+
+    def get_batch_nf_pid(self, batch_id: str) -> int | None:
+        row = self._conn().execute(
+            "SELECT nf_pid FROM batches WHERE batch_id=?", (batch_id,)
+        ).fetchone()
+        return row["nf_pid"] if row else None
 
     def get_finished_batches_with_work_dirs(self) -> list:
         rows = self._conn().execute(

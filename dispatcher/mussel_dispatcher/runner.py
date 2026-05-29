@@ -281,7 +281,7 @@ class NextflowRunner:
             run_env["TOWER_ACCESS_TOKEN"] = run_env.get("TOWER_ACCESS_TOKEN") or "local"
         try:
             with open(log_path, "w") as lf:
-                result = subprocess.run(
+                proc = subprocess.Popen(
                     cmd,
                     stdout=lf,
                     stderr=subprocess.STDOUT,
@@ -289,9 +289,16 @@ class NextflowRunner:
                     env=run_env,
                     start_new_session=True,
                 )
-            exit_code = result.returncode
+            # Store PID immediately so recover_in_flight() can kill this process
+            # if the dispatcher crashes and restarts before this batch completes.
+            self.state.set_batch_nf_pid(self.batch_id, proc.pid)
+            log.debug("Batch %s: NF process PID=%d", self.batch_id, proc.pid)
+            exit_code = proc.wait()
         except Exception as e:
             log.error("Batch %s failed to launch: %s", self.batch_id, e)
+
+        # Clear the stored PID — this process is done.
+        self.state.set_batch_nf_pid(self.batch_id, None)
 
         # Capture and store the NF session ID so future resumes can use -resume <uuid>
         # instead of bare -resume (which would collide across concurrent batches).

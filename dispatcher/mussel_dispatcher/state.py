@@ -393,7 +393,11 @@ class StateStore:
 
         Looks at slides that completed within the last *window_hours* and
         computes wall-clock throughput (slides per hour) as:
-            count / (max(completed_at) - min(completed_at))
+            count / elapsed
+
+        where elapsed = min(window_hours, hours since oldest completion in window).
+        This avoids inflated rates when many slides complete in a short burst
+        (which would make MAX-MIN very small).
 
         Returns a dict with keys:
             completed_in_window  – slide count used for the calculation
@@ -406,8 +410,7 @@ class StateStore:
             """
             SELECT
                 COUNT(*) AS cnt,
-                MIN(completed_at) AS oldest,
-                MAX(completed_at) AS newest
+                MIN(completed_at) AS oldest
             FROM slides
             WHERE status = 'SUCCEEDED'
               AND completed_at IS NOT NULL
@@ -421,12 +424,15 @@ class StateStore:
         window_elapsed_hours = None
         eta_seconds = None
 
-        if cnt >= 2 and row["oldest"] and row["newest"]:
+        if cnt >= 2 and row["oldest"]:
             try:
                 fmt = "%Y-%m-%d %H:%M:%S"
                 t0 = datetime.strptime(row["oldest"][:19], fmt)
-                t1 = datetime.strptime(row["newest"][:19], fmt)
-                elapsed_secs = (t1 - t0).total_seconds()
+                now = datetime.utcnow()
+                # Use time since first completion in window, capped at window_hours.
+                # This avoids burst inflation (MAX-MIN) while not over-inflating the
+                # denominator when the run just started.
+                elapsed_secs = min((now - t0).total_seconds(), window_hours * 3600)
                 if elapsed_secs > 60:
                     window_elapsed_hours = elapsed_secs / 3600
                     throughput = cnt / window_elapsed_hours

@@ -325,8 +325,7 @@ def _build_handler(cfg: Config):
             tp = conn.execute(
                 """
                 SELECT COUNT(*) AS cnt,
-                       MIN(completed_at) AS oldest,
-                       MAX(completed_at) AS newest
+                       MIN(completed_at) AS oldest
                 FROM slides
                 WHERE status = 'SUCCEEDED'
                   AND completed_at IS NOT NULL
@@ -343,12 +342,16 @@ def _build_handler(cfg: Config):
         throughput_per_hour = None
         eta_seconds = None
         completed_in_window = tp["cnt"] or 0
-        if completed_in_window >= 2 and tp["oldest"] and tp["newest"]:
+        if completed_in_window >= 2 and tp["oldest"]:
             try:
-                from datetime import datetime as _dt
-                t0 = _dt.fromisoformat(tp["oldest"])
-                t1 = _dt.fromisoformat(tp["newest"])
-                elapsed = (t1 - t0).total_seconds()
+                from datetime import datetime as _dt, timezone as _tz
+                t0 = _dt.fromisoformat(tp["oldest"].replace(" ", "T"))
+                if t0.tzinfo is None:
+                    t0 = t0.replace(tzinfo=_tz.utc)
+                now_utc = _dt.now(_tz.utc)
+                # Use time since first completion in window, capped at 6h.
+                # Avoids burst inflation (MAX-MIN tiny when slides finish together).
+                elapsed = min((now_utc - t0).total_seconds(), 6 * 3600)
                 if elapsed > 60:
                     throughput_per_hour = round(completed_in_window / (elapsed / 3600), 1)
                     eta_seconds = round(total_remaining / throughput_per_hour * 3600)

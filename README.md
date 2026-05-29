@@ -529,20 +529,21 @@ Solution:
 When this occurs it means that a dependency has a version mismatch between what 
 was loaded into the pickle file and what Mussel is using. It is best to not use the 
 pickle file and instead use this Mussel 
-[feauture](https://github.com/pathology-data-mining/Mussel/blob/main/README-commands.md#save_model) 
+[feature](https://github.com/pathology-data-mining/Mussel/blob/main/README-commands.md#save_model) 
 to automatically download the models from huggingface.
 
 ### Cache filling up
 
-Error:
-
-On our on-prem machines, the uv and huggingface caches are by default set to user's home directory. 
-This mount fills up quickly so it is best to move this cache elsewhere.
+On many systems, the uv and HuggingFace caches default to the user's home directory, which
+may have limited quota on shared filesystems.
 
 Solution:
 
-Move the uv and huggingface cache directory to a different mount by setting the environment
-variables `UV_CACHE_DIR` and `HF_HOME`. 
+Move the caches to a larger mount by setting:
+```bash
+export UV_CACHE_DIR=/path/to/large/disk/.cache/uv
+export HF_HOME=/path/to/large/disk/.cache/huggingface
+```
 
 ### Conflicting Huggingface Downloads
 

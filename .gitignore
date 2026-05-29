@@ -22,12 +22,27 @@ tests/results_stub_clip/
 tests/results_stub_multi_slide/
 tests/testdata/*_b.svs
 dispatcher/__pycache__
+dispatcher/mussel_dispatcher/**/__pycache__
+dispatcher/tests/__pycache__
+lib/mussel_benchmark/__pycache__/
+
 # Local run config / override files — not for version control
 class_mapping.yaml
 filter_workflow.yaml
 *_params.yaml
-dispatcher/__pycache__
-dispatcher/mussel_dispatcher/**/__pycache__
-dispatcher/tests/__pycache__
-lib/mussel_benchmark/__pycache__/
-tcga_params.yaml
+dispatcher/tcga_dispatcher.yaml
+dispatcher/reef_v2_dispatcher.yaml
+dispatcher/tcga_nextflow.config
+
+# Dispatcher runtime state / outputs
+dispatcher/*.db
+dispatcher/batches/
+dispatcher/state/
+dispatcher/logs/
+dispatcher/reef-v2-results/
+dispatcher/tcga-results/
+dispatcher/tcga-downloads/
+
+# PID files
+.*.pid
+dispatcher/.*.pid

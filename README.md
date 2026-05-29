@@ -87,6 +87,13 @@ See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 ## Misc Notes
 
 * See full parameters with `--help` or `--helpFull`.
+* **Credentials & Secrets**: For S3 access, HuggingFace gated models, and Azure, see the
+  [Credentials & Secrets](dispatcher/README.md#credentials--secrets) section of the dispatcher README.
+  Quick start for S3:
+  ```bash
+  nextflow secrets set AWS_ACCESS_KEY_ID     your-access-key
+  nextflow secrets set AWS_SECRET_ACCESS_KEY your-secret-key
+  ```
 * To use gated HuggingFace models (e.g. UNI, Virchow), set the `HF_TOKEN` Nextflow secret:
   `nextflow secrets set HF_TOKEN <token>`
 * To use models from local paths instead of downloading, set `params.featurize.model_paths.{model_type}`.

@@ -219,6 +219,80 @@ watchers:
     wds_staging_dir: /data/wds-staging
 ```
 
+## Credentials & Secrets
+
+S3 credentials must be provided to both the **dispatcher** (for its boto3 S3 watcher / WDS push operations) and to **Nextflow itself** (for pipeline tasks that read/write S3). These are configured independently.
+
+### Nextflow secrets (recommended)
+
+Nextflow has a built-in encrypted secret store (`~/.nextflow/secrets/`). The dispatcher can read from it — set credentials once and both the dispatcher and the pipeline will use them.
+
+```bash
+nextflow secrets set AWS_ACCESS_KEY_ID     your-access-key
+nextflow secrets set AWS_SECRET_ACCESS_KEY your-secret-key
+```
+
+Then reference them in the dispatcher YAML:
+
+```yaml
+nextflow_secrets:
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+```
+
+The dispatcher maps these to its `s3_access_key`/`s3_secret_key` fields automatically. Nextflow uses them directly via `secrets.AWS_ACCESS_KEY_ID` in `nextflow.config`.
+
+If your S3-compatible endpoint requires a custom URL, also add it to the watcher config:
+
+```yaml
+watchers:
+  - type: tcga          # or reef_v2
+    s3_endpoint: https://your-s3-compatible-endpoint:9000
+    # s3_access_key / s3_secret_key not needed — loaded from nextflow_secrets above
+```
+
+### Shell env file (alternative)
+
+Create a plain env file (do **not** commit it):
+
+```bash
+# secrets.env
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+```
+
+Reference it in the dispatcher YAML:
+
+```yaml
+secrets_env_file: /path/to/secrets.env
+```
+
+### Standard AWS credential chain
+
+For real AWS S3 (no custom endpoint), no dispatcher config is needed if credentials are already available via the [standard AWS chain](https://docs.aws.amazon.com/sdkref/latest/guide/standardized-credentials.html): `~/.aws/credentials`, instance profile, or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` environment variables.
+
+You still need to set the Nextflow secrets so the pipeline can authenticate:
+
+```bash
+nextflow secrets set AWS_ACCESS_KEY_ID     your-access-key
+nextflow secrets set AWS_SECRET_ACCESS_KEY your-secret-key
+```
+
+### HuggingFace gated models
+
+```bash
+nextflow secrets set HF_TOKEN your-hf-token
+```
+
+### Azure Batch
+
+```bash
+nextflow secrets set AZURE_STORAGE_KEY your-storage-key
+nextflow secrets set AZURE_BATCH_KEY   your-batch-key
+```
+
+---
+
 ## Slide Path Resolution
 
 `mussel_dispatcher.tcga.prepare_samples` resolves each TCGA slide in this priority order:

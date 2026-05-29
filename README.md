@@ -17,7 +17,7 @@ Two environment files are provided depending on which models you need:
 |---|---|---|
 | `mussel_env.yaml` | `torch-gpu` | All models **except** `googlepath`, `gigapath`, `gigapath_slide` |
 | `mussel_env_tf.yaml` | `tensorflow-gpu` | `googlepath` (Google Path Foundation, TensorFlow-based) |
-| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn) |
+| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn; `prov-gigapath` installed separately from GitHub) |
 
 The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive — they cannot be installed together. Use `-profile conda` with the default `mussel_env.yaml` for most workflows, and switch to the appropriate env file when running `googlepath` or `gigapath`.
 

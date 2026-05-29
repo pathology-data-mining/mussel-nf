@@ -3,4 +3,5 @@ dependencies:
   - python=3.11.*
   - pip
   - pip:
-    - mussel[fastattn] @ git+ssh://git@github.com/pathology-data-mining/Mussel.git@v1.4.0
+    - mussel-pathology[fastattn]
+    - git+https://github.com/prov-gigapath/prov-gigapath  # required for gigapath/gigapath_slide

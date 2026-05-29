@@ -6,7 +6,7 @@
       "task_key": "merge_metadata",
       "description": "Read latest Parquet from UC volume and MERGE INTO Delta table",
       "notebook_task": {
-        "notebook_path": "/Users/limr@mskcc.org/mussel-nf/notebooks/metadata_sync",
+        "notebook_path": "/Users/your-user@your-org.com/mussel-nf/notebooks/metadata_sync",
         "base_parameters": {
           "volume_folder": "/Volumes/your_catalog/your_schema/impact_dispatcher",
           "target_table": "your_catalog.your_schema.impact_slide_embeddings",

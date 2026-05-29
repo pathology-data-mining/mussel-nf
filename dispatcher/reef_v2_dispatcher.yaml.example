@@ -8,9 +8,9 @@
 #   state_dir     → state/
 #   log_dir       → logs/
 # Override any of them by setting an absolute path below.
-work_base_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/work
-state_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/state
-log_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/logs
+work_base_dir: /path/to/work
+#state_dir: /path/to/state
+#log_dir: /path/to/logs
 
 dashboard_port: 9050
 tower_proxy_port: 9049
@@ -21,7 +21,7 @@ outdir: reef-v2-results          # nextflow --outdir; manifest CSVs are written 
 nextflow_params_file: ../reef_v2_params.yaml # optional: passed as -params-file to every nextflow run
 
 # S3/ECS credentials — inherited by all watchers
-s3_endpoint: http://pmindecs.mskcc.org:9020
+# s3_endpoint: http://your-ecs-endpoint:9020
 nextflow_secrets:
   s3_access_key: ECS_ACCESS_KEY
   s3_secret_key: ECS_SECRET_KEY
@@ -114,10 +114,10 @@ watchers:
   #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).
     wds_destinations:
-      hoptimus1: s3://reef-v2-0/wds
-      titan_slide: s3://reef-v2-0/wds
+      hoptimus1: s3://your-bucket/wds
+      titan_slide: s3://your-bucket/wds
   #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
     # Sync results back to Databricks after each batch.
     # Volume folder and warehouse MERGE are auto-configured from the table name
     # and the auto-detected warehouse — no job_id or warehouse_id required.
-    databricks_table: cdsi_prod.pathology_data_mining.slide_embeddings_v2
+    databricks_table: your_catalog.your_schema.slide_embeddings_v2

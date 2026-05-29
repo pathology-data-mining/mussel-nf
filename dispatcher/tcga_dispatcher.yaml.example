@@ -50,14 +50,13 @@ watchers:
     # Slides are resolved: local disk → S3 → needs_download (in that order).
     #local_slides_dir: /path/to/slides
     s3_base: s3://your-bucket/TCGA
-    s3_endpoint: http://your-s3-endpoint:9020
-    # s3_access_key: ...   # or set ECS_ACCESS_KEY env var
-    # s3_secret_key: ...   # or set ECS_SECRET_KEY env var
-    # secrets_env_file: /path/to/secrets.env  # shell env file with ECS_ACCESS_KEY / ECS_SECRET_KEY
-    # secrets_env_file: /path/to/secrets.env
+    # s3_endpoint: http://your-s3-compatible-endpoint:9000  # omit for standard AWS S3
+    # s3_access_key: ...   # or set AWS_ACCESS_KEY_ID env var
+    # s3_secret_key: ...   # or set AWS_SECRET_ACCESS_KEY env var
+    # secrets_env_file: /path/to/secrets.env  # shell env file with credentials
     nextflow_secrets:         # fallback: load from `nextflow secrets get` if not set above
-      - ECS_ACCESS_KEY
-      - ECS_SECRET_KEY
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
 
     # Optional: restrict to a single project or slide/sample type
     # project: TCGA-BRCA

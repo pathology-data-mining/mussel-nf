@@ -262,7 +262,7 @@ workflow MUSSEL {
             .map { meta, model_type, h5 ->
                 tuple(groupKey([sample_id: meta.sample_id, model_type: model_type], meta.n_slides), meta, h5)
             }
-            .groupTuple()
+            .groupTuple(remainder: true)
             .map { key, metas, h5s ->
                 tuple(key.sample_id, metas, key.model_type, h5s)
             }

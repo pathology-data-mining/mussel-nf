@@ -1,6 +1,19 @@
 {
   "name": "tcga-metadata-sync",
   "description": "Merge TCGA slide inventory + feature extraction status Parquet into the your_catalog.your_schema.tcga_slide_embeddings Delta table. Triggered by tcga_sync_databricks.py after each dispatcher batch.",
+  "job_clusters": [
+    {
+      "job_cluster_key": "metadata_sync_cluster",
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "i3.xlarge",
+        "num_workers": 0,
+        "spark_conf": {
+          "spark.master": "local[*]"
+        }
+      }
+    }
+  ],
   "tasks": [
     {
       "task_key": "merge_metadata",
@@ -15,7 +28,7 @@
         },
         "source": "WORKSPACE"
       },
-      "existing_cluster_id": "0814-135550-h9i18c28",
+      "job_cluster_key": "metadata_sync_cluster",
       "timeout_seconds": 1800,
       "max_retries": 2,
       "min_retry_interval_millis": 60000
@@ -23,13 +36,10 @@
   ],
   "schedule": {
     "quartz_cron_expression": "0 0 6 * * ?",
-    "timezone_id": "America/New_York",
+    "timezone_id": "UTC",
     "pause_status": "PAUSED"
   },
   "max_concurrent_runs": 1,
-  "email_notifications": {
-    "on_failure": []
-  },
   "tags": {
     "project": "tcga-feature-extraction",
     "team": "pathology-data-mining"

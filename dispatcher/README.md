@@ -248,7 +248,7 @@ If your S3-compatible endpoint requires a custom URL, also add it to the watcher
 
 ```yaml
 watchers:
-  - type: tcga          # or reef_v2
+  - type: tcga
     s3_endpoint: https://your-s3-compatible-endpoint:9000
     # s3_access_key / s3_secret_key not needed — loaded from nextflow_secrets above
 ```
@@ -330,7 +330,7 @@ The dispatcher uses this to enqueue ready slides immediately and, if `download_e
 ## Running Tests
 
 ```bash
-python -m pytest dispatcher/test_dispatcher.py -v
+python -m pytest dispatcher/tests/test_dispatcher.py -v
 ```
 
 Tests cover: StateStore CRUD + lifecycle, BatchScheduler triggers, RunManager concurrency, crash recovery, TcgaWatcher enqueue/download/skip logic, and post_batch_hooks template substitution.

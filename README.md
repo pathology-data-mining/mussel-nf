@@ -48,7 +48,7 @@ The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive 
 
 ## Continuous Processing (Dispatcher)
 
-For large-scale cohorts (e.g. all TCGA slides, MSK IMPACT), use the **mussel-dispatcher** rather than invoking Nextflow directly. The dispatcher:
+For large-scale cohorts (e.g. all TCGA slides, institutional slide libraries), use the **mussel-dispatcher** rather than invoking Nextflow directly. The dispatcher:
 
 - Streams slides from multiple sources (TCGA GDC API, Databricks SQL warehouse, local directories, S3 buckets)
 - Batches slides and dispatches parallel Nextflow runs up to a configurable concurrency limit

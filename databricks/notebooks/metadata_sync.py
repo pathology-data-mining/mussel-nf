@@ -1,19 +1,17 @@
 # Databricks notebook: metadata_sync
 # ---------------------------------------------------------------------------
-# Shared parameterized notebook for syncing slide inventory Parquet files
-# (TCGA or IMPACT) into a Delta table via MERGE.
+# Parameterized notebook for syncing slide inventory Parquet files into a
+# Delta table via MERGE.
 #
-# Replaces the TCGA-specific tcga_metadata_sync notebook.  Parameterized
-# via Databricks widgets so the same logic handles both datasets.
+# One row per (merge_key, model) — the merge_key column (e.g. slide_id or a
+# dataset-specific UUID) is the primary identifier.
 #
-# One row per (merge_key, model) — the merge_key column (e.g. file_id for
-# TCGA, slide_id for IMPACT) is the primary identifier.
-#
-# Expected to be triggered by the dispatcher sync scripts after each batch.
+# Expected to be triggered by the dispatcher sync scripts after each batch,
+# or run manually via Databricks widgets.
 #
 # Parameters (Databricks job widgets / task values):
 #   volume_folder     UC volume folder containing Parquet files
-#                     e.g. /Volumes/your_catalog/your_schema/tcga_dispatcher
+#                     e.g. /Volumes/your_catalog/your_schema/mussel_dispatcher
 #   target_table      Delta table to MERGE INTO
 #   merge_key         Column used as the row identifier in the MERGE condition
 #                     default: "slide_id"

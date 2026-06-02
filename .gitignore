@@ -33,7 +33,6 @@ filter_workflow.yaml
 dispatcher/tcga_dispatcher.yaml
 dispatcher/reef_v2_dispatcher.yaml
 dispatcher/cohort_dispatcher.yaml
-dispatcher/tcga_nextflow.config
 
 # Dispatcher runtime state / outputs
 dispatcher/*.db

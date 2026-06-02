@@ -13,7 +13,7 @@ work_base_dir: /path/to/work
 
 nextflow_profiles: cluster,slurm,conda
 outdir: tcga-results
-#nextflow_config: tcga_nextflow.config
+# nextflow_config: custom.config        # optional: passed as -c to every nextflow run
 nextflow_params_file: ../tcga_params.yaml
 nextflow_version: "26.04.0"
 # dashboard_port: 8050      # dashboard HTTP port (default: 8050); auto-started by dispatcher

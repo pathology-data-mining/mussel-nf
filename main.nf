@@ -7,6 +7,7 @@ include { DOWNLOAD_SLIDE } from './modules/download'
 
 
 process saveParams {
+    executor 'local'
     publishDir params.outdir, mode: 'copy'
 
     output:

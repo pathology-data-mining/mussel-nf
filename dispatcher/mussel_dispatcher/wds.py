@@ -34,7 +34,7 @@ Usage
         --wds-dest /data/wds \\
         --model-type ctranspath
 
-    # Route by column in batch CSV (e.g. oncotree_code from IMPACT dispatcher)
+    # Route by column in batch CSV (e.g. oncotree_code from Databricks watcher)
     python -m mussel_dispatcher.wds \\
         --pt-dir /data/results/features/ctranspath/pt \\
         --slide-ids-csv batch.csv \\

@@ -1,8 +1,7 @@
 """Shared Databricks upload / job-trigger utilities for mussel-dispatcher sync scripts.
 
-Used by both ``mussel_dispatcher.tcga.sync_databricks`` and
-``mussel_dispatcher.impact.sync_databricks`` to avoid duplicating credential
-resolution, HTTP upload, and argparse boilerplate.
+Used by sync scripts (e.g. ``mussel_dispatcher.tcga.sync_databricks``) to avoid
+duplicating credential resolution, HTTP upload, and argparse boilerplate.
 """
 from __future__ import annotations
 

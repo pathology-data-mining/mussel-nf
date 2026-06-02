@@ -82,25 +82,20 @@ watchers:
   #   # databricks_volume_path: /Volumes/catalog/schema/volume/tcga_inventory.parquet
   #   # databricks_job_id: "12345"   # optional
 
-  # Uncomment to watch a Databricks SQL warehouse for IMPACT slides.
-  # Queries the join of impact_matched_slides + slide_inventory to get S3 paths.
+  # Uncomment to watch a Databricks SQL warehouse for slides.
+  # Supply a query that returns slide_id, slide_path, and oncotree_code.
   # Credentials come from DATABRICKS_HOST + DATABRICKS_TOKEN env vars
   # (or ~/.databrickscfg DEFAULT profile).
   # Requires: pip install databricks-sdk
   #
   # - type: databricks
   #   warehouse_id: 0b49b7d78734ad5c    # Databricks SQL warehouse ID
-  #   poll_interval_seconds: 86400       # re-query once per day (default); use 259200 for every 3 days
-  #   source_filter: [ECS2]              # limit to slide_inventory.source values; [] = all
-  #   # additional_where: "m.IS_HNE = 1"  # optional extra SQL WHERE clause
-  #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
+  #   query_file: queries/my_slides.sql  # .sql returning slide_id, slide_path, oncotree_code
+  #   # query: "SELECT slide_id, slide_path, oncotree_code FROM catalog.schema.slides"
+  #   poll_interval_seconds: 86400       # re-query once per day (default)
   #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).
   #   # wds_destinations:
-  #   #   ctranspath: s3://your-bucket/wds/impact/ctranspath
-  #   #   uni2h: s3://your-bucket/wds/impact/uni2h
+  #   #   ctranspath: s3://your-bucket/wds/ctranspath
+  #   #   uni2h: s3://your-bucket/wds/uni2h
   #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
-  #   # Sync results back to Databricks after each batch:
-  #   # databricks_volume_folder: /Volumes/your_catalog/your_schema/impact_dispatcher
-  #   # databricks_table: your_catalog.your_schema.impact_slide_embeddings_v2
-  #   # databricks_job_id: "12345"

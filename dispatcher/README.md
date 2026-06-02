@@ -50,7 +50,7 @@ Watchers run in background threads and push slides onto a shared queue.
 | `local` | Directory on disk — polls for new `.svs`/`.tiff` files |
 | `s3` | S3-compatible bucket — polls for new objects by prefix |
 | `tcga` | GDC API — syncs inventory, resolves paths, downloads missing slides |
-| `databricks` | Databricks SQL warehouse — queries IMPACT-matched slide inventory |
+| `databricks` | Databricks SQL warehouse — polls for slides via a user-supplied SQL query |
 
 Multiple watchers can run simultaneously (e.g., local + tcga).
 
@@ -74,12 +74,14 @@ On every poll cycle (`poll_interval_seconds`, default 3600 s):
 
 **Key throughput property:** downloads for batch N+1 overlap with featurization of batch N, and up to `max_concurrent_runs` Nextflow jobs run simultaneously.
 
-#### DatabricksWatcher (MSK IMPACT slides)
+#### DatabricksWatcher (Databricks SQL warehouse)
 
-Queries a Databricks SQL warehouse to discover slides from the MSK IMPACT-matched cohort. On every poll cycle (`poll_interval_seconds`, default 86400 s = 1 day, since IMPACT tables update infrequently):
+Queries a Databricks SQL warehouse to discover slides using a user-supplied SQL query. On every poll cycle (`poll_interval_seconds`, default 86400 s = 1 day):
 
-1. **Query warehouse** — executes a SQL join of `impact_matched_slides` and `slide_inventory` to retrieve `(slide_id, slide_path, oncotree_code)` tuples for all slides with a valid S3 path.
+1. **Query warehouse** — executes the configured SQL query to retrieve `(slide_id, slide_path, oncotree_code)` tuples.
 2. **Enqueue new slides** — slides not already in the StateStore are added and pushed to the dispatch queue. Already-known slides are skipped.
+
+The query must return at least three columns: `slide_id`, `slide_path`, and `oncotree_code`. Supply the SQL via `query_file` (a `.sql` file) or `query` (inline YAML string).
 
 Credentials are resolved by the Databricks SDK in priority order:
 1. `DATABRICKS_HOST` + `DATABRICKS_TOKEN` environment variables
@@ -195,13 +197,14 @@ The config is a YAML file. See [`tcga_dispatcher.yaml`](tcga_dispatcher.yaml) fo
 | Field | Default | Description |
 |---|---|---|
 | `warehouse_id` | required | Databricks SQL warehouse ID to run queries against |
-| `source_filter` | `[]` | List of `slide_inventory.source` values to include (e.g. `['ECS2']`); empty = all |
-| `additional_where` | `""` | Extra SQL `WHERE` clause appended with `AND` |
-| `min_file_size_mb` | `10.0` | Skip slides smaller than this (MB) |
-| `poll_interval_seconds` | `86400` | How often to poll (default 1 day — IMPACT tables update infrequently) |
+| `query_file` | `""` | Path to a `.sql` file whose query returns `slide_id`, `slide_path`, `oncotree_code` |
+| `query` | `""` | Inline SQL string (alternative to `query_file`; `query` takes priority) |
+| `poll_interval_seconds` | `86400` | How often to poll (default 1 day) |
 | `wds_destinations` | `{}` | `{model: s3_or_local_path}` — auto-generates `append_wds` post-batch hook per model |
 | `wds_staging_dir` | `""` | Local staging dir for S3 WDS destinations |
 | `wds_s3_max_concurrency` | `4` | Boto3 multipart upload threads per S3 write |
+
+At least one of `query_file` or `query` is required. The query must return columns `slide_id`, `slide_path`, and `oncotree_code`.
 
 **Requires:** `pip install databricks-sdk`
 
@@ -211,8 +214,7 @@ The config is a YAML file. See [`tcga_dispatcher.yaml`](tcga_dispatcher.yaml) fo
 watchers:
   - type: databricks
     warehouse_id: abc123def456
-    source_filter: [ECS2]
-    min_file_size_mb: 50
+    query_file: queries/my_slides.sql   # must return slide_id, slide_path, oncotree_code
     poll_interval_seconds: 86400
     wds_destinations:
       hoptimus1: s3://my-bucket/wds/hoptimus1

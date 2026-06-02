@@ -98,21 +98,19 @@ watchers:
   #   # databricks_volume_path: /Volumes/catalog/schema/volume/tcga_inventory.parquet
   #   # databricks_job_id: "12345"   # optional
 
-  # Uncomment to watch a Databricks SQL warehouse for IMPACT slides.
+  # Uncomment to watch a Databricks SQL warehouse for slides.
+  # Supply a query that returns slide_id, slide_path, and oncotree_code.
   # Credentials come from DATABRICKS_HOST + DATABRICKS_TOKEN env vars
   # (or ~/.databrickscfg DEFAULT profile).
   # Requires: pip install databricks-sdk
   #
   - type: databricks
-    # warehouse_id: 0b49b7d78734ad5c    # auto-detected if omitted
+    warehouse_id: 0b49b7d78734ad5c
     poll_interval_seconds: 86400
-    # Query for slides. Three options (in priority order):
-    #   1. query_file: path to a .sql file (relative to this config file)
-    #   2. query: inline SQL string
-    #   3. built-in template (impact_matched_slides JOIN slide_inventory) with optional filters:
-    #      source_filter: [ECS2]         # limit to slide_inventory.source values
-    #      additional_where: "m.IS_HNE = 1"
-    query_file: queries/impact_slides_default.sql
+    # Provide a SQL query via query_file or inline query string.
+    # The query must return: slide_id, slide_path, oncotree_code
+    query_file: queries/my_slides.sql
+    # query: "SELECT slide_id, slide_path, oncotree_code FROM catalog.schema.slides"
   #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
   #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).

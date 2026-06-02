@@ -1648,25 +1648,6 @@ class TestAutoHooks:
         assert "sync_databricks" in hook["command"]
         assert hook.get("_phase") == "db_sync"
 
-    def test_impact_db_sync_hook_tagged_db_sync(self, tmp_path):
-        """IMPACT (databricks watcher type) Databricks sync auto-hook is tagged _phase='db_sync'."""
-        import yaml as _yaml
-        cfg_path = tmp_path / "test.yaml"
-        cfg_path.write_text(_yaml.dump({
-            "nextflow_profiles": "standard",
-            "outdir": str(tmp_path / "results"),
-            "watchers": [{
-                "type": "databricks",
-                "databricks_table": "cat.schema.slide_embeddings_v2",
-                "wds_destinations": {"hoptimus1": "s3://bucket/wds"},
-            }],
-        }))
-        cfg = Config.load(str(cfg_path))
-        db_hooks = [h for h in cfg.post_batch_hooks if "sync_databricks" in h.get("command", "")]
-        assert db_hooks, "expected a db sync hook"
-        assert all(h.get("_phase") == "db_sync" for h in db_hooks)
-
-
 # ---------------------------------------------------------------------------
 # Cleanup tests
 # ---------------------------------------------------------------------------
@@ -2041,9 +2022,8 @@ class TestDatabricksWatcher:
             type="databricks",
             warehouse_id="wh-123",
             poll_interval_seconds=3600,
-            source_filter=["ECS2"],
-            additional_where="",
             min_file_size_bytes=10_000_000,
+            query="SELECT slide_id, slide_path, oncotree_code FROM slides",
         )
         if cfg_overrides:
             cfg_kwargs.update(cfg_overrides)
@@ -2096,21 +2076,6 @@ class TestDatabricksWatcher:
         w._poll()  # should not raise
         assert len(pending) == 0
 
-    def test_source_filter_in_query(self, tmp_path):
-        w, pending, state = self._watcher(tmp_path, {"source_filter": ["ECS2", "On-prem Storage"]})
-        query = w._build_query()
-        assert "i.source IN ('ECS2', 'On-prem Storage')" in query
-
-    def test_no_source_filter_omits_clause(self, tmp_path):
-        w, pending, state = self._watcher(tmp_path, {"source_filter": []})
-        query = w._build_query()
-        assert "i.source" not in query
-
-    def test_additional_where_included(self, tmp_path):
-        w, pending, state = self._watcher(tmp_path, {"additional_where": "m.IS_HNE = 1"})
-        query = w._build_query()
-        assert "m.IS_HNE = 1" in query
-
     def test_missing_warehouse_id_does_not_start(self, tmp_path, caplog):
         import logging
         w, pending, state = self._watcher(tmp_path, {"warehouse_id": ""})
@@ -2118,16 +2083,25 @@ class TestDatabricksWatcher:
             w.run()
         assert len(pending) == 0
 
-    def test_watcher_config_databricks_fields(self):
-        cfg = WatcherConfig(
-            type="databricks",
-            warehouse_id="abc123",
-            source_filter=["ECS2"],
-            additional_where="m.IS_HNE = 1",
-        )
-        assert cfg.warehouse_id == "abc123"
-        assert cfg.source_filter == ["ECS2"]
-        assert cfg.additional_where == "m.IS_HNE = 1"
+    def test_no_query_raises_runtime_error(self, tmp_path):
+        """_build_query raises RuntimeError when neither query nor query_file is set."""
+        w, pending, state = self._watcher(tmp_path, {"query": "", "query_file": ""})
+        with pytest.raises(RuntimeError, match="no query configured"):
+            w._build_query()
+
+    def test_inline_query_used(self, tmp_path):
+        """_build_query returns inline SQL from cfg.query."""
+        sql = "SELECT slide_id, slide_path, oncotree_code FROM my_catalog.slides"
+        w, pending, state = self._watcher(tmp_path, {"query": sql})
+        assert w._build_query() == sql
+
+    def test_query_file_used(self, tmp_path):
+        """_build_query reads SQL from the configured query_file."""
+        sql = "SELECT slide_id, slide_path, oncotree_code FROM my_catalog.slides"
+        qf = tmp_path / "slides.sql"
+        qf.write_text(sql)
+        w, pending, state = self._watcher(tmp_path, {"query": "", "query_file": str(qf)})
+        assert w._build_query() == sql
 
 
 # ===========================================================================
@@ -5104,81 +5078,6 @@ class TestUploadAndTrigger:
              patch("mussel_dispatcher.databricks_sync.poll_job_run", return_value=(False, "MERGE failed: unresolved expression")):
             with pytest.raises(SystemExit):
                 upload_and_trigger(df, args, filename_prefix="test_inventory_")
-
-
-# ===========================================================================
-# IMPACT build_export
-# ===========================================================================
-
-class TestImpactBuildExport:
-    def test_impact_build_export_basic(self, tmp_path):
-        """build_export fans out to one row per (slide_id, model) with correct status."""
-        import csv
-        from mussel_dispatcher.state import StateStore
-        from mussel_dispatcher.impact.sync_databricks import build_export
-
-        db_path = str(tmp_path / "test.db")
-        store = StateStore(db_path)
-
-        store.add_slide("s3://bucket/slide1.svs", "slide1", oncotree_code="IDC")
-        store.add_slide("s3://bucket/slide2.svs", "slide2", oncotree_code="LUAD")
-        store.add_slide("s3://bucket/slide3.svs", "slide3", oncotree_code="PRAD")
-
-        # Mark slide1 succeeded, slide3 failed
-        store.add_batch("batch1", str(tmp_path / "batch.csv"), str(tmp_path), 2, str(tmp_path / "nf.log"))
-        store._conn().execute(
-            "UPDATE slides SET status='DISPATCHED', batch_id='batch1' WHERE slide_id IN ('slide1', 'slide3')"
-        )
-        store._conn().commit()
-        store.mark_slides_complete("batch1", succeeded=False, per_slide_status={
-            "s3://bucket/slide1.svs": True,
-            "s3://bucket/slide3.svs": False,
-        })
-        # slide3 failure reason
-        store._conn().execute(
-            "UPDATE slides SET error_msg='OOM' WHERE slide_id='slide3'"
-        )
-        store._conn().commit()
-
-        # wds_manifest: slide1 has a wds entry, slide2 does not
-        manifest_path = str(tmp_path / "wds_manifest.csv")
-        with open(manifest_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
-            writer.writeheader()
-            writer.writerow({"slide_id": "slide1", "model": "titan_slide",
-                             "wds_path": "s3://bucket/wds/titan_slide/IDC/000000.tar"})
-
-        df = build_export(db_path, manifest_path, ["titan_slide"])
-
-        assert set(df.columns) >= {"slide_id", "model", "status", "wds_path", "oncotree_code", "failure_reason"}
-        assert len(df) == 3
-
-        s1 = df[df["slide_id"] == "slide1"].iloc[0]
-        assert s1["status"] == "SUCCEEDED"
-        assert s1["wds_path"] == "s3://bucket/wds/titan_slide/IDC/000000.tar"
-        assert s1["oncotree_code"] == "IDC"
-
-        s2 = df[df["slide_id"] == "slide2"].iloc[0]
-        assert s2["status"] == "PENDING"
-        assert s2["wds_path"] == ""
-
-        s3 = df[df["slide_id"] == "slide3"].iloc[0]
-        assert s3["status"] == "FAILED"
-        assert s3["failure_reason"] == "OOM"
-
-    def test_impact_build_export_missing_manifest(self, tmp_path):
-        """build_export works gracefully when wds_manifest.csv doesn't exist."""
-        from mussel_dispatcher.state import StateStore
-        from mussel_dispatcher.impact.sync_databricks import build_export
-
-        db_path = str(tmp_path / "test.db")
-        store = StateStore(db_path)
-        store.add_slide("s3://bucket/slide1.svs", "slide1", oncotree_code="IDC")
-
-        df = build_export(db_path, str(tmp_path / "nonexistent.csv"), ["titan_slide"])
-        assert len(df) == 1
-        assert df.iloc[0]["wds_path"] == ""
-
 
 # ===========================================================================
 # StateStore oncotree_code

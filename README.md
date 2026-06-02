@@ -1,5 +1,9 @@
 # Mussel-NF pipeline
 
+[![CI](https://github.com/pathology-data-mining/mussel-nf/actions/workflows/ci.yml/badge.svg)](https://github.com/pathology-data-mining/mussel-nf/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Nextflow](https://img.shields.io/badge/nextflow%20DSL2-%E2%89%A524.0-23aa62.svg)](https://www.nextflow.io/)
+
 A pipeline for running [Mussel](https://github.com/pathology-data-mining/Mussel).
 
 ## Requirements

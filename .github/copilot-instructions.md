@@ -158,8 +158,94 @@ Running many jobs simultaneously against HuggingFace causes race conditions. Run
 
 Azure Batch nodes have poor disk space management — running many jobs will eventually exhaust disk space and put nodes into an **unusable** state (they linger and continue incurring cost until deleted). Mitigate by mounting Azure file shares with large capacity to the batch nodes via `params.azure.storage.fileShares`. A PowerShell script to automatically delete unusable nodes is also recommended regardless, as nodes enter the unusable state for various other reasons.
 
+## Dispatcher
+
+`dispatcher/` is a Python daemon (`mussel-dispatcher`) that runs the pipeline continuously as new slides become available. It watches one or more slide sources, batches slides, launches Nextflow runs, and runs post-batch hooks (e.g. sync results to Databricks or push WDS shards to S3).
+
+```
+dispatcher/
+  mussel_dispatcher/
+    config.py          # Config / WatcherConfig dataclasses; YAML parsing
+    scheduler.py       # BatchScheduler: buffers slides, fires when batch ready
+    runner.py          # RunManager: launches NF runs up to max_concurrent_runs
+    watchers.py        # LocalWatcher, S3Watcher, TcgaWatcher, DatabricksWatcher
+    state.py           # SQLite StateStore for crash recovery
+    wds.py             # append_wds() — WDS shard builder / S3 uploader
+    databricks_sync.py # Generic Databricks Parquet → Delta MERGE sync
+  queries/
+    databricks_example.sql  # Example SQL for DatabricksWatcher
+  tests/
+  dispatcher.yaml      # Default config (edit/copy before running)
+  cohort_dispatcher.yaml.example  # Annotated example config
+```
+
+### Running the dispatcher
+
+```bash
+cd dispatcher
+pip install -e .
+
+# Start (reads dispatcher.yaml by default)
+python -m mussel_dispatcher dispatcher.yaml
+
+# Collect and merge all per-run manifests
+python -m mussel_dispatcher collect-manifests dispatcher.yaml
+
+# Run tests
+pytest tests/
+```
+
+### Watcher types
+
+| Type | Config key `type:` | Discovers slides from |
+|---|---|---|
+| `local` | `local` | Filesystem directory poll |
+| `s3` | `s3` | S3/ECS bucket prefix listing |
+| `tcga` | `tcga` | TCGA GDC API + local download |
+| `databricks` | `databricks` | Databricks SQL Warehouse query |
+
+**DatabricksWatcher** requires `warehouse_id` + either `query` (inline SQL) or `query_file` (path to `.sql`). The query must return `slide_id`, `slide_path`, and optionally `oncotree_code`. See `queries/databricks_example.sql`.
+
+### Post-batch hooks
+
+After each successful Nextflow run the scheduler calls hooks in `post_batch_hooks`. Auto-generated hooks (from watcher config):
+- **WDS hook** — invokes `python -m mussel_dispatcher.wds` to push `.pt`/`.h5` feature files to an S3/ECS WDS destination.
+- **Databricks sync hook** — invokes `python -m mussel_dispatcher.databricks_sync` to upload a Parquet inventory snapshot to a Unity Catalog volume, then optionally triggers a job to MERGE it into a Delta table.
+
+### Key config fields (`Config`)
+
+| Field | Default | Description |
+|---|---|---|
+| `max_concurrent_runs` | 2 | Max parallel NF runs |
+| `batch_size` | 20 | Slides per NF run |
+| `max_wait_seconds` | 300 | Max time to wait before firing a partial batch |
+| `retry_failed` | true | Re-enqueue failed slides |
+| `max_slide_retries` | 5 | Give up after N retries |
+| `nextflow_config` | — | Path to a custom `nextflow.config` |
+| `nextflow_params_file` | — | Path to a params YAML override |
+
+## Databricks Integration
+
+`databricks/` contains a parameterized Databricks notebook and job JSON for syncing feature inventory into a Delta table.
+
+```
+databricks/
+  notebooks/metadata_sync.py   # Databricks notebook: Parquet → Delta MERGE via MERGE INTO
+  jobs/metadata_sync_job.json  # Databricks Jobs API definition (i3.xlarge single-node)
+```
+
+**Notebook parameters** (set as Databricks job task values or widget defaults):
+
+| Parameter | Default | Description |
+|---|---|---|
+| `volume_folder` | — | UC Volume path containing Parquet files |
+| `target_table` | — | Delta table to MERGE INTO |
+| `merge_key` | `slide_id` | Column used as row identifier in MERGE |
+| `filename_prefix` | `""` | Only use Parquet files with this filename prefix |
+
+The MERGE uses explicit column intersection (`source_cols ∩ target_cols`) to avoid `DELTA_MERGE_UNRESOLVED_EXPRESSION` errors when the source Parquet has fewer columns than the target Delta table.
+
 ## Utility Scripts
 
 - **`scripts/create_manifest.py`**: Manually rebuild manifest from a results directory. Scans for `*.features.pt`, `*.patch.h5` across `features/`, `tiles/`, `filter_tiles/`.
 - **`validate.nf`**: Validates `.h5` (checks for `coords` key) and `.pt` files from a manifest CSV.
-- **`create_muv_manifest.py`**: Creates MUV-format manifests.

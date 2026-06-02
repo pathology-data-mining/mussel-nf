@@ -1,8 +1,7 @@
 """Shared Databricks upload / job-trigger utilities for mussel-dispatcher sync scripts.
 
-Used by both ``mussel_dispatcher.tcga.sync_databricks`` and
-``mussel_dispatcher.impact.sync_databricks`` to avoid duplicating credential
-resolution, HTTP upload, and argparse boilerplate.
+Used by sync scripts (e.g. ``mussel_dispatcher.tcga.sync_databricks``) to avoid
+duplicating credential resolution, HTTP upload, and argparse boilerplate.
 """
 from __future__ import annotations
 
@@ -446,7 +445,7 @@ def add_upload_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--table", default=None,
         help="Target Delta table (passed as notebook_param 'target_table'). "
-             "E.g. cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2",
+             "E.g. your_catalog.your_schema.tcga_slide_embeddings_v2",
     )
     parser.add_argument(
         "--job-id", default=None,

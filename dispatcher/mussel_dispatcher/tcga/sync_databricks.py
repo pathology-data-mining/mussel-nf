@@ -26,7 +26,7 @@ Usage
         --status tcga_status.csv \\
         --inventory tcga_inventory.csv \\
         --volume-folder /Volumes/catalog/schema/tcga_dispatcher \\
-        [--table cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2] \\
+        [--table your_catalog.your_schema.tcga_slide_embeddings_v2] \\
         [--job-id 12345]
 """
 

@@ -17,7 +17,7 @@ Two environment files are provided depending on which models you need:
 |---|---|---|
 | `mussel_env.yaml` | `torch-gpu` | All models **except** `googlepath`, `gigapath`, `gigapath_slide` |
 | `mussel_env_tf.yaml` | `tensorflow-gpu` | `googlepath` (Google Path Foundation, TensorFlow-based) |
-| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn) |
+| `mussel_env_fastattn.yaml` | `fastattn` | `gigapath`, `gigapath_slide` (requires flash-attn; `prov-gigapath` installed separately from GitHub) |
 
 The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive — they cannot be installed together. Use `-profile conda` with the default `mussel_env.yaml` for most workflows, and switch to the appropriate env file when running `googlepath` or `gigapath`.
 
@@ -48,7 +48,7 @@ The `torch-gpu`, `tensorflow-gpu`, and `fastattn` extras are mutually exclusive 
 
 ## Continuous Processing (Dispatcher)
 
-For large-scale cohorts (e.g. all TCGA slides, MSK IMPACT), use the **mussel-dispatcher** rather than invoking Nextflow directly. The dispatcher:
+For large-scale cohorts (e.g. all TCGA slides, institutional slide libraries), use the **mussel-dispatcher** rather than invoking Nextflow directly. The dispatcher:
 
 - Streams slides from multiple sources (TCGA GDC API, Databricks SQL warehouse, local directories, S3 buckets)
 - Batches slides and dispatches parallel Nextflow runs up to a configurable concurrency limit
@@ -87,6 +87,13 @@ See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 ## Misc Notes
 
 * See full parameters with `--help` or `--helpFull`.
+* **Credentials & Secrets**: For S3 access and HuggingFace gated models, see the
+  [Credentials & Secrets](dispatcher/README.md#credentials--secrets) section of the dispatcher README.
+  Quick start for S3:
+  ```bash
+  nextflow secrets set AWS_ACCESS_KEY_ID     your-access-key
+  nextflow secrets set AWS_SECRET_ACCESS_KEY your-secret-key
+  ```
 * To use gated HuggingFace models (e.g. UNI, Virchow), set the `HF_TOKEN` Nextflow secret:
   `nextflow secrets set HF_TOKEN <token>`
 * To use models from local paths instead of downloading, set `params.featurize.model_paths.{model_type}`.
@@ -506,32 +513,7 @@ make test MUSSEL_TEST_SLIDE=/path/to/other.svs
 
 ## Azure Batch support
 
-1. Create an Azure storage account and batch account.
-
-2. Modify the nextflow configuration files as necessary (see <https://www.nextflow.io/docs/edge/azure.html>)
-
-3. Set the necessary secrets using `nextflow secrets set`. At a minimum set `AZURE_BATCH_KEY` and `AZURE_STORAGE_KEY`.
-
-4. Launch nextflow:
-    ```
-    nextflow -Dcom.amazonaws.sdk.disableCertChecking=true run main.nf -bucket-dir {azure_bucket_dir} -profile docker,cloud
-    ```
-    where `{azure_bucket_dir}` is an azure path like `az://test/nftest`.
-
-5. When the execution completes, results will be in the `results` directory
-
-### Azure notes
-
-#### Disk management and unusable nodes
-
-The Azure Batch nodes have poor disk space management such that if you run a
-lot of jobs, they will inevitably run out of disk space, putting the node into
-the unusable state. One possible solution is to delete the unusable nodes
-which can be done automatically with a powershell script. A better solution is
-to mount Azure file shares with large files to the batch nodes using
-`params.azure.storage.fileShares`. It's a good idea to periodically run the
-powershell script either way as nodes end up in the unusable state for a variety of
-reasons and will linger (costing $) until deleted.
+See [Credentials & Secrets — Azure Batch](dispatcher/README.md#azure-batch) in the dispatcher documentation.
 
 ## Troubleshooting
 
@@ -547,20 +529,21 @@ Solution:
 When this occurs it means that a dependency has a version mismatch between what 
 was loaded into the pickle file and what Mussel is using. It is best to not use the 
 pickle file and instead use this Mussel 
-[feauture](https://github.com/pathology-data-mining/Mussel/blob/main/README-commands.md#save_model) 
+[feature](https://github.com/pathology-data-mining/Mussel/blob/main/README-commands.md#save_model) 
 to automatically download the models from huggingface.
 
 ### Cache filling up
 
-Error:
-
-On our on-prem machines, the uv and huggingface caches are by default set to user's home directory. 
-This mount fills up quickly so it is best to move this cache elsewhere.
+On many systems, the uv and HuggingFace caches default to the user's home directory, which
+may have limited quota on shared filesystems.
 
 Solution:
 
-Move the uv and huggingface cache directory to a different mount by setting the environment
-variables `UV_CACHE_DIR` and `HF_HOME`. 
+Move the caches to a larger mount by setting:
+```bash
+export UV_CACHE_DIR=/path/to/large/disk/.cache/uv
+export HF_HOME=/path/to/large/disk/.cache/huggingface
+```
 
 ### Conflicting Huggingface Downloads
 

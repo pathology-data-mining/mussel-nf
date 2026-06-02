@@ -9,11 +9,11 @@
 #   dispatch_dir  → batches/
 #   state_dir     → state/
 #   log_dir       → logs/
-work_base_dir: /gpfs/cdsi_ess/limr/nf/tcga-dispatch/work
+work_base_dir: /path/to/work
 
 nextflow_profiles: cluster,slurm,conda
 outdir: tcga-results
-#nextflow_config: tcga_nextflow.config
+# nextflow_config: custom.config        # optional: passed as -c to every nextflow run
 nextflow_params_file: ../tcga_params.yaml
 nextflow_version: "26.04.0"
 # dashboard_port: 8050      # dashboard HTTP port (default: 8050); auto-started by dispatcher
@@ -49,15 +49,14 @@ watchers:
     # Slide source — at least one of local_slides_dir or s3_base must be set.
     # Slides are resolved: local disk → S3 → needs_download (in that order).
     #local_slides_dir: /path/to/slides
-    s3_base: s3://pathology/TCGA
-    s3_endpoint: http://pmindecs.mskcc.org:9020
-    # s3_access_key: ...   # or set ECS_ACCESS_KEY env var
-    # s3_secret_key: ...   # or set ECS_SECRET_KEY env var
-    # secrets_env_file: /path/to/secrets.env  # shell env file with ECS_ACCESS_KEY / ECS_SECRET_KEY
-    secrets_env_file: /gpfs/mskmind_ess/limr/repos/Mussel-3/secrets.env
+    s3_base: s3://your-bucket/TCGA
+    # s3_endpoint: http://your-s3-compatible-endpoint:9000  # omit for standard AWS S3
+    # s3_access_key: ...   # or set AWS_ACCESS_KEY_ID env var
+    # s3_secret_key: ...   # or set AWS_SECRET_ACCESS_KEY env var
+    # secrets_env_file: /path/to/secrets.env  # shell env file with credentials
     nextflow_secrets:         # fallback: load from `nextflow secrets get` if not set above
-      - ECS_ACCESS_KEY
-      - ECS_SECRET_KEY
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
 
     # Optional: restrict to a single project or slide/sample type
     # project: TCGA-BRCA
@@ -90,10 +89,10 @@ watchers:
     # to MERGE it into the Delta table.
     # Credentials: resolved in order: DATABRICKS_HOST/TOKEN env vars → ~/.databrickscfg [DEFAULT].
     # See databricks/README.md for setup instructions (create volume, import notebook, create job).
-    databricks_volume_folder: /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
-    databricks_table: cdsi_prod.pathology_data_mining.tcga_slide_embeddings_v2
+    databricks_volume_folder: /Volumes/your_catalog/your_schema/tcga_dispatcher
+    databricks_table: your_catalog.your_schema.tcga_slide_embeddings
     # databricks_job_id: "12345"   # set to the job ID from: databricks jobs create --json @databricks/jobs/tcga_metadata_sync_job.json
-    databricks_job_id: "256343305142135"
+    # databricks_job_id: "12345"
 
 # Any explicit post_batch_hooks run after the auto-generated ones above.
 # post_batch_hooks: []

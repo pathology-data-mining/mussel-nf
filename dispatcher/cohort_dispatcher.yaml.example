@@ -8,23 +8,26 @@
 #   state_dir     → state/
 #   log_dir       → logs/
 # Override any of them by setting an absolute path below.
-work_base_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/work
-state_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/state
-log_dir: /gpfs/cdsi_ess/limr/nf/reef-dispatch/logs
+work_base_dir: /path/to/work
+#state_dir: /path/to/state
+#log_dir: /path/to/logs
 
 dashboard_port: 9050
 tower_proxy_port: 9049
 
 nextflow_profiles: cluster,slurm,conda
-outdir: reef-v2-results          # nextflow --outdir; manifest CSVs are written here
+outdir: results                  # nextflow --outdir; manifest CSVs are written here
 # nextflow_config: custom.config        # optional: passed as -c to every nextflow run
-nextflow_params_file: ../reef_v2_params.yaml # optional: passed as -params-file to every nextflow run
+# nextflow_params_file: ../my_params.yaml # optional: passed as -params-file to every nextflow run
 
-# S3/ECS credentials — inherited by all watchers
-s3_endpoint: http://pmindecs.mskcc.org:9020
+# S3 credentials — inherited by all watchers.
+# For standard AWS S3, leave s3_endpoint unset and configure credentials via
+# ~/.aws/credentials or environment variables (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY).
+# For S3-compatible storage (MinIO, Ceph, etc.), set s3_endpoint to the endpoint URL.
+# s3_endpoint: http://your-s3-compatible-endpoint:9000
 nextflow_secrets:
-  s3_access_key: ECS_ACCESS_KEY
-  s3_secret_key: ECS_SECRET_KEY
+  s3_access_key: YOUR_ACCESS_KEY
+  s3_secret_key: YOUR_SECRET_KEY
 
 # Parallelism
 max_concurrent_runs: 4
@@ -59,7 +62,7 @@ watchers:
     #stability_wait_seconds: 30   # seconds between two identical size+mtime polls
     #min_file_size_mb: 10         # skip files smaller than this
 
-  # Uncomment and edit to add an S3 (or on-prem ECS) watcher:
+  # Uncomment and edit to add an S3 watcher:
   # - type: s3
   #   bucket: my-bucket
   #   prefix: incoming/slides/
@@ -67,7 +70,7 @@ watchers:
   #   extensions: [.svs, .ndpi]
   #   min_file_size_bytes: 10000000
   #   # aws_profile: my-profile
-  #   # endpoint_url: http://pmindecs.mskcc.org:9020
+  #   # endpoint_url: http://your-s3-compatible-endpoint:9000  # omit for standard AWS S3
 
   # Uncomment to watch TCGA GDC for new slides.
   # See tcga_dispatcher.yaml for a fully annotated TCGA example.
@@ -95,29 +98,27 @@ watchers:
   #   # databricks_volume_path: /Volumes/catalog/schema/volume/tcga_inventory.parquet
   #   # databricks_job_id: "12345"   # optional
 
-  # Uncomment to watch a Databricks SQL warehouse for IMPACT slides.
+  # Uncomment to watch a Databricks SQL warehouse for slides.
+  # Supply a query that returns slide_id, slide_path, and oncotree_code.
   # Credentials come from DATABRICKS_HOST + DATABRICKS_TOKEN env vars
   # (or ~/.databrickscfg DEFAULT profile).
   # Requires: pip install databricks-sdk
   #
   - type: databricks
-    # warehouse_id: 0b49b7d78734ad5c    # auto-detected if omitted
+    warehouse_id: 0b49b7d78734ad5c
     poll_interval_seconds: 86400
-    # Query for slides. Three options (in priority order):
-    #   1. query_file: path to a .sql file (relative to this config file)
-    #   2. query: inline SQL string
-    #   3. built-in template (impact_matched_slides JOIN slide_inventory) with optional filters:
-    #      source_filter: [ECS2]         # limit to slide_inventory.source values
-    #      additional_where: "m.IS_HNE = 1"
-    query_file: queries/impact_slides_default.sql
+    # Provide a SQL query via query_file or inline query string.
+    # The query must return: slide_id, slide_path, oncotree_code
+    query_file: queries/my_slides.sql
+    # query: "SELECT slide_id, slide_path, oncotree_code FROM catalog.schema.slides"
   #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
   #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).
     wds_destinations:
-      hoptimus1: s3://reef-v2-0/wds
-      titan_slide: s3://reef-v2-0/wds
+      hoptimus1: s3://your-bucket/wds
+      titan_slide: s3://your-bucket/wds
   #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
     # Sync results back to Databricks after each batch.
     # Volume folder and warehouse MERGE are auto-configured from the table name
     # and the auto-detected warehouse — no job_id or warehouse_id required.
-    databricks_table: cdsi_prod.pathology_data_mining.slide_embeddings_v2
+    databricks_table: your_catalog.your_schema.slide_embeddings_v2

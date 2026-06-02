@@ -50,7 +50,7 @@ Watchers run in background threads and push slides onto a shared queue.
 | `local` | Directory on disk — polls for new `.svs`/`.tiff` files |
 | `s3` | S3-compatible bucket — polls for new objects by prefix |
 | `tcga` | GDC API — syncs inventory, resolves paths, downloads missing slides |
-| `databricks` | Databricks SQL warehouse — queries IMPACT-matched slide inventory |
+| `databricks` | Databricks SQL warehouse — polls for slides via a user-supplied SQL query |
 
 Multiple watchers can run simultaneously (e.g., local + tcga).
 
@@ -74,12 +74,14 @@ On every poll cycle (`poll_interval_seconds`, default 3600 s):
 
 **Key throughput property:** downloads for batch N+1 overlap with featurization of batch N, and up to `max_concurrent_runs` Nextflow jobs run simultaneously.
 
-#### DatabricksWatcher (MSK IMPACT slides)
+#### DatabricksWatcher (Databricks SQL warehouse)
 
-Queries a Databricks SQL warehouse to discover slides from the MSK IMPACT-matched cohort. On every poll cycle (`poll_interval_seconds`, default 86400 s = 1 day, since IMPACT tables update infrequently):
+Queries a Databricks SQL warehouse to discover slides using a user-supplied SQL query. On every poll cycle (`poll_interval_seconds`, default 86400 s = 1 day):
 
-1. **Query warehouse** — executes a SQL join of `impact_matched_slides` and `slide_inventory` to retrieve `(slide_id, slide_path, oncotree_code)` tuples for all slides with a valid S3 path.
+1. **Query warehouse** — executes the configured SQL query to retrieve `(slide_id, slide_path, oncotree_code)` tuples.
 2. **Enqueue new slides** — slides not already in the StateStore are added and pushed to the dispatch queue. Already-known slides are skipped.
+
+The query must return at least three columns: `slide_id`, `slide_path`, and `oncotree_code`. Supply the SQL via `query_file` (a `.sql` file) or `query` (inline YAML string).
 
 Credentials are resolved by the Databricks SDK in priority order:
 1. `DATABRICKS_HOST` + `DATABRICKS_TOKEN` environment variables
@@ -195,13 +197,14 @@ The config is a YAML file. See [`tcga_dispatcher.yaml`](tcga_dispatcher.yaml) fo
 | Field | Default | Description |
 |---|---|---|
 | `warehouse_id` | required | Databricks SQL warehouse ID to run queries against |
-| `source_filter` | `[]` | List of `slide_inventory.source` values to include (e.g. `['ECS2']`); empty = all |
-| `additional_where` | `""` | Extra SQL `WHERE` clause appended with `AND` |
-| `min_file_size_mb` | `10.0` | Skip slides smaller than this (MB) |
-| `poll_interval_seconds` | `86400` | How often to poll (default 1 day — IMPACT tables update infrequently) |
+| `query_file` | `""` | Path to a `.sql` file whose query returns `slide_id`, `slide_path`, `oncotree_code` |
+| `query` | `""` | Inline SQL string (alternative to `query_file`; `query` takes priority) |
+| `poll_interval_seconds` | `86400` | How often to poll (default 1 day) |
 | `wds_destinations` | `{}` | `{model: s3_or_local_path}` — auto-generates `append_wds` post-batch hook per model |
 | `wds_staging_dir` | `""` | Local staging dir for S3 WDS destinations |
 | `wds_s3_max_concurrency` | `4` | Boto3 multipart upload threads per S3 write |
+
+At least one of `query_file` or `query` is required. The query must return columns `slide_id`, `slide_path`, and `oncotree_code`.
 
 **Requires:** `pip install databricks-sdk`
 
@@ -211,13 +214,108 @@ The config is a YAML file. See [`tcga_dispatcher.yaml`](tcga_dispatcher.yaml) fo
 watchers:
   - type: databricks
     warehouse_id: abc123def456
-    source_filter: [ECS2]
-    min_file_size_mb: 50
+    query_file: queries/my_slides.sql   # must return slide_id, slide_path, oncotree_code
     poll_interval_seconds: 86400
     wds_destinations:
       hoptimus1: s3://my-bucket/wds/hoptimus1
     wds_staging_dir: /data/wds-staging
 ```
+
+## Credentials & Secrets
+
+S3 credentials must be provided to both the **dispatcher** (for its boto3 S3 watcher / WDS push operations) and to **Nextflow itself** (for pipeline tasks that read/write S3). These are configured independently.
+
+### Nextflow secrets (recommended)
+
+Nextflow has a built-in encrypted secret store (`~/.nextflow/secrets/`). The dispatcher can read from it — set credentials once and both the dispatcher and the pipeline will use them.
+
+```bash
+nextflow secrets set AWS_ACCESS_KEY_ID     your-access-key
+nextflow secrets set AWS_SECRET_ACCESS_KEY your-secret-key
+```
+
+Then reference them in the dispatcher YAML:
+
+```yaml
+nextflow_secrets:
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+```
+
+The dispatcher maps these to its `s3_access_key`/`s3_secret_key` fields automatically. Nextflow uses them directly via `secrets.AWS_ACCESS_KEY_ID` in `nextflow.config`.
+
+If your S3-compatible endpoint requires a custom URL, also add it to the watcher config:
+
+```yaml
+watchers:
+  - type: tcga
+    s3_endpoint: https://your-s3-compatible-endpoint:9000
+    # s3_access_key / s3_secret_key not needed — loaded from nextflow_secrets above
+```
+
+### Shell env file (alternative)
+
+Create a plain env file (do **not** commit it):
+
+```bash
+# secrets.env
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+```
+
+Reference it in the dispatcher YAML:
+
+```yaml
+secrets_env_file: /path/to/secrets.env
+```
+
+### Standard AWS credential chain
+
+For real AWS S3 (no custom endpoint), no dispatcher config is needed if credentials are already available via the [standard AWS chain](https://docs.aws.amazon.com/sdkref/latest/guide/standardized-credentials.html): `~/.aws/credentials`, instance profile, or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` environment variables.
+
+You still need to set the Nextflow secrets so the pipeline can authenticate:
+
+```bash
+nextflow secrets set AWS_ACCESS_KEY_ID     your-access-key
+nextflow secrets set AWS_SECRET_ACCESS_KEY your-secret-key
+```
+
+### HuggingFace gated models
+
+```bash
+nextflow secrets set HF_TOKEN your-hf-token
+```
+
+### Azure Batch
+
+1. Create an Azure storage account and batch account.
+
+2. Modify the Nextflow configuration files as necessary (see <https://www.nextflow.io/docs/latest/azure.html>).
+
+3. Set the required secrets:
+   ```bash
+   nextflow secrets set AZURE_STORAGE_KEY your-storage-key
+   nextflow secrets set AZURE_BATCH_KEY   your-batch-key
+   ```
+
+4. Launch Nextflow:
+   ```bash
+   nextflow run main.nf -bucket-dir az://your-container/nfwork -profile docker,cloud
+   ```
+
+#### Disk management and unusable nodes
+
+Azure Batch nodes have poor disk space management — after many jobs they can run out of disk
+and enter an unusable state. Options:
+
+- Delete unusable nodes automatically with a PowerShell script.
+- Mount Azure File Shares for large files via `params.azure.storage.fileShares` to avoid local
+  disk pressure.
+
+It's a good idea to run the cleanup script periodically regardless, as nodes can end up unusable
+for various reasons and will linger (costing money) until deleted.
+
+---
 
 ## Slide Path Resolution
 
@@ -232,7 +330,7 @@ The dispatcher uses this to enqueue ready slides immediately and, if `download_e
 ## Running Tests
 
 ```bash
-python -m pytest dispatcher/test_dispatcher.py -v
+python -m pytest dispatcher/tests/test_dispatcher.py -v
 ```
 
 Tests cover: StateStore CRUD + lifecycle, BatchScheduler triggers, RunManager concurrency, crash recovery, TcgaWatcher enqueue/download/skip logic, and post_batch_hooks template substitution.

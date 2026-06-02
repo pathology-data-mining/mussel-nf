@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "mussel-nf"
+abstract: "Nextflow pipeline for whole-slide image tessellation and deep learning feature extraction using the Mussel library."
+authors:
+  - family-names: Lim
+    given-names: Raymond
+    affiliation: "Memorial Sloan Kettering Cancer Center"
+repository-code: "https://github.com/pathology-data-mining/mussel-nf"
+url: "https://github.com/pathology-data-mining/mussel-nf"
+license: GPL-3.0
+date-released: "2024-06-05"
+keywords:
+  - nextflow
+  - computational pathology
+  - digital pathology
+  - whole-slide imaging
+  - deep learning
+  - feature extraction

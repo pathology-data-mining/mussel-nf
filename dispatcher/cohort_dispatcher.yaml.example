@@ -16,9 +16,9 @@ dashboard_port: 9050
 tower_proxy_port: 9049
 
 nextflow_profiles: cluster,slurm,conda
-outdir: reef-v2-results          # nextflow --outdir; manifest CSVs are written here
+outdir: results                  # nextflow --outdir; manifest CSVs are written here
 # nextflow_config: custom.config        # optional: passed as -c to every nextflow run
-nextflow_params_file: ../reef_v2_params.yaml # optional: passed as -params-file to every nextflow run
+# nextflow_params_file: ../my_params.yaml # optional: passed as -params-file to every nextflow run
 
 # S3 credentials — inherited by all watchers.
 # For standard AWS S3, leave s3_endpoint unset and configure credentials via

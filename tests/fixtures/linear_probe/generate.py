@@ -1,8 +1,9 @@
 """Generate synthetic fixtures for the linear probe integration test."""
 import os, h5py, numpy as np, yaml
+from pathlib import Path
 from PIL import Image
 
-OUT = "/gpfs/mskmind_ess/limr/repos/mussel-nf/tests/fixtures/linear_probe"
+OUT = str(Path(__file__).parent)
 os.makedirs(OUT, exist_ok=True)
 
 N_SLIDES   = 20   # enough for stratified train/val/test with 2 classes

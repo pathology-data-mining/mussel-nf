@@ -1,19 +1,17 @@
 # Databricks notebook: metadata_sync
 # ---------------------------------------------------------------------------
-# Shared parameterized notebook for syncing slide inventory Parquet files
-# (TCGA or IMPACT) into a Delta table via MERGE.
+# Parameterized notebook for syncing slide inventory Parquet files into a
+# Delta table via MERGE.
 #
-# Replaces the TCGA-specific tcga_metadata_sync notebook.  Parameterized
-# via Databricks widgets so the same logic handles both datasets.
+# One row per (merge_key, model) — the merge_key column (e.g. slide_id or a
+# dataset-specific UUID) is the primary identifier.
 #
-# One row per (merge_key, model) — the merge_key column (e.g. file_id for
-# TCGA, slide_id for IMPACT) is the primary identifier.
-#
-# Expected to be triggered by the dispatcher sync scripts after each batch.
+# Expected to be triggered by the dispatcher sync scripts after each batch,
+# or run manually via Databricks widgets.
 #
 # Parameters (Databricks job widgets / task values):
 #   volume_folder     UC volume folder containing Parquet files
-#                     e.g. /Volumes/cdsi_prod/pathology_data_mining/tcga_dispatcher
+#                     e.g. /Volumes/your_catalog/your_schema/mussel_dispatcher
 #   target_table      Delta table to MERGE INTO
 #   merge_key         Column used as the row identifier in the MERGE condition
 #                     default: "slide_id"
@@ -39,12 +37,12 @@ from datetime import datetime, timezone
 
 dbutils.widgets.text(  # noqa: F821
     "volume_folder",
-    "/Volumes/cdsi_prod/pathology_data_mining/dispatcher",
+    "/Volumes/your_catalog/your_schema/dispatcher",
     "UC volume folder (Parquet files)",
 )
 dbutils.widgets.text(  # noqa: F821
     "target_table",
-    "cdsi_prod.pathology_data_mining.slide_embeddings",
+    "your_catalog.your_schema.slide_embeddings",
     "Target Delta table",
 )
 dbutils.widgets.text(  # noqa: F821
@@ -153,7 +151,29 @@ source_df.createOrReplaceTempView("_metadata_source")
 # When matched:            update all columns
 # When not matched:        insert new row
 # When not matched by src: delete (removes rows no longer in the export)
+#
+# UPDATE SET * / INSERT * break when the target has columns not present in
+# the source Parquet (e.g. a column added directly to the table later).
+# Build explicit SET and INSERT clauses from the intersection of source and
+# target columns so target-only columns are preserved on UPDATE and NULL on
+# INSERT.
 # ---------------------------------------------------------------------------
+
+source_col_set = set(source_df.columns)
+target_col_set = {
+    row["col_name"]
+    for row in spark.sql(f"DESCRIBE TABLE {target_table}").collect()  # noqa: F821
+    if not row["col_name"].startswith("#")
+}
+common_cols  = sorted(source_col_set & target_col_set)
+extra_target = sorted(target_col_set - source_col_set)
+
+if extra_target:
+    print(f"Target-only columns (preserved on UPDATE, NULL on INSERT): {extra_target}")
+
+update_set  = ",\n    ".join(f"target.{c} = source.{c}" for c in common_cols)
+insert_cols = ", ".join(common_cols + extra_target)
+insert_vals = ", ".join([f"source.{c}" for c in common_cols] + ["NULL"] * len(extra_target))
 
 merge_sql = f"""
 MERGE INTO {target_table} AS target
@@ -161,9 +181,11 @@ USING _metadata_source AS source
 ON target.{merge_key} = source.{merge_key}
    AND target.model = source.model
 WHEN MATCHED THEN
-    UPDATE SET *
+    UPDATE SET
+    {update_set}
 WHEN NOT MATCHED THEN
-    INSERT *
+    INSERT ({insert_cols})
+    VALUES ({insert_vals})
 WHEN NOT MATCHED BY SOURCE THEN
     DELETE
 """

@@ -697,7 +697,7 @@ class TestAppendWds:
             max_shard_bytes=500 * 1024 * 1024,
         )
 
-        assert set(index.keys()) == {
+        assert set(index.keys()) - {"_stats"} == {
             "TCGA-BR-A44T-01Z-00-DX1", "TCGA-BR-A44U-01Z-00-DX1", "TCGA-LU-A5YX-01Z-00-DX1"
         }
         assert index["TCGA-BR-A44T-01Z-00-DX1"]["project_id"] == "TCGA-BRCA"
@@ -790,7 +790,7 @@ class TestAppendWds:
         index1 = append_wds(**kwargs)
         index2 = append_wds(**kwargs)
 
-        assert len(index2) == len(index1) == 3
+        assert len(index2) - 1 == len(index1) - 1 == 3  # -1 for _stats key
 
 
 # ---------------------------------------------------------------------------
@@ -1018,7 +1018,7 @@ class TestEndToEnd:
             max_shard_bytes=500 * 1024 * 1024,
         )
 
-        assert len(index) == 2
+        assert len(index) - 1 == 2  # -1 for _stats key
         assert Path(wds_dest, model, "wds_index.json").exists()
         # Each completed slide lands in its correct cancer-type shard
         assert index["TCGA-BR-A44T-01Z-00-DX1"]["project_id"] == "TCGA-BRCA"

@@ -32,7 +32,7 @@ filter_workflow.yaml
 *_params.yaml
 dispatcher/tcga_dispatcher.yaml
 dispatcher/reef_v2_dispatcher.yaml
-dispatcher/tcga_nextflow.config
+dispatcher/cohort_dispatcher.yaml
 
 # Dispatcher runtime state / outputs
 dispatcher/*.db
@@ -40,9 +40,25 @@ dispatcher/batches/
 dispatcher/state/
 dispatcher/logs/
 dispatcher/reef-v2-results/
+dispatcher/results/
 dispatcher/tcga-results/
 dispatcher/tcga-downloads/
+dispatcher/tcga_failed_slides.csv
+dispatcher/tcga_inventory.csv
+dispatcher/tcga_status*.csv
 
 # PID files
 .*.pid
 dispatcher/.*.pid
+
+# Model weight files
+*.pkl
+*.sif
+
+# Local working data files
+*.db
+*.jsonl
+tcga_inventory.csv
+tcga_status*.csv
+tcga-slides/
+tcga-slides.txt

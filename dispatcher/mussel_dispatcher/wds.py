@@ -34,7 +34,7 @@ Usage
         --wds-dest /data/wds \\
         --model-type ctranspath
 
-    # Route by column in batch CSV (e.g. oncotree_code from IMPACT dispatcher)
+    # Route by column in batch CSV (e.g. oncotree_code from Databricks watcher)
     python -m mussel_dispatcher.wds \\
         --pt-dir /data/results/features/ctranspath/pt \\
         --slide-ids-csv batch.csv \\
@@ -680,7 +680,7 @@ def main(argv: list[str] | None = None) -> int:
                              "upload/download (default: 4). Reduce to limit ECS endpoint load "
                              "when multiple batches are running concurrently.")
     parser.add_argument("--s3-endpoint", default=None,
-                        help="Custom S3 endpoint URL (e.g. http://pmindecs.mskcc.org:9020 for "
+                        help="Custom S3 endpoint URL (e.g. http://your-s3-endpoint:9020 for "
                              "ECS). Falls back to S3_ENDPOINT_URL / ECS_ENDPOINT_URL env vars.")
     parser.add_argument("--s3-access-key", default=None,
                         help="S3 access key ID. Falls back to ECS_ACCESS_KEY env var.")

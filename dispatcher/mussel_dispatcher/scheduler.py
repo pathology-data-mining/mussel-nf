@@ -218,6 +218,9 @@ class BatchScheduler:
     # node failures) get re-queued without requiring a dispatcher restart.
     _RETRY_FAILED_INTERVAL = 600  # seconds (10 minutes)
 
+    # How often to check for stuck (hung) NF processes.
+    _WATCHDOG_INTERVAL = 600  # seconds (10 minutes)
+
     def run(self):
         """Scheduler loop — call in the main thread."""
         log.info("BatchScheduler started (batch_size=%d, max_wait=%ds)",
@@ -225,6 +228,7 @@ class BatchScheduler:
         _last_db_sweep = time.monotonic()
         _last_retry_failed = time.monotonic()
         _last_eta_log = time.monotonic()
+        _last_watchdog = time.monotonic()
         _ETA_LOG_INTERVAL = 1800  # log ETA every 30 minutes
         while not self.stop_event.is_set():
             self._maybe_dispatch()
@@ -238,6 +242,9 @@ class BatchScheduler:
             if now - _last_eta_log >= _ETA_LOG_INTERVAL:
                 _last_eta_log = now
                 self._log_eta()
+            if now - _last_watchdog >= self._WATCHDOG_INTERVAL:
+                _last_watchdog = now
+                self._watchdog_stuck_batches()
             self.stop_event.wait(5)
         # Do NOT force-dispatch on shutdown — pending slides stay in the DB
         # and will be recovered on next startup.
@@ -307,6 +314,47 @@ class BatchScheduler:
         if n:
             log.info("BatchScheduler: reset %d FAILED slide(s) to PENDING (periodic retry sweep)", n)
             self._requeue_db_pending()
+
+    def _watchdog_stuck_batches(self):
+        """Kill NF processes whose log file has not been updated recently.
+
+        A Nextflow process can silently hang — all SLURM tasks finish and write
+        their .exitcode files, but NF's monitoring thread never polls the result,
+        so the batch stays RUNNING forever.  The log file is updated on every NF
+        progress tick, so a stale mtime reliably signals a hung process.
+
+        When a stuck batch is detected its NF process is killed (SIGTERM then
+        SIGKILL).  The RunManager's _on_done callback fires, marks the batch
+        FAILED, and the periodic retry sweep resets slides to PENDING for
+        re-dispatch.
+
+        Controlled by ``stuck_batch_timeout_hours`` in the dispatcher config
+        (default 4 h).  Set to 0 to disable.
+        """
+        timeout_hours = self.cfg.stuck_batch_timeout_hours
+        if not timeout_hours:
+            return
+        cutoff = time.time() - timeout_hours * 3600
+        for batch in self.state.get_running_batches():
+            batch_id = batch["batch_id"]
+            nf_pid = batch.get("nf_pid")
+            if not nf_pid:
+                continue
+            log_path = os.path.join(self.cfg.log_dir, f"batch_{batch_id}.log")
+            try:
+                mtime = os.path.getmtime(log_path)
+            except OSError:
+                continue
+            if mtime < cutoff:
+                idle_hours = (time.time() - mtime) / 3600
+                log.warning(
+                    "Batch %s: log file silent for %.1fh (last update %s) — "
+                    "killing stuck NF process PID=%d",
+                    batch_id, idle_hours,
+                    datetime.fromtimestamp(mtime).strftime("%H:%M:%S"),
+                    nf_pid,
+                )
+                _kill_orphaned_nf(batch_id, nf_pid)
 
     def _maybe_dispatch(self, force: bool = False):
         with self._lock:

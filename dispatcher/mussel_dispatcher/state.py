@@ -402,7 +402,7 @@ class StateStore:
 
     def get_finished_batches_with_work_dirs(self) -> list:
         rows = self._conn().execute(
-            "SELECT batch_id, work_dir FROM batches WHERE status IN ('SUCCEEDED','FAILED') AND work_dir IS NOT NULL"
+            "SELECT batch_id, work_dir, status FROM batches WHERE status IN ('SUCCEEDED','FAILED') AND work_dir IS NOT NULL"
         ).fetchall()
         return [dict(r) for r in rows]
 

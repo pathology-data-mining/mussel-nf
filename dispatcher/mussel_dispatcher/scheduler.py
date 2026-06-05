@@ -221,6 +221,11 @@ class BatchScheduler:
     # How often to check for stuck (hung) NF processes.
     _WATCHDOG_INTERVAL = 600  # seconds (10 minutes)
 
+    # How often to sweep for orphaned work dirs from FAILED batches.
+    # Catches dirs left behind when the dispatcher was SIGKILL'd before
+    # _cleanup() could run (e.g. during restart churn).
+    _FAILED_WORKDIR_CLEANUP_INTERVAL = 3600  # seconds (1 hour)
+
     def run(self):
         """Scheduler loop — call in the main thread."""
         log.info("BatchScheduler started (batch_size=%d, max_wait=%ds)",
@@ -229,6 +234,7 @@ class BatchScheduler:
         _last_retry_failed = time.monotonic()
         _last_eta_log = time.monotonic()
         _last_watchdog = time.monotonic()
+        _last_failed_workdir_cleanup = time.monotonic()
         _ETA_LOG_INTERVAL = 1800  # log ETA every 30 minutes
         while not self.stop_event.is_set():
             self._maybe_dispatch()
@@ -245,6 +251,10 @@ class BatchScheduler:
             if now - _last_watchdog >= self._WATCHDOG_INTERVAL:
                 _last_watchdog = now
                 self._watchdog_stuck_batches()
+            if now - _last_failed_workdir_cleanup >= self._FAILED_WORKDIR_CLEANUP_INTERVAL:
+                _last_failed_workdir_cleanup = now
+                if self.cfg.cleanup_work_dir:
+                    self._cleanup_failed_work_dirs()
             self.stop_event.wait(5)
         # Do NOT force-dispatch on shutdown — pending slides stay in the DB
         # and will be recovered on next startup.
@@ -355,6 +365,40 @@ class BatchScheduler:
                     nf_pid,
                 )
                 _kill_orphaned_nf(batch_id, nf_pid)
+
+    def _cleanup_failed_work_dirs(self):
+        """Periodically remove orphaned work dirs for FAILED batches.
+
+        When the dispatcher is SIGKILL'd during active runs, the runner threads
+        never reach _cleanup(), leaving work dirs on disk indefinitely.  This
+        sweep catches those orphans once per hour.  Runs in a background daemon
+        thread to avoid blocking the scheduler loop on slow GPFS deletes.
+        """
+        import shutil
+        import threading as _threading
+
+        finished = self.state.get_finished_batches_with_work_dirs()
+        failed = [b for b in finished if b.get("status") == "FAILED"]
+        if not failed:
+            return
+
+        def _bg():
+            removed = 0
+            for batch in failed:
+                work_dir = batch.get("work_dir")
+                if work_dir and os.path.isdir(work_dir):
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    try:
+                        os.rmdir(os.path.dirname(work_dir))
+                    except OSError:
+                        pass
+                    removed += 1
+            if removed:
+                log.info("Periodic cleanup: removed %d orphaned work dir(s) for FAILED batches",
+                         removed)
+
+        t = _threading.Thread(target=_bg, name="failed-workdir-cleanup", daemon=True)
+        t.start()
 
     def _maybe_dispatch(self, force: bool = False):
         # Don't submit a new batch if we're already at the concurrency limit.

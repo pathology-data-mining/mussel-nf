@@ -37,7 +37,7 @@ stuck_batch_timeout_hours: 4.0  # kill NF process if log silent for this long (w
 
 # Behaviour
 retry_failed: true       # re-queue slides whose batch failed on restart
-cleanup_work_dir: false
+cleanup_work_dir: true
 cleanup_results: true    # delete local .pt files after WDS push to S3 (required for large runs — ~103 MB/slide)
 
 # Optional: run extra commands after each successful Nextflow batch.

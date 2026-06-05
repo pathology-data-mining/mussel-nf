@@ -507,20 +507,28 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
     Returns a list of (batch_id, csv_path, work_dir) tuples to be submitted as resume runs.
     """
     import shutil
+    import threading
 
     # Purge orphaned work dirs for batches that are already SUCCEEDED or FAILED.
     # These are left behind when _cleanup's rmtree runs while NF is still writing to the dir.
+    # Run in a background daemon thread so that a slow rmtree on GPFS does not block startup.
     if cleanup_work_dir:
-        for batch in state.get_finished_batches_with_work_dirs():
-            work_dir = batch.get("work_dir")
-            if work_dir and os.path.isdir(work_dir):
-                log.info("Startup cleanup: removing orphaned work dir for finished batch %s: %s",
-                         batch["batch_id"], work_dir)
-                shutil.rmtree(work_dir, ignore_errors=True)
-                try:
-                    os.rmdir(os.path.dirname(work_dir))
-                except OSError:
-                    pass
+        finished = state.get_finished_batches_with_work_dirs()
+        if finished:
+            def _bg_cleanup():
+                for batch in finished:
+                    work_dir = batch.get("work_dir")
+                    if work_dir and os.path.isdir(work_dir):
+                        log.info("Startup cleanup: removing orphaned work dir for finished batch %s: %s",
+                                 batch["batch_id"], work_dir)
+                        shutil.rmtree(work_dir, ignore_errors=True)
+                        try:
+                            os.rmdir(os.path.dirname(work_dir))
+                        except OSError:
+                            pass
+                log.info("Startup cleanup: finished removing %d orphaned work dir(s)", len(finished))
+            t = threading.Thread(target=_bg_cleanup, name="startup-cleanup", daemon=True)
+            t.start()
 
     resume_specs = []
     running = state.get_running_batches()

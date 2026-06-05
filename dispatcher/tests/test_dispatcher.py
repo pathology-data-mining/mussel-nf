@@ -1258,6 +1258,77 @@ class TestNfRunNameValidation:
 
 
 # ---------------------------------------------------------------------------
+# recover_in_flight startup cleanup (background thread)
+# ---------------------------------------------------------------------------
+
+class TestStartupCleanupNonBlocking:
+    """Startup work-dir cleanup runs in a background thread, not blocking startup."""
+
+    def _make_store_with_finished_batch(self, tmp_path):
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("/slides/a.svs", "a")
+        work_dir = tmp_path / "batch-fin" / "work"
+        work_dir.mkdir(parents=True)
+        (work_dir / "somefile.h5").write_bytes(b"data")
+        csv = tmp_path / "batch-fin.csv"
+        csv.write_text("slide_id,slide_path\na,/slides/a.svs\n")
+        store.add_batch("batch-fin", str(csv), str(work_dir), 1, "/logs/fin.log")
+        store.mark_dispatched(["/slides/a.svs"], "batch-fin")
+        store.complete_batch("batch-fin", exit_code=0)
+        store.mark_slides_complete("batch-fin", succeeded=True)
+        return store, work_dir
+
+    def test_cleanup_disabled_leaves_work_dir(self, tmp_path):
+        """cleanup_work_dir=False leaves orphaned work dirs untouched."""
+        store, work_dir = self._make_store_with_finished_batch(tmp_path)
+        pending = deque()
+        recover_in_flight(store, pending, cleanup_work_dir=False)
+        time.sleep(0.2)
+        assert work_dir.exists()
+
+    def test_cleanup_enabled_removes_work_dir(self, tmp_path):
+        """cleanup_work_dir=True removes orphaned work dirs (via background thread)."""
+        store, work_dir = self._make_store_with_finished_batch(tmp_path)
+        pending = deque()
+        recover_in_flight(store, pending, cleanup_work_dir=True)
+        # Background thread — give it time to finish
+        deadline = time.monotonic() + 5.0
+        while work_dir.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not work_dir.exists(), "work dir should have been deleted by background cleanup"
+
+    def test_cleanup_does_not_block_startup(self, tmp_path):
+        """recover_in_flight returns quickly even when cleanup work is slow."""
+        store, work_dir = self._make_store_with_finished_batch(tmp_path)
+        # Add many dummy files to simulate a large work dir
+        for i in range(200):
+            (work_dir / f"file_{i}.h5").write_bytes(b"x" * 1024)
+        pending = deque()
+        start = time.monotonic()
+        recover_in_flight(store, pending, cleanup_work_dir=True)
+        elapsed = time.monotonic() - start
+        # Should return in well under 1 second even with 200 files to delete
+        assert elapsed < 1.0, f"recover_in_flight blocked for {elapsed:.2f}s"
+
+    def test_running_batches_not_cleaned_up(self, tmp_path):
+        """RUNNING batch work dirs are not touched — only SUCCEEDED/FAILED."""
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("/slides/b.svs", "b")
+        work_dir = tmp_path / "batch-run" / "work"
+        work_dir.mkdir(parents=True)
+        (work_dir / "data.h5").write_bytes(b"data")
+        csv = tmp_path / "batch-run.csv"
+        csv.write_text("slide_id,slide_path\nb,/slides/b.svs\n")
+        store.add_batch("batch-run", str(csv), str(work_dir), 1, "/logs/run.log")
+        store.mark_dispatched(["/slides/b.svs"], "batch-run")
+        # Batch stays RUNNING — do NOT call complete_batch
+        pending = deque()
+        recover_in_flight(store, pending, cleanup_work_dir=True)
+        time.sleep(0.2)
+        assert work_dir.exists(), "RUNNING batch work dir must not be deleted at startup"
+
+
+# ---------------------------------------------------------------------------
 # TcgaWatcher tests
 # ---------------------------------------------------------------------------
 

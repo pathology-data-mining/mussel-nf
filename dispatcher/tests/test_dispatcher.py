@@ -731,6 +731,21 @@ class TestWatchdogStuckBatches:
         scheduler._watchdog_stuck_batches()
         assert killed == []
 
+    def test_disabled_when_timeout_negative(self, tmp_path, monkeypatch):
+        """A negative timeout_hours is treated as disabled — no batches killed."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=-1.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "abc123", "nf_pid": 9999}
+        ]
+        self._write_log(tmp_path, "abc123", age_seconds=999_999)
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
     def test_no_running_batches_does_nothing(self, tmp_path, monkeypatch):
         """Watchdog is a no-op when there are no RUNNING batches."""
         scheduler = self._make_scheduler(tmp_path)
@@ -787,6 +802,25 @@ class TestWatchdogStuckBatches:
         )
         scheduler._watchdog_stuck_batches()
         assert killed == []
+
+    def test_uses_stored_log_path_from_db(self, tmp_path, monkeypatch):
+        """Watchdog uses log_path from the DB row, not a reconstructed path."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        custom_log = tmp_path / "custom" / "run.log"
+        custom_log.parent.mkdir()
+        custom_log.write_text("NF progress\n")
+        mtime = time.time() - 5 * 3600  # 5h old — stuck
+        os.utime(custom_log, (mtime, mtime))
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "custom01", "nf_pid": 1234, "log_path": str(custom_log)}
+        ]
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == [1234]
 
     def test_batch_without_pid_skipped(self, tmp_path, monkeypatch):
         """A RUNNING batch with no nf_pid recorded is skipped (can't kill)."""

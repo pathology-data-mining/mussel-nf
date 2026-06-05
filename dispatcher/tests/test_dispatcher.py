@@ -562,14 +562,17 @@ class TestCollectManifests:
 # ===========================================================================
 
 class TestBatchScheduler:
-    def _make_scheduler(self, batch_size=3, min_batch_size=1, max_wait_seconds=9_999):
+    def _make_scheduler(self, batch_size=3, min_batch_size=1, max_wait_seconds=9_999,
+                        max_concurrent_runs=2):
         cfg = make_config(
             batch_size=batch_size,
             min_batch_size=min_batch_size,
             max_wait_seconds=max_wait_seconds,
+            max_concurrent_runs=max_concurrent_runs,
         )
         run_manager = MagicMock()
         run_manager.in_flight_slide_ids = set()
+        run_manager.running_count.return_value = 0
         scheduler = BatchScheduler(cfg, MagicMock(), run_manager, threading.Event())
         return scheduler, run_manager
 
@@ -688,6 +691,75 @@ class TestBatchScheduler:
         # Only "y" should be enqueued; "x" is in-flight
         assert len(scheduler._pending) == 1
         assert scheduler._pending[0]["slide_id"] == "y"
+
+
+# ===========================================================================
+# BatchScheduler._maybe_dispatch concurrency guard
+# ===========================================================================
+
+class TestBatchSchedulerConcurrencyGuard:
+    """_maybe_dispatch must not submit when already at max_concurrent_runs."""
+
+    def _make_scheduler(self, max_concurrent_runs=2, batch_size=1):
+        cfg = make_config(
+            batch_size=batch_size,
+            min_batch_size=1,
+            max_wait_seconds=0,
+            max_concurrent_runs=max_concurrent_runs,
+        )
+        run_manager = MagicMock()
+        run_manager.in_flight_slide_ids = set()
+        run_manager.running_count.return_value = 0
+        scheduler = BatchScheduler(cfg, MagicMock(), run_manager, threading.Event())
+        return scheduler, run_manager
+
+    def _slide(self, name):
+        return {"slide_path": f"/slides/{name}.svs", "slide_id": name}
+
+    def test_dispatches_when_below_limit(self):
+        """Submits when running_count < max_concurrent_runs."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
+        run_manager.running_count.return_value = 1  # 1 of 2 slots used
+        scheduler.enqueue(self._slide("a"))
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_called_once()
+
+    def test_no_dispatch_when_at_limit(self):
+        """Does not submit when running_count == max_concurrent_runs."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
+        run_manager.running_count.return_value = 2  # at limit
+        scheduler.enqueue(self._slide("a"))
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_not_called()
+
+    def test_no_dispatch_when_above_limit(self):
+        """Does not submit when running_count > max_concurrent_runs (e.g. after restart recovery)."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=3)
+        run_manager.running_count.return_value = 4  # over limit (race from previous run)
+        scheduler.enqueue(self._slide("a"))
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_not_called()
+
+    def test_slides_remain_in_queue_when_blocked(self):
+        """Slides are NOT dequeued when the concurrency guard fires."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
+        run_manager.running_count.return_value = 2
+        scheduler.enqueue(self._slide("a"))
+        scheduler.enqueue(self._slide("b"))
+        scheduler._maybe_dispatch()
+        assert len(scheduler._pending) == 2  # slides stay in queue
+
+    def test_dispatches_once_slot_frees(self):
+        """After a slot frees (running_count drops), dispatch proceeds normally."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
+        run_manager.running_count.return_value = 2
+        scheduler.enqueue(self._slide("a"))
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_not_called()
+
+        run_manager.running_count.return_value = 1  # slot freed
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_called_once()
 
 
 # ===========================================================================

@@ -357,6 +357,12 @@ class BatchScheduler:
                 _kill_orphaned_nf(batch_id, nf_pid)
 
     def _maybe_dispatch(self, force: bool = False):
+        # Don't submit a new batch if we're already at the concurrency limit.
+        # ThreadPoolExecutor.submit() queues work rather than blocking, so without
+        # this guard the scheduler would over-submit and temporarily exceed
+        # max_concurrent_runs whenever the size/time trigger fires.
+        if self.run_manager.running_count() >= self.cfg.max_concurrent_runs:
+            return
         with self._lock:
             n = len(self._pending)
             if n == 0:

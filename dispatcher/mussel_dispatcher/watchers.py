@@ -184,16 +184,15 @@ class DatabricksWatcher(threading.Thread):
     """
     Polls a Databricks SQL warehouse for slides to dispatch.
 
-    The query must return at least three columns:
-        slide_id      — unique identifier for the slide
-        slide_path    — file path or S3/cloud URI (e.g. s3://bucket/slides/1234.svs)
-        oncotree_code — cancer type code (may be empty string if not applicable)
+    Joins:
+        cdsi_eng_phi.pdm_base_tables.impact_matched_slides  (m)
+        cdsi_eng_phi.pdm_base_tables.slide_inventory        (i)
+    on m.image_id = i.image_id
 
-    Supply the SQL via one of:
-        query_file  Path to a .sql file (resolved relative to the config file).
-        query       Inline SQL string in the YAML config.
-
-    At least one of ``query`` or ``query_file`` is required.
+    Produces slide records with:
+        slide_id      → m.image_id
+        slide_path    → i.path  (S3 URI, e.g. s3://your-bucket/slides/1234.svs)
+        oncotree_code → m.ONCOTREE_CODE
 
     Credentials are resolved by the Databricks SDK in priority order:
         1. DATABRICKS_HOST + DATABRICKS_TOKEN environment variables
@@ -201,9 +200,12 @@ class DatabricksWatcher(threading.Thread):
 
     Config fields (WatcherConfig):
         warehouse_id      Required. SQL warehouse to execute queries against.
-        query_file        Path to a .sql file returning slide_id, slide_path, oncotree_code.
-        query             Inline SQL string (alternative to query_file).
-        poll_interval_seconds  Seconds between polls (default 86400 = 1 day).
+        source_filter     Optional list of slide_inventory.source values to include.
+                          e.g. ['ECS2'].  Empty list = all sources.
+        additional_where  Optional extra SQL WHERE clause appended with AND.
+        min_file_size_bytes  Skip slides with i.size < this value (default 10 MB).
+        poll_interval_seconds  Seconds between polls. Defaults to 86400 (1 day) if
+                               not set in config, since the IMPACT tables update infrequently.
         wds_destinations  Optional {model: s3_or_local_path} dict. When set, a
                           mussel_dispatcher.wds hook is auto-generated for each model
                           that routes slides by oncotree_code into per-cancer-type shards.
@@ -212,6 +214,19 @@ class DatabricksWatcher(threading.Thread):
     """
 
     _DEFAULT_POLL_INTERVAL = 86400  # 1 day
+
+    _QUERY_TEMPLATE = """
+SELECT
+    m.image_id    AS slide_id,
+    i.path        AS slide_path,
+    m.ONCOTREE_CODE AS oncotree_code
+FROM cdsi_eng_phi.pdm_base_tables.impact_matched_slides m
+JOIN cdsi_eng_phi.pdm_base_tables.slide_inventory i
+  ON m.image_id = i.image_id
+WHERE i.path IS NOT NULL
+  AND i.size >= {min_size}
+{source_clause}{additional_clause}
+"""
 
     def __init__(self, cfg: WatcherConfig, pending: deque, state: StateStore,
                  stop_event: threading.Event):
@@ -262,10 +277,21 @@ class DatabricksWatcher(threading.Thread):
                     f"DatabricksWatcher: could not read query_file {self.cfg.query_file!r}: {exc}"
                 ) from exc
 
-        raise RuntimeError(
-            "DatabricksWatcher: no query configured — set 'query_file' or 'query' in the "
-            "watcher config. The query must return columns: slide_id, slide_path, oncotree_code."
-        )
+        # Default built-in template with optional filter clauses.
+        source_clause = ""
+        if self.cfg.source_filter:
+            quoted = ", ".join(f"'{s}'" for s in self.cfg.source_filter)
+            source_clause = f"  AND i.source IN ({quoted})\n"
+
+        additional_clause = ""
+        if self.cfg.additional_where:
+            additional_clause = f"  AND ({self.cfg.additional_where})\n"
+
+        return self._QUERY_TEMPLATE.format(
+            min_size=self.cfg.min_file_size_bytes,
+            source_clause=source_clause,
+            additional_clause=additional_clause,
+        ).strip()
 
     def _poll(self):
         log.info("DatabricksWatcher: querying Databricks warehouse %s…", self.cfg.warehouse_id)

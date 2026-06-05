@@ -82,6 +82,7 @@ class Config:
     max_wait_seconds: int = 300
     retry_failed: bool = True
     max_slide_retries: int = 5
+    stuck_batch_timeout_hours: float = 4.0  # kill NF if log file silent for this long (0 = disabled)
     cleanup_work_dir: bool = False
     cleanup_downloads: bool = False
     cleanup_batch_csv: bool = False

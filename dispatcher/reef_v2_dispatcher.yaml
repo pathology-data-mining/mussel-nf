@@ -27,12 +27,13 @@ nextflow_secrets:
   s3_secret_key: ECS_SECRET_KEY
 
 # Parallelism
-max_concurrent_runs: 4
+max_concurrent_runs: 3
 
 # Batching
 batch_size: 1000           # dispatch when this many slides accumulate
 min_batch_size: 1        # don't dispatch fewer than this (unless forced on shutdown)
 max_wait_seconds: 300    # dispatch after this many seconds regardless of batch_size
+stuck_batch_timeout_hours: 4.0  # kill NF process if log silent for this long (watchdog)
 
 # Behaviour
 retry_failed: true       # re-queue slides whose batch failed on restart

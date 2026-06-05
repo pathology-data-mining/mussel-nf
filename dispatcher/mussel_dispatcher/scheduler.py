@@ -679,11 +679,24 @@ def main():
     # RunManager
     run_manager = RunManager(cfg, state)
 
-    # Submit resume runs for batches whose work dirs are still intact
-    for batch_id, csv_path, work_dir in resume_specs:
+    # Submit resume runs for batches whose work dirs are still intact,
+    # but cap at max_concurrent_runs to avoid overshooting the concurrency limit
+    # on startup (e.g. if the dispatcher was killed while many batches were running).
+    # Excess recovery batches have their slides reset to PENDING for re-dispatch.
+    capped = resume_specs[:cfg.max_concurrent_runs]
+    excess = resume_specs[cfg.max_concurrent_runs:]
+    for batch_id, csv_path, work_dir in excess:
+        log.info("Startup cap: resetting batch %s slides to PENDING (exceeds max_concurrent_runs=%d)",
+                 batch_id, cfg.max_concurrent_runs)
+        state.reset_dispatched_to_pending(batch_id)
+        state.complete_batch(batch_id, exit_code=-1)
+    for batch_id, csv_path, work_dir in capped:
         run_manager.submit_resume(batch_id, csv_path, work_dir)
-    if resume_specs:
-        log.info("Submitted %d batch resume(s) with -resume.", len(resume_specs))
+    if capped:
+        log.info("Submitted %d batch resume(s) with -resume.", len(capped))
+    if excess:
+        log.info("Reset %d excess recovery batch(es) to PENDING (cap=%d).",
+                 len(excess), cfg.max_concurrent_runs)
 
     # BatchScheduler
     scheduler = BatchScheduler(cfg, state, run_manager, stop_event)

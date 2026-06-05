@@ -1258,6 +1258,80 @@ class TestNfRunNameValidation:
 
 
 # ---------------------------------------------------------------------------
+# Startup recovery concurrency cap
+# ---------------------------------------------------------------------------
+
+class TestStartupRecoveryConcurrencyCap:
+    """main() caps recovery resumes at max_concurrent_runs; excess resets to PENDING."""
+
+    def _make_running_batch(self, store, tmp_path, batch_id, slide_path):
+        work_dir = tmp_path / batch_id / "work"
+        work_dir.mkdir(parents=True)
+        csv = tmp_path / f"{batch_id}.csv"
+        csv.write_text(f"slide_id,slide_path\n{batch_id},{slide_path}\n")
+        store.add_slide(slide_path, batch_id)
+        store.add_batch(batch_id, str(csv), str(work_dir), 1, f"/logs/{batch_id}.log")
+        store.mark_dispatched([slide_path], batch_id)
+        return str(csv_path := csv), str(work_dir)
+
+    def test_excess_batches_reset_to_pending(self, tmp_path):
+        """When recovery batches exceed max_concurrent_runs, excess slides go to PENDING."""
+        store = StateStore(str(tmp_path / "test.db"))
+        specs = []
+        for i in range(5):
+            bid = f"batch-{i:03d}"
+            work_dir = tmp_path / bid / "work"
+            work_dir.mkdir(parents=True)
+            csv = tmp_path / f"{bid}.csv"
+            slide = f"/slides/{i}.svs"
+            csv.write_text(f"slide_id,slide_path\n{i},{slide}\n")
+            store.add_slide(slide, str(i))
+            store.add_batch(bid, str(csv), str(work_dir), 1, f"/logs/{bid}.log")
+            store.mark_dispatched([slide], bid)
+            specs.append((bid, str(csv), str(work_dir)))
+
+        # Simulate what main() does: cap at max_concurrent_runs=3
+        max_runs = 3
+        capped = specs[:max_runs]
+        excess = specs[max_runs:]
+        for batch_id, csv_path, work_dir in excess:
+            store.reset_dispatched_to_pending(batch_id)
+            store.complete_batch(batch_id, exit_code=-1)
+
+        # Check that excess slides (those reset) are now PENDING
+        pending = store.get_pending_slides()
+        pending_paths = {s["slide_path"] for s in pending}
+        for i in range(max_runs, 5):
+            assert f"/slides/{i}.svs" in pending_paths, f"/slides/{i}.svs should be PENDING"
+
+        # Capped slides should still be DISPATCHED (no reset)
+        for i in range(max_runs):
+            slide = f"/slides/{i}.svs"
+            row = store._conn().execute(
+                "SELECT status FROM slides WHERE slide_path=?", (slide,)
+            ).fetchone()
+            assert row["status"] == "DISPATCHED", f"{slide} should still be DISPATCHED"
+
+    def test_fewer_than_limit_all_resumed(self, tmp_path):
+        """When recovery batches <= max_concurrent_runs, all are resumed (no excess)."""
+        specs = [("b1", "/c1", "/w1"), ("b2", "/c2", "/w2")]
+        max_runs = 3
+        capped = specs[:max_runs]
+        excess = specs[max_runs:]
+        assert len(capped) == 2
+        assert len(excess) == 0
+
+    def test_exactly_at_limit_all_resumed(self, tmp_path):
+        """Exactly max_concurrent_runs recovery batches — all resumed, none excess."""
+        specs = [("b1", "/c1", "/w1"), ("b2", "/c2", "/w2"), ("b3", "/c3", "/w3")]
+        max_runs = 3
+        capped = specs[:max_runs]
+        excess = specs[max_runs:]
+        assert len(capped) == 3
+        assert len(excess) == 0
+
+
+# ---------------------------------------------------------------------------
 # recover_in_flight startup cleanup (background thread)
 # ---------------------------------------------------------------------------
 

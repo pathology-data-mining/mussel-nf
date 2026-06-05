@@ -691,6 +691,154 @@ class TestBatchScheduler:
 
 
 # ===========================================================================
+# BatchScheduler._watchdog_stuck_batches
+# ===========================================================================
+
+class TestWatchdogStuckBatches:
+    """Unit tests for the stuck-batch watchdog in BatchScheduler."""
+
+    def _make_scheduler(self, tmp_path, timeout_hours=4.0):
+        cfg = make_config(
+            log_dir=str(tmp_path),
+            stuck_batch_timeout_hours=timeout_hours,
+        )
+        state = MagicMock()
+        run_manager = MagicMock()
+        run_manager.in_flight_slide_ids = set()
+        scheduler = BatchScheduler(cfg, state, run_manager, threading.Event())
+        return scheduler
+
+    def _write_log(self, tmp_path, batch_id, age_seconds=0):
+        """Create a batch log file with a specific mtime."""
+        log_path = tmp_path / f"batch_{batch_id}.log"
+        log_path.write_text("NF progress line\n")
+        mtime = time.time() - age_seconds
+        os.utime(log_path, (mtime, mtime))
+        return log_path
+
+    def test_disabled_when_timeout_zero(self, tmp_path, monkeypatch):
+        """When stuck_batch_timeout_hours=0 the watchdog does nothing."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "abc123", "nf_pid": 9999}
+        ]
+        self._write_log(tmp_path, "abc123", age_seconds=999_999)
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
+    def test_no_running_batches_does_nothing(self, tmp_path, monkeypatch):
+        """Watchdog is a no-op when there are no RUNNING batches."""
+        scheduler = self._make_scheduler(tmp_path)
+        scheduler.state.get_running_batches.return_value = []
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
+    def test_recent_log_not_killed(self, tmp_path, monkeypatch):
+        """A batch whose log was updated recently is left alone."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "fresh01", "nf_pid": 1111}
+        ]
+        self._write_log(tmp_path, "fresh01", age_seconds=60)  # 1 minute old
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
+    def test_stale_log_kills_nf_process(self, tmp_path, monkeypatch):
+        """A batch with a log silent for > timeout hours has its NF process killed."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "stuck01", "nf_pid": 5555}
+        ]
+        self._write_log(tmp_path, "stuck01", age_seconds=5 * 3600)  # 5 hours old
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == [5555]
+
+    def test_missing_log_not_killed(self, tmp_path, monkeypatch):
+        """A batch with no log file yet (just started) is not killed."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "nofile1", "nf_pid": 7777}
+        ]
+        # no log file written
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
+    def test_batch_without_pid_skipped(self, tmp_path, monkeypatch):
+        """A RUNNING batch with no nf_pid recorded is skipped (can't kill)."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "nopid01", "nf_pid": None}
+        ]
+        self._write_log(tmp_path, "nopid01", age_seconds=5 * 3600)
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
+    def test_only_stuck_batch_killed_healthy_left_alone(self, tmp_path, monkeypatch):
+        """With a stuck and a healthy batch, only the stuck one is killed."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "stuck01", "nf_pid": 5555},
+            {"batch_id": "healthy1", "nf_pid": 6666},
+        ]
+        self._write_log(tmp_path, "stuck01", age_seconds=5 * 3600)   # 5h — stuck
+        self._write_log(tmp_path, "healthy1", age_seconds=10 * 60)   # 10min — fine
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == [5555]
+        assert 6666 not in killed
+
+    def test_exactly_at_threshold_not_killed(self, tmp_path, monkeypatch):
+        """A batch exactly at the threshold (not yet exceeded) is not killed."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "edge001", "nf_pid": 8888}
+        ]
+        # Exactly 4h - 1s: should NOT be killed
+        self._write_log(tmp_path, "edge001", age_seconds=4 * 3600 - 1)
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
+
+# ===========================================================================
 # NextflowRunner._write_csv
 # ===========================================================================
 

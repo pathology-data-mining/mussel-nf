@@ -572,8 +572,9 @@ class TestBatchScheduler:
         )
         run_manager = MagicMock()
         run_manager.in_flight_slide_ids = set()
-        run_manager.running_count.return_value = 0
+        run_manager.has_capacity.return_value = True  # open by default
         scheduler = BatchScheduler(cfg, MagicMock(), run_manager, threading.Event())
+        return scheduler, run_manager
         return scheduler, run_manager
 
     def _slide(self, name):
@@ -709,7 +710,7 @@ class TestBatchSchedulerConcurrencyGuard:
         )
         run_manager = MagicMock()
         run_manager.in_flight_slide_ids = set()
-        run_manager.running_count.return_value = 0
+        run_manager.has_capacity.return_value = True  # open by default
         scheduler = BatchScheduler(cfg, MagicMock(), run_manager, threading.Event())
         return scheduler, run_manager
 
@@ -717,25 +718,25 @@ class TestBatchSchedulerConcurrencyGuard:
         return {"slide_path": f"/slides/{name}.svs", "slide_id": name}
 
     def test_dispatches_when_below_limit(self):
-        """Submits when running_count < max_concurrent_runs."""
+        """Submits when a slot is available (has_capacity=True)."""
         scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
-        run_manager.running_count.return_value = 1  # 1 of 2 slots used
+        run_manager.has_capacity.return_value = True
         scheduler.enqueue(self._slide("a"))
         scheduler._maybe_dispatch()
         run_manager.submit.assert_called_once()
 
     def test_no_dispatch_when_at_limit(self):
-        """Does not submit when running_count == max_concurrent_runs."""
+        """Does not submit when at the concurrency limit (has_capacity=False)."""
         scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
-        run_manager.running_count.return_value = 2  # at limit
+        run_manager.has_capacity.return_value = False
         scheduler.enqueue(self._slide("a"))
         scheduler._maybe_dispatch()
         run_manager.submit.assert_not_called()
 
     def test_no_dispatch_when_above_limit(self):
-        """Does not submit when running_count > max_concurrent_runs (e.g. after restart recovery)."""
+        """Does not submit when over limit (has_capacity=False)."""
         scheduler, run_manager = self._make_scheduler(max_concurrent_runs=3)
-        run_manager.running_count.return_value = 4  # over limit (race from previous run)
+        run_manager.has_capacity.return_value = False
         scheduler.enqueue(self._slide("a"))
         scheduler._maybe_dispatch()
         run_manager.submit.assert_not_called()
@@ -743,24 +744,82 @@ class TestBatchSchedulerConcurrencyGuard:
     def test_slides_remain_in_queue_when_blocked(self):
         """Slides are NOT dequeued when the concurrency guard fires."""
         scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
-        run_manager.running_count.return_value = 2
+        run_manager.has_capacity.return_value = False
         scheduler.enqueue(self._slide("a"))
         scheduler.enqueue(self._slide("b"))
         scheduler._maybe_dispatch()
         assert len(scheduler._pending) == 2  # slides stay in queue
 
     def test_dispatches_once_slot_frees(self):
-        """After a slot frees (running_count drops), dispatch proceeds normally."""
+        """After a slot frees (has_capacity flips True), dispatch proceeds normally."""
         scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
-        run_manager.running_count.return_value = 2
+        run_manager.has_capacity.return_value = False
         scheduler.enqueue(self._slide("a"))
         scheduler._maybe_dispatch()
         run_manager.submit.assert_not_called()
 
-        run_manager.running_count.return_value = 1  # slot freed
+        run_manager.has_capacity.return_value = True  # slot freed
         scheduler._maybe_dispatch()
         run_manager.submit.assert_called_once()
 
+    def test_semaphore_prevents_overshoot_with_fast_fail_resumes(self):
+        """Real RunManager semaphore: fast-fail resumes release slots but cap still holds.
+
+        Simulates the restart race: 3 resumes submitted (r1 lingers, r2/r3 fast-fail),
+        then the scheduler tries to fill freed slots. Total must not exceed max_concurrent_runs=3.
+        """
+        import time as _time
+
+        cfg = make_config(max_concurrent_runs=3, batch_size=1, max_wait_seconds=0)
+        state_mock = MagicMock()
+        state_mock.get_pending_slides.return_value = []
+        run_manager = RunManager(cfg, state_mock)
+
+        r1_started = threading.Event()
+        r1_release = threading.Event()
+
+        def fake_run_linger(self_runner):
+            r1_started.set()
+            r1_release.wait(timeout=5)  # hold slot until released
+
+        def fake_run_fast_fail(self_runner):
+            pass  # instant return → releases slot
+
+        from mussel_dispatcher.runner import NextflowRunner
+        original_init = NextflowRunner.__init__
+
+        def patched_init(self_runner, cfg, batch_id, slides, state, **kwargs):
+            original_init(self_runner, cfg, batch_id, slides, state, **kwargs)
+            if batch_id == "r1":  # r1 lingers (successful resume)
+                self_runner.run = fake_run_linger.__get__(self_runner)
+            elif batch_id.startswith("new"):  # new batches linger
+                self_runner.run = fake_run_linger.__get__(self_runner)
+            else:  # r2, r3 fast-fail (run-name-collision)
+                self_runner.run = fake_run_fast_fail.__get__(self_runner)
+
+        import unittest.mock as _mock
+        with _mock.patch.object(NextflowRunner, "__init__", patched_init):
+            # Submit 3 resumes: r1 lingers, r2/r3 fast-fail
+            run_manager.submit_resume("r1", "/c1", "/w1")
+            run_manager.submit_resume("r2", "/c2", "/w2")
+            run_manager.submit_resume("r3", "/c3", "/w3")
+
+            r1_started.wait(timeout=2)  # wait for r1 to grab its slot
+            _time.sleep(0.1)            # let r2, r3 complete and release their slots
+
+            # Now 2 slots free (r2, r3 done), 1 held (r1). Can accept 2 more.
+            ok1 = run_manager.submit("new1", [])
+            ok2 = run_manager.submit("new2", [])
+            # 3rd submit should fail — r1 + new1 + new2 = 3 = max
+            ok3 = run_manager.submit("new3", [])
+
+            assert ok1, "new1 should be accepted (slot freed by r2)"
+            assert ok2, "new2 should be accepted (slot freed by r3)"
+            assert not ok3, "new3 must be rejected — would exceed max_concurrent_runs=3"
+
+            r1_release.set()  # let r1 finish
+
+        run_manager.shutdown(wait=False)
 
 # ===========================================================================
 # BatchScheduler._watchdog_stuck_batches

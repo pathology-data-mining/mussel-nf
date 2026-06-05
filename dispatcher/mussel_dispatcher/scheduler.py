@@ -358,10 +358,9 @@ class BatchScheduler:
 
     def _maybe_dispatch(self, force: bool = False):
         # Don't submit a new batch if we're already at the concurrency limit.
-        # ThreadPoolExecutor.submit() queues work rather than blocking, so without
-        # this guard the scheduler would over-submit and temporarily exceed
-        # max_concurrent_runs whenever the size/time trigger fires.
-        if self.run_manager.running_count() >= self.cfg.max_concurrent_runs:
+        # Uses a BoundedSemaphore (not len(_futures)) to avoid the TOCTOU race where
+        # fast-fail resumes release their slot between the check and submit().
+        if not self.run_manager.has_capacity():
             return
         with self._lock:
             n = len(self._pending)
@@ -408,6 +407,13 @@ class RunManager:
         # the 60-second sweep never re-enqueues slides that are mid-submission.
         self._in_flight: dict[str, set] = {}
         self._lock = threading.Lock()
+        # Semaphore that serialises concurrency decisions atomically.
+        # Every submit() / submit_resume() acquires one permit; _on_done() releases
+        # it.  Using a semaphore instead of len(_futures) eliminates the TOCTOU race
+        # where fast-fail resumes release the future slot between _maybe_dispatch()'s
+        # capacity check and the actual submit(), causing overshoot above
+        # max_concurrent_runs.
+        self._slots = threading.BoundedSemaphore(cfg.max_concurrent_runs)
 
     @property
     def in_flight_slide_ids(self) -> set:
@@ -415,7 +421,17 @@ class RunManager:
         with self._lock:
             return set().union(*self._in_flight.values()) if self._in_flight else set()
 
-    def submit(self, batch_id: str, slides: list):
+    def has_capacity(self) -> bool:
+        """Return True if a concurrency slot is available (non-blocking check)."""
+        acquired = self._slots.acquire(blocking=False)
+        if acquired:
+            self._slots.release()
+        return acquired
+
+    def submit(self, batch_id: str, slides: list) -> bool:
+        """Submit a new batch.  Returns False if at the concurrency limit."""
+        if not self._slots.acquire(blocking=False):
+            return False
         slide_ids = {s["slide_id"] for s in slides if s.get("slide_id")}
         runner = NextflowRunner(self.cfg, batch_id, slides, self.state)
         with self._lock:
@@ -423,9 +439,13 @@ class RunManager:
             future: Future = self._executor.submit(runner.run)
             self._futures[batch_id] = future
         future.add_done_callback(lambda f: self._on_done(batch_id, f))
+        return True
 
-    def submit_resume(self, batch_id: str, csv_path: str, work_dir: str):
-        """Re-submit an interrupted batch using the existing work dir and -resume."""
+    def submit_resume(self, batch_id: str, csv_path: str, work_dir: str) -> bool:
+        """Re-submit an interrupted batch using the existing work dir and -resume.
+        Returns False if at the concurrency limit."""
+        if not self._slots.acquire(blocking=False):
+            return False
         # Resume batches have slides already DISPATCHED in DB — no in-flight tracking needed.
         runner = NextflowRunner(self.cfg, batch_id, [], self.state,
                                 resume=True, existing_csv_path=csv_path, existing_work_dir=work_dir)
@@ -433,11 +453,13 @@ class RunManager:
             future: Future = self._executor.submit(runner.run)
             self._futures[batch_id] = future
         future.add_done_callback(lambda f: self._on_done(batch_id, f))
+        return True
 
     def _on_done(self, batch_id: str, future: Future):
         with self._lock:
             self._futures.pop(batch_id, None)
             self._in_flight.pop(batch_id, None)
+        self._slots.release()
         try:
             future.result()
         except Exception as e:

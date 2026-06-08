@@ -687,21 +687,21 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
             # is a zombie left by a SIGKILL'd dispatcher whose runner thread wrote
             # to the DB but never cleaned up.  Mark it FAILED immediately so its
             # slides return to PENDING without needing a resume attempt.
+            # Also treat nf_pid=None as zombie: the runner thread wrote add_batch()
+            # but was killed before recording the NF PID, meaning we cannot track
+            # or resume the batch reliably.
             nf_pid = batch.get("nf_pid")
-            if nf_pid:
-                try:
-                    os.kill(nf_pid, 0)   # raises OSError if process is dead
-                except OSError:
-                    log.info("  Batch %s: NF process PID=%d is dead — resetting slides to PENDING",
-                             batch_id, nf_pid)
-                    state.reset_dispatched_to_pending(batch_id)
-                    state.complete_batch(batch_id, exit_code=-1)
-                    continue
-            elif not (work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path)):
-                # No PID and missing work dir/CSV — also a zombie (runner thread
-                # wrote add_batch() but died before starting NF).
-                log.info("  Batch %s: no PID and missing work dir/CSV — zombie, resetting to PENDING",
-                         batch_id)
+            if not nf_pid:
+                log.info("  Batch %s: no nf_pid recorded — zombie (runner died before NF start), "
+                         "resetting slides to PENDING", batch_id)
+                state.reset_dispatched_to_pending(batch_id)
+                state.complete_batch(batch_id, exit_code=-1)
+                continue
+            try:
+                os.kill(nf_pid, 0)   # raises OSError if process is dead
+            except OSError:
+                log.info("  Batch %s: NF process PID=%d is dead — resetting slides to PENDING",
+                         batch_id, nf_pid)
                 state.reset_dispatched_to_pending(batch_id)
                 state.complete_batch(batch_id, exit_code=-1)
                 continue

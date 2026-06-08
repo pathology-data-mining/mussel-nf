@@ -781,6 +781,35 @@ def main():
     # Use O_CREAT|O_EXCL for the initial write to atomically detect races.
     pid_lock_path = os.path.join(cfg.state_dir, "dispatcher.pid")
 
+    # Belt-and-suspenders: scan for any existing mussel_dispatcher process that
+    # might be running silently (e.g. if its lockfile was overwritten by a later
+    # restart).  This catches rogue long-running dispatchers even when the lockfile
+    # no longer refers to them.
+    import subprocess as _sp
+    _scan = _sp.run(
+        ["pgrep", "-f", "mussel_dispatcher"],
+        capture_output=True, text=True,
+    )
+    _existing_pids = [int(p) for p in _scan.stdout.split() if p.strip().isdigit() and int(p) != os.getpid()]
+    if _existing_pids:
+        # Filter out our own child processes (sidecars, etc.) — only flag true dispatcher processes
+        _rogue = []
+        for _pid in _existing_pids:
+            try:
+                _cmd = open(f"/proc/{_pid}/cmdline").read().replace("\x00", " ")
+                if "mussel_dispatcher" in _cmd and "tower" not in _cmd and "dashboard" not in _cmd:
+                    _rogue.append((_pid, _cmd[:80]))
+            except OSError:
+                pass
+        if _rogue:
+            log.error(
+                "Found %d existing mussel_dispatcher process(es) — refusing to start to prevent "
+                "duplicate dispatching. Kill them first: %s",
+                len(_rogue),
+                ", ".join(f"PID {p} ({c}...)" for p, c in _rogue),
+            )
+            sys.exit(1)
+
     def _write_pid_lock():
         """Atomically create the lockfile, raising FileExistsError if it already exists."""
         fd = os.open(pid_lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)

@@ -547,6 +547,33 @@ class RunManager:
         log.info("RunManager shutting down (wait=%s)…", wait)
         self._executor.shutdown(wait=wait)
 
+    def kill_all_and_mark_failed(self) -> int:
+        """Kill all active NF processes and mark their batches FAILED in the DB.
+
+        Called during graceful SIGTERM shutdown so that the DB is left in a
+        clean state (no RUNNING entries).  The next dispatcher startup will find
+        no in-flight batches and simply re-dispatch from PENDING slides.
+
+        Returns the number of batches that were marked FAILED.
+        """
+        with self._lock:
+            active = list(self._futures.keys())
+
+        killed = 0
+        for batch_id in active:
+            nf_pid = self.state.get_batch_nf_pid(batch_id)
+            if nf_pid:
+                try:
+                    _kill_orphaned_nf(batch_id, nf_pid, sigterm_wait=3.0)
+                except Exception:
+                    pass
+            self.state.reset_dispatched_to_pending(batch_id)
+            self.state.complete_batch(batch_id, exit_code=-1)
+            log.info("Shutdown: marked batch %s FAILED and reset slides to PENDING", batch_id)
+            killed += 1
+
+        return killed
+
     def running_count(self) -> int:
         with self._lock:
             return len(self._futures)
@@ -655,6 +682,29 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
                     continue
             except (ValueError, KeyError):
                 pass  # batch_id doesn't match expected format; proceed normally
+
+            # If nf_pid is recorded but the process is no longer alive, the batch
+            # is a zombie left by a SIGKILL'd dispatcher whose runner thread wrote
+            # to the DB but never cleaned up.  Mark it FAILED immediately so its
+            # slides return to PENDING without needing a resume attempt.
+            nf_pid = batch.get("nf_pid")
+            if nf_pid:
+                try:
+                    os.kill(nf_pid, 0)   # raises OSError if process is dead
+                except OSError:
+                    log.info("  Batch %s: NF process PID=%d is dead — resetting slides to PENDING",
+                             batch_id, nf_pid)
+                    state.reset_dispatched_to_pending(batch_id)
+                    state.complete_batch(batch_id, exit_code=-1)
+                    continue
+            elif not (work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path)):
+                # No PID and missing work dir/CSV — also a zombie (runner thread
+                # wrote add_batch() but died before starting NF).
+                log.info("  Batch %s: no PID and missing work dir/CSV — zombie, resetting to PENDING",
+                         batch_id)
+                state.reset_dispatched_to_pending(batch_id)
+                state.complete_batch(batch_id, exit_code=-1)
+                continue
 
             if work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path):
                 # Kill any orphaned NF process from the previous dispatcher run.
@@ -859,15 +909,14 @@ def main():
     # Run scheduler in main thread (blocks until stop_event)
     scheduler.run()
 
+    # Graceful shutdown: kill all active NF processes and mark their batches FAILED
+    # so the DB is clean on next startup (no zombie RUNNING entries).
     n = run_manager.running_count()
     if n:
-        log.info("Waiting for %d in-flight batch(es) to finish… (Ctrl+C to abandon)", n)
-    try:
-        run_manager.shutdown(wait=True)
-    except KeyboardInterrupt:
-        log.warning("Forced exit — %d batch(es) may still be running in SLURM. "
-                    "They will be recovered on next startup.", run_manager.running_count())
-        run_manager.shutdown(wait=False)
+        log.info("Graceful shutdown: killing %d active NF process(es) and marking FAILED…", n)
+        killed = run_manager.kill_all_and_mark_failed()
+        log.info("Graceful shutdown: marked %d batch(es) FAILED, slides reset to PENDING.", killed)
+    run_manager.shutdown(wait=False)
     log.info("mussel-dispatcher stopped.")
     for proc in sidecar_procs:
         proc.terminate()

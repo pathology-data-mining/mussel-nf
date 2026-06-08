@@ -431,6 +431,7 @@ class BatchScheduler:
                 log.warning("Batch cancelled: all slides failed pre-dispatch S3 check.")
                 return
             batch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
+            log.info("_maybe_dispatch: generated batch_id=%s for %d slides", batch_id, len(batch))
             self.run_manager.submit(batch_id, batch)
 
 
@@ -474,8 +475,25 @@ class RunManager:
 
     def submit(self, batch_id: str, slides: list) -> bool:
         """Submit a new batch.  Returns False if at the concurrency limit."""
+        # Fail fast if an old batch_id slips through — this should never happen
+        # for fresh dispatches but guards against any unexpected code path.
+        try:
+            from datetime import timezone as _tz
+            id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
+            age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
+            if age_hours > 24:
+                import traceback as _tb
+                log.error("submit() called with stale batch_id=%s (%.1fh old) — rejecting. Stack:\n%s",
+                          batch_id, age_hours, "".join(_tb.format_stack()))
+                self.state.reset_dispatched_to_pending(batch_id)
+                self.state.complete_batch(batch_id, exit_code=-1)
+                return False
+        except (ValueError, AttributeError):
+            pass
+
         if not self._slots.acquire(blocking=False):
             return False
+        log.debug("submit: batch_id=%s slides=%d", batch_id, len(slides))
         slide_ids = {s["slide_id"] for s in slides if s.get("slide_id")}
         runner = NextflowRunner(self.cfg, batch_id, slides, self.state)
         with self._lock:
@@ -487,7 +505,23 @@ class RunManager:
 
     def submit_resume(self, batch_id: str, csv_path: str, work_dir: str) -> bool:
         """Re-submit an interrupted batch using the existing work dir and -resume.
-        Returns False if at the concurrency limit."""
+        Returns False if at the concurrency limit or if the batch is stale (>24h old)."""
+        # Reject batches whose batch_id timestamp is older than 24 hours.
+        # This prevents stale May-27 legacy batches from re-entering the
+        # pipeline across repeated dispatcher restarts.
+        try:
+            from datetime import timezone as _tz
+            id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
+            age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
+            if age_hours > 24:
+                log.warning("submit_resume: rejecting stale batch %s (created %.1fh ago) — "
+                            "resetting slides to PENDING", batch_id, age_hours)
+                self.state.reset_dispatched_to_pending(batch_id)
+                self.state.complete_batch(batch_id, exit_code=-1)
+                return False
+        except (ValueError, AttributeError):
+            pass  # batch_id doesn't match expected format; proceed
+
         if not self._slots.acquire(blocking=False):
             return False
         # Resume batches have slides already DISPATCHED in DB — no in-flight tracking needed.
@@ -604,6 +638,23 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
             batch_id = batch["batch_id"]
             work_dir = batch.get("work_dir")
             csv_path = batch.get("csv_path")
+
+            # Skip batches whose batch_id encodes a creation time older than 24 hours.
+            # batch_ids are formatted as "%Y%m%dT%H%M%S_<uuid>" — parse the prefix.
+            # This filters out stale legacy batches that re-appear after repeated
+            # restarts because their work dirs and CSVs are recreated by runner threads.
+            try:
+                from datetime import timezone as _tz
+                id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
+                age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
+                if age_hours > 24:
+                    log.info("  Batch %s: stale (created %.1fh ago) — resetting slides to PENDING",
+                             batch_id, age_hours)
+                    state.reset_dispatched_to_pending(batch_id)
+                    state.complete_batch(batch_id, exit_code=-1)
+                    continue
+            except (ValueError, KeyError):
+                pass  # batch_id doesn't match expected format; proceed normally
 
             if work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path):
                 # Kill any orphaned NF process from the previous dispatcher run.

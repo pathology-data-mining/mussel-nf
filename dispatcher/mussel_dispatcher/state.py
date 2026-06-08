@@ -81,6 +81,11 @@ class StateStore:
         ).fetchone()
         if not has_nf_pid:
             conn.execute("ALTER TABLE batches ADD COLUMN nf_pid INTEGER")
+
+        # Ensure performance indexes exist (idempotent).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_slides_status ON slides(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_slides_batch_id ON slides(batch_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status)")
         conn.commit()
 
     # -----------------------------------------------------------------------

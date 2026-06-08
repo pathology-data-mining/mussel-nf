@@ -207,6 +207,20 @@ def _build_handler(cfg: Config):
         _wds_manifest_cache[1] = counts
         return counts
 
+    # Full WDS manifest parse cache for /api/wds (60s TTL).
+    _wds_full_cache: list = [0.0, None, None]  # [ts, unique_slides, shard_counts]
+
+    def _wds_parsed_cached():
+        """Return cached (unique_slides, shard_slide_counts) from wds_manifest (60s TTL)."""
+        now = time.time()
+        if now - _wds_full_cache[0] < 60 and _wds_full_cache[1] is not None:
+            return _wds_full_cache[1], _wds_full_cache[2]
+        u, s = _parse_wds_manifest(wds_manifest)
+        _wds_full_cache[0] = now
+        _wds_full_cache[1] = u
+        _wds_full_cache[2] = s
+        return u, s
+
     _sync_status_cache: list = [0.0, None]  # [last_read_time, payload|None]
 
     def _read_sync_status() -> dict | None:
@@ -467,28 +481,12 @@ def _build_handler(cfg: Config):
         return {"lines": lines, "nf_log": nf_lines}, None
 
     def _api_wds():
-        import glob as _glob
+        # WDS manifest counts + per-shard distribution (60s cache)
+        unique_slides, shard_slide_counts = _wds_parsed_cached()
 
-        # WDS manifest counts + per-shard distribution
-        # unique_slides: deduplicated slide_id per model (correct denominator for % done)
-        # shard_slide_counts: row count per shard path (used for shard distribution stats only)
-        unique_slides, shard_slide_counts = _parse_wds_manifest(wds_manifest)
-
-        # Local .pt file counts per model (fast glob; shows cleanup status)
+        # Local .pt file counts per model — skip expensive recursive glob;
+        # files are cleaned up after WDS push so this is rarely non-zero.
         local_pt: dict = {}
-        features_dir = os.path.join(cfg.outdir, "features")
-        if os.path.isdir(features_dir):
-            try:
-                for model_dir in os.scandir(features_dir):
-                    if model_dir.is_dir():
-                        count = sum(1 for _ in _glob.iglob(
-                            os.path.join(model_dir.path, "**", "*.features.pt"),
-                            recursive=True,
-                        ))
-                        if count:
-                            local_pt[model_dir.name] = count
-            except Exception:
-                pass
 
         # S3 shard stats — return from cache only; background thread refreshes
         cached_s3: dict = {}

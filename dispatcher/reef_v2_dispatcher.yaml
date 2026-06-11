@@ -104,19 +104,25 @@ watchers:
   - type: databricks
     # warehouse_id: 0b49b7d78734ad5c    # auto-detected if omitted
     poll_interval_seconds: 86400
-    # Query for slides. Three options (in priority order):
-    #   1. query_file: path to a .sql file (relative to this config file)
-    #   2. query: inline SQL string
-    #   3. built-in template (impact_matched_slides JOIN slide_inventory) with optional filters:
-    #      source_filter: [ECS2]         # limit to slide_inventory.source values
-    #      additional_where: "m.IS_HNE = 1"
-    query_file: queries/impact_slides_default.sql
+    # Inline query (replaces query_file to avoid fragility if working tree is modified)
+    query: |
+      SELECT
+          m.image_id      AS slide_id,
+          i.path          AS slide_path,
+          m.ONCOTREE_CODE AS oncotree_code
+      FROM cdsi_eng_phi.pdm_base_tables.impact_matched_slides m
+      JOIN cdsi_eng_phi.pdm_base_tables.slide_inventory i
+        ON m.image_id = i.image_id
+      WHERE i.path IS NOT NULL
+        AND i.size >= 10000000
+        AND i.source IN ('ECS2')
   #   # min_file_size_bytes: 10000000      # skip slides smaller than this (default 10 MB)
   #   # Per-model WDS destinations; a mussel_dispatcher.wds hook is auto-generated for each.
   #   # Slides are routed into per-oncotree_code subdirs (no inventory CSV needed).
     wds_destinations:
       hoptimus1: s3://reef-v2-0/wds
       titan_slide: s3://reef-v2-0/wds
+      optimus: s3://reef-v2-0/wds
   #   # wds_staging_dir: /path/to/staging   # base; each model uses {staging}/{model}/
     # Sync results back to Databricks after each batch.
     # Volume folder and warehouse MERGE are auto-configured from the table name

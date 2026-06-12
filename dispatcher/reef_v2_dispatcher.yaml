@@ -27,7 +27,7 @@ nextflow_secrets:
   s3_secret_key: ECS_SECRET_KEY
 
 # Parallelism
-max_concurrent_runs: 2
+max_concurrent_runs: 3
 
 # Batching
 batch_size: 250           # dispatch when this many slides accumulate

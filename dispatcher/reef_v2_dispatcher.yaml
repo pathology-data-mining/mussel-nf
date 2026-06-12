@@ -30,7 +30,7 @@ nextflow_secrets:
 max_concurrent_runs: 2
 
 # Batching
-batch_size: 500           # dispatch when this many slides accumulate
+batch_size: 250           # dispatch when this many slides accumulate
 min_batch_size: 1        # don't dispatch fewer than this (unless forced on shutdown)
 max_wait_seconds: 300    # dispatch after this many seconds regardless of batch_size
 stuck_batch_timeout_hours: 4.0  # kill NF process if log silent for this long (watchdog)

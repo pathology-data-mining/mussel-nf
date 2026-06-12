@@ -105,6 +105,17 @@ class BatchScheduler:
         self._first_seen_at: Optional[float] = None
         self._lock = threading.Lock()
         self._s3_client = None  # lazily built for pre-dispatch S3 validation
+        # Rotating batch-size index for natural stagger via alternating sizes.
+        self._batch_size_idx = 0
+
+    def _next_batch_size(self) -> int:
+        """Return the next batch size, rotating through cfg.batch_sizes if set."""
+        sizes = getattr(self.cfg, "batch_sizes", None)
+        if sizes:
+            size = sizes[self._batch_size_idx % len(sizes)]
+            self._batch_size_idx += 1
+            return size
+        return self.cfg.batch_size
 
     # Number of threads for concurrent S3 existence checks — also sets boto3 pool size.
     _S3_CHECK_WORKERS = 32
@@ -411,15 +422,19 @@ class BatchScheduler:
             if n == 0:
                 return
             elapsed = time.monotonic() - self._first_seen_at if self._first_seen_at else 0
-            size_trigger = n >= self.cfg.batch_size
+            this_batch_size = self._next_batch_size()
+            size_trigger = n >= this_batch_size
             time_trigger = elapsed >= self.cfg.max_wait_seconds
             if not force and not size_trigger and not time_trigger:
+                # Put the index back if we didn't actually dispatch
+                self._batch_size_idx -= 1
                 return
             if n < self.cfg.min_batch_size and not force:
+                self._batch_size_idx -= 1
                 return
 
             batch = []
-            while self._pending and len(batch) < self.cfg.batch_size:
+            while self._pending and len(batch) < this_batch_size:
                 batch.append(self._pending.popleft())
             self._first_seen_at = None if not self._pending else self._first_seen_at
 

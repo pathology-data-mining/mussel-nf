@@ -78,6 +78,7 @@ class Config:
 
     max_concurrent_runs: int = 2
     batch_size: int = 20
+    batch_sizes: list = field(default_factory=list)  # if set, rotate through these sizes for natural stagger
     min_batch_size: int = 1
     max_wait_seconds: int = 300
     retry_failed: bool = True

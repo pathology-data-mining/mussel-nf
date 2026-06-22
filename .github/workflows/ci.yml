@@ -37,6 +37,7 @@ jobs:
     env:
       NXF_ANSI_LOG: false
       NXF_OPTS: "-Xmx2g"
+      NXF_HOME: /tmp/nf_ci_home  # isolate CI secrets from user home
 
     steps:
       - uses: actions/checkout@v4
@@ -83,6 +84,7 @@ jobs:
     env:
       NXF_ANSI_LOG: false
       NXF_OPTS: "-Xmx2g"
+      NXF_HOME: /tmp/nf_ci_home  # isolate CI secrets from user home
 
     steps:
       - uses: actions/checkout@v4
@@ -132,6 +134,7 @@ jobs:
     env:
       NXF_ANSI_LOG: false
       NXF_OPTS: "-Xmx2g"
+      NXF_HOME: /tmp/nf_ci_home  # isolate CI secrets from user home
 
     steps:
       - uses: actions/checkout@v4
@@ -190,6 +193,7 @@ jobs:
     env:
       NXF_ANSI_LOG: false
       NXF_OPTS: "-Xmx2g"
+      NXF_HOME: /tmp/nf_ci_home  # isolate CI secrets from user home
 
     steps:
       - uses: actions/checkout@v4

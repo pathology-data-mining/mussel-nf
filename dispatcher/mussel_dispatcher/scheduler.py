@@ -105,6 +105,17 @@ class BatchScheduler:
         self._first_seen_at: Optional[float] = None
         self._lock = threading.Lock()
         self._s3_client = None  # lazily built for pre-dispatch S3 validation
+        # Rotating batch-size index for natural stagger via alternating sizes.
+        self._batch_size_idx = 0
+
+    def _next_batch_size(self) -> int:
+        """Return the next batch size, rotating through cfg.batch_sizes if set."""
+        sizes = getattr(self.cfg, "batch_sizes", None)
+        if sizes:
+            size = sizes[self._batch_size_idx % len(sizes)]
+            self._batch_size_idx += 1
+            return size
+        return self.cfg.batch_size
 
     # Number of threads for concurrent S3 existence checks — also sets boto3 pool size.
     _S3_CHECK_WORKERS = 32
@@ -221,6 +232,11 @@ class BatchScheduler:
     # How often to check for stuck (hung) NF processes.
     _WATCHDOG_INTERVAL = 600  # seconds (10 minutes)
 
+    # How often to sweep for orphaned work dirs from FAILED batches.
+    # Catches dirs left behind when the dispatcher was SIGKILL'd before
+    # _cleanup() could run (e.g. during restart churn).
+    _FAILED_WORKDIR_CLEANUP_INTERVAL = 3600  # seconds (1 hour)
+
     def run(self):
         """Scheduler loop — call in the main thread."""
         log.info("BatchScheduler started (batch_size=%d, max_wait=%ds)",
@@ -229,6 +245,7 @@ class BatchScheduler:
         _last_retry_failed = time.monotonic()
         _last_eta_log = time.monotonic()
         _last_watchdog = time.monotonic()
+        _last_failed_workdir_cleanup = time.monotonic()
         _ETA_LOG_INTERVAL = 1800  # log ETA every 30 minutes
         while not self.stop_event.is_set():
             self._maybe_dispatch()
@@ -245,6 +262,10 @@ class BatchScheduler:
             if now - _last_watchdog >= self._WATCHDOG_INTERVAL:
                 _last_watchdog = now
                 self._watchdog_stuck_batches()
+            if now - _last_failed_workdir_cleanup >= self._FAILED_WORKDIR_CLEANUP_INTERVAL:
+                _last_failed_workdir_cleanup = now
+                if self.cfg.cleanup_work_dir:
+                    self._cleanup_failed_work_dirs()
             self.stop_event.wait(5)
         # Do NOT force-dispatch on shutdown — pending slides stay in the DB
         # and will be recovered on next startup.
@@ -356,21 +377,64 @@ class BatchScheduler:
                 )
                 _kill_orphaned_nf(batch_id, nf_pid)
 
+    def _cleanup_failed_work_dirs(self):
+        """Periodically remove orphaned work dirs for FAILED batches.
+
+        When the dispatcher is SIGKILL'd during active runs, the runner threads
+        never reach _cleanup(), leaving work dirs on disk indefinitely.  This
+        sweep catches those orphans once per hour.  Runs in a background daemon
+        thread to avoid blocking the scheduler loop on slow GPFS deletes.
+        """
+        import shutil
+        import threading as _threading
+
+        finished = self.state.get_finished_batches_with_work_dirs()
+        failed = [b for b in finished if b.get("status") == "FAILED"]
+        if not failed:
+            return
+
+        def _bg():
+            removed = 0
+            for batch in failed:
+                work_dir = batch.get("work_dir")
+                if work_dir and os.path.isdir(work_dir):
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    try:
+                        os.rmdir(os.path.dirname(work_dir))
+                    except OSError:
+                        pass
+                    removed += 1
+            if removed:
+                log.info("Periodic cleanup: removed %d orphaned work dir(s) for FAILED batches",
+                         removed)
+
+        t = _threading.Thread(target=_bg, name="failed-workdir-cleanup", daemon=True)
+        t.start()
+
     def _maybe_dispatch(self, force: bool = False):
+        # Don't submit a new batch if we're already at the concurrency limit.
+        # Uses a BoundedSemaphore (not len(_futures)) to avoid the TOCTOU race where
+        # fast-fail resumes release their slot between the check and submit().
+        if not self.run_manager.has_capacity():
+            return
         with self._lock:
             n = len(self._pending)
             if n == 0:
                 return
             elapsed = time.monotonic() - self._first_seen_at if self._first_seen_at else 0
-            size_trigger = n >= self.cfg.batch_size
+            this_batch_size = self._next_batch_size()
+            size_trigger = n >= this_batch_size
             time_trigger = elapsed >= self.cfg.max_wait_seconds
             if not force and not size_trigger and not time_trigger:
+                # Put the index back if we didn't actually dispatch
+                self._batch_size_idx -= 1
                 return
             if n < self.cfg.min_batch_size and not force:
+                self._batch_size_idx -= 1
                 return
 
             batch = []
-            while self._pending and len(batch) < self.cfg.batch_size:
+            while self._pending and len(batch) < this_batch_size:
                 batch.append(self._pending.popleft())
             self._first_seen_at = None if not self._pending else self._first_seen_at
 
@@ -382,6 +446,7 @@ class BatchScheduler:
                 log.warning("Batch cancelled: all slides failed pre-dispatch S3 check.")
                 return
             batch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
+            log.info("_maybe_dispatch: generated batch_id=%s for %d slides", batch_id, len(batch))
             self.run_manager.submit(batch_id, batch)
 
 
@@ -402,6 +467,13 @@ class RunManager:
         # the 60-second sweep never re-enqueues slides that are mid-submission.
         self._in_flight: dict[str, set] = {}
         self._lock = threading.Lock()
+        # Semaphore that serialises concurrency decisions atomically.
+        # Every submit() / submit_resume() acquires one permit; _on_done() releases
+        # it.  Using a semaphore instead of len(_futures) eliminates the TOCTOU race
+        # where fast-fail resumes release the future slot between _maybe_dispatch()'s
+        # capacity check and the actual submit(), causing overshoot above
+        # max_concurrent_runs.
+        self._slots = threading.BoundedSemaphore(cfg.max_concurrent_runs)
 
     @property
     def in_flight_slide_ids(self) -> set:
@@ -409,7 +481,34 @@ class RunManager:
         with self._lock:
             return set().union(*self._in_flight.values()) if self._in_flight else set()
 
-    def submit(self, batch_id: str, slides: list):
+    def has_capacity(self) -> bool:
+        """Return True if a concurrency slot is available (non-blocking check)."""
+        acquired = self._slots.acquire(blocking=False)
+        if acquired:
+            self._slots.release()
+        return acquired
+
+    def submit(self, batch_id: str, slides: list) -> bool:
+        """Submit a new batch.  Returns False if at the concurrency limit."""
+        # Fail fast if an old batch_id slips through — this should never happen
+        # for fresh dispatches but guards against any unexpected code path.
+        try:
+            from datetime import timezone as _tz
+            id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
+            age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
+            if age_hours > 24:
+                import traceback as _tb
+                log.error("submit() called with stale batch_id=%s (%.1fh old) — rejecting. Stack:\n%s",
+                          batch_id, age_hours, "".join(_tb.format_stack()))
+                self.state.reset_dispatched_to_pending(batch_id)
+                self.state.complete_batch(batch_id, exit_code=-1)
+                return False
+        except (ValueError, AttributeError):
+            pass
+
+        if not self._slots.acquire(blocking=False):
+            return False
+        log.debug("submit: batch_id=%s slides=%d", batch_id, len(slides))
         slide_ids = {s["slide_id"] for s in slides if s.get("slide_id")}
         runner = NextflowRunner(self.cfg, batch_id, slides, self.state)
         with self._lock:
@@ -417,9 +516,29 @@ class RunManager:
             future: Future = self._executor.submit(runner.run)
             self._futures[batch_id] = future
         future.add_done_callback(lambda f: self._on_done(batch_id, f))
+        return True
 
-    def submit_resume(self, batch_id: str, csv_path: str, work_dir: str):
-        """Re-submit an interrupted batch using the existing work dir and -resume."""
+    def submit_resume(self, batch_id: str, csv_path: str, work_dir: str) -> bool:
+        """Re-submit an interrupted batch using the existing work dir and -resume.
+        Returns False if at the concurrency limit or if the batch is stale (>24h old)."""
+        # Reject batches whose batch_id timestamp is older than 24 hours.
+        # This prevents stale May-27 legacy batches from re-entering the
+        # pipeline across repeated dispatcher restarts.
+        try:
+            from datetime import timezone as _tz
+            id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
+            age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
+            if age_hours > 24:
+                log.warning("submit_resume: rejecting stale batch %s (created %.1fh ago) — "
+                            "resetting slides to PENDING", batch_id, age_hours)
+                self.state.reset_dispatched_to_pending(batch_id)
+                self.state.complete_batch(batch_id, exit_code=-1)
+                return False
+        except (ValueError, AttributeError):
+            pass  # batch_id doesn't match expected format; proceed
+
+        if not self._slots.acquire(blocking=False):
+            return False
         # Resume batches have slides already DISPATCHED in DB — no in-flight tracking needed.
         runner = NextflowRunner(self.cfg, batch_id, [], self.state,
                                 resume=True, existing_csv_path=csv_path, existing_work_dir=work_dir)
@@ -427,11 +546,13 @@ class RunManager:
             future: Future = self._executor.submit(runner.run)
             self._futures[batch_id] = future
         future.add_done_callback(lambda f: self._on_done(batch_id, f))
+        return True
 
     def _on_done(self, batch_id: str, future: Future):
         with self._lock:
             self._futures.pop(batch_id, None)
             self._in_flight.pop(batch_id, None)
+        self._slots.release()
         try:
             future.result()
         except Exception as e:
@@ -440,6 +561,33 @@ class RunManager:
     def shutdown(self, wait: bool = True):
         log.info("RunManager shutting down (wait=%s)…", wait)
         self._executor.shutdown(wait=wait)
+
+    def kill_all_and_mark_failed(self) -> int:
+        """Kill all active NF processes and mark their batches FAILED in the DB.
+
+        Called during graceful SIGTERM shutdown so that the DB is left in a
+        clean state (no RUNNING entries).  The next dispatcher startup will find
+        no in-flight batches and simply re-dispatch from PENDING slides.
+
+        Returns the number of batches that were marked FAILED.
+        """
+        with self._lock:
+            active = list(self._futures.keys())
+
+        killed = 0
+        for batch_id in active:
+            nf_pid = self.state.get_batch_nf_pid(batch_id)
+            if nf_pid:
+                try:
+                    _kill_orphaned_nf(batch_id, nf_pid, sigterm_wait=3.0)
+                except Exception:
+                    pass
+            self.state.reset_dispatched_to_pending(batch_id)
+            self.state.complete_batch(batch_id, exit_code=-1)
+            log.info("Shutdown: marked batch %s FAILED and reset slides to PENDING", batch_id)
+            killed += 1
+
+        return killed
 
     def running_count(self) -> int:
         with self._lock:
@@ -501,20 +649,28 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
     Returns a list of (batch_id, csv_path, work_dir) tuples to be submitted as resume runs.
     """
     import shutil
+    import threading
 
     # Purge orphaned work dirs for batches that are already SUCCEEDED or FAILED.
     # These are left behind when _cleanup's rmtree runs while NF is still writing to the dir.
+    # Run in a background daemon thread so that a slow rmtree on GPFS does not block startup.
     if cleanup_work_dir:
-        for batch in state.get_finished_batches_with_work_dirs():
-            work_dir = batch.get("work_dir")
-            if work_dir and os.path.isdir(work_dir):
-                log.info("Startup cleanup: removing orphaned work dir for finished batch %s: %s",
-                         batch["batch_id"], work_dir)
-                shutil.rmtree(work_dir, ignore_errors=True)
-                try:
-                    os.rmdir(os.path.dirname(work_dir))
-                except OSError:
-                    pass
+        finished = state.get_finished_batches_with_work_dirs()
+        if finished:
+            def _bg_cleanup():
+                for batch in finished:
+                    work_dir = batch.get("work_dir")
+                    if work_dir and os.path.isdir(work_dir):
+                        log.info("Startup cleanup: removing orphaned work dir for finished batch %s: %s",
+                                 batch["batch_id"], work_dir)
+                        shutil.rmtree(work_dir, ignore_errors=True)
+                        try:
+                            os.rmdir(os.path.dirname(work_dir))
+                        except OSError:
+                            pass
+                log.info("Startup cleanup: finished removing %d orphaned work dir(s)", len(finished))
+            t = threading.Thread(target=_bg_cleanup, name="startup-cleanup", daemon=True)
+            t.start()
 
     resume_specs = []
     running = state.get_running_batches()
@@ -524,6 +680,46 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
             batch_id = batch["batch_id"]
             work_dir = batch.get("work_dir")
             csv_path = batch.get("csv_path")
+
+            # Skip batches whose batch_id encodes a creation time older than 24 hours.
+            # batch_ids are formatted as "%Y%m%dT%H%M%S_<uuid>" — parse the prefix.
+            # This filters out stale legacy batches that re-appear after repeated
+            # restarts because their work dirs and CSVs are recreated by runner threads.
+            try:
+                from datetime import timezone as _tz
+                id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
+                age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
+                if age_hours > 24:
+                    log.info("  Batch %s: stale (created %.1fh ago) — resetting slides to PENDING",
+                             batch_id, age_hours)
+                    state.reset_dispatched_to_pending(batch_id)
+                    state.complete_batch(batch_id, exit_code=-1)
+                    continue
+            except (ValueError, KeyError):
+                pass  # batch_id doesn't match expected format; proceed normally
+
+            # If nf_pid is recorded but the process is no longer alive, the batch
+            # is a zombie left by a SIGKILL'd dispatcher whose runner thread wrote
+            # to the DB but never cleaned up.  Mark it FAILED immediately so its
+            # slides return to PENDING without needing a resume attempt.
+            # Also treat nf_pid=None as zombie: the runner thread wrote add_batch()
+            # but was killed before recording the NF PID, meaning we cannot track
+            # or resume the batch reliably.
+            nf_pid = batch.get("nf_pid")
+            if not nf_pid:
+                log.info("  Batch %s: no nf_pid recorded — zombie (runner died before NF start), "
+                         "resetting slides to PENDING", batch_id)
+                state.reset_dispatched_to_pending(batch_id)
+                state.complete_batch(batch_id, exit_code=-1)
+                continue
+            try:
+                os.kill(nf_pid, 0)   # raises OSError if process is dead
+            except OSError:
+                log.info("  Batch %s: NF process PID=%d is dead — resetting slides to PENDING",
+                         batch_id, nf_pid)
+                state.reset_dispatched_to_pending(batch_id)
+                state.complete_batch(batch_id, exit_code=-1)
+                continue
 
             if work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path):
                 # Kill any orphaned NF process from the previous dispatcher run.
@@ -600,6 +796,35 @@ def main():
     # Use O_CREAT|O_EXCL for the initial write to atomically detect races.
     pid_lock_path = os.path.join(cfg.state_dir, "dispatcher.pid")
 
+    # Belt-and-suspenders: scan for any existing mussel_dispatcher process that
+    # might be running silently (e.g. if its lockfile was overwritten by a later
+    # restart).  This catches rogue long-running dispatchers even when the lockfile
+    # no longer refers to them.
+    import subprocess as _sp
+    _scan = _sp.run(
+        ["pgrep", "-f", "mussel_dispatcher"],
+        capture_output=True, text=True,
+    )
+    _existing_pids = [int(p) for p in _scan.stdout.split() if p.strip().isdigit() and int(p) != os.getpid()]
+    if _existing_pids:
+        # Filter out our own child processes (sidecars, etc.) — only flag true dispatcher processes
+        _rogue = []
+        for _pid in _existing_pids:
+            try:
+                _cmd = open(f"/proc/{_pid}/cmdline").read().replace("\x00", " ")
+                if "mussel_dispatcher" in _cmd and "tower" not in _cmd and "dashboard" not in _cmd:
+                    _rogue.append((_pid, _cmd[:80]))
+            except OSError:
+                pass
+        if _rogue:
+            log.error(
+                "Found %d existing mussel_dispatcher process(es) — refusing to start to prevent "
+                "duplicate dispatching. Kill them first: %s",
+                len(_rogue),
+                ", ".join(f"PID {p} ({c}...)" for p, c in _rogue),
+            )
+            sys.exit(1)
+
     def _write_pid_lock():
         """Atomically create the lockfile, raising FileExistsError if it already exists."""
         fd = os.open(pid_lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -665,11 +890,24 @@ def main():
     # RunManager
     run_manager = RunManager(cfg, state)
 
-    # Submit resume runs for batches whose work dirs are still intact
-    for batch_id, csv_path, work_dir in resume_specs:
+    # Submit resume runs for batches whose work dirs are still intact,
+    # but cap at max_concurrent_runs to avoid overshooting the concurrency limit
+    # on startup (e.g. if the dispatcher was killed while many batches were running).
+    # Excess recovery batches have their slides reset to PENDING for re-dispatch.
+    capped = resume_specs[:cfg.max_concurrent_runs]
+    excess = resume_specs[cfg.max_concurrent_runs:]
+    for batch_id, csv_path, work_dir in excess:
+        log.info("Startup cap: resetting batch %s slides to PENDING (exceeds max_concurrent_runs=%d)",
+                 batch_id, cfg.max_concurrent_runs)
+        state.reset_dispatched_to_pending(batch_id)
+        state.complete_batch(batch_id, exit_code=-1)
+    for batch_id, csv_path, work_dir in capped:
         run_manager.submit_resume(batch_id, csv_path, work_dir)
-    if resume_specs:
-        log.info("Submitted %d batch resume(s) with -resume.", len(resume_specs))
+    if capped:
+        log.info("Submitted %d batch resume(s) with -resume.", len(capped))
+    if excess:
+        log.info("Reset %d excess recovery batch(es) to PENDING (cap=%d).",
+                 len(excess), cfg.max_concurrent_runs)
 
     # BatchScheduler
     scheduler = BatchScheduler(cfg, state, run_manager, stop_event)
@@ -715,15 +953,14 @@ def main():
     # Run scheduler in main thread (blocks until stop_event)
     scheduler.run()
 
+    # Graceful shutdown: kill all active NF processes and mark their batches FAILED
+    # so the DB is clean on next startup (no zombie RUNNING entries).
     n = run_manager.running_count()
     if n:
-        log.info("Waiting for %d in-flight batch(es) to finish… (Ctrl+C to abandon)", n)
-    try:
-        run_manager.shutdown(wait=True)
-    except KeyboardInterrupt:
-        log.warning("Forced exit — %d batch(es) may still be running in SLURM. "
-                    "They will be recovered on next startup.", run_manager.running_count())
-        run_manager.shutdown(wait=False)
+        log.info("Graceful shutdown: killing %d active NF process(es) and marking FAILED…", n)
+        killed = run_manager.kill_all_and_mark_failed()
+        log.info("Graceful shutdown: marked %d batch(es) FAILED, slides reset to PENDING.", killed)
+    run_manager.shutdown(wait=False)
     log.info("mussel-dispatcher stopped.")
     for proc in sidecar_procs:
         proc.terminate()

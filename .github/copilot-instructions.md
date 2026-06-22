@@ -1,4 +1,15 @@
-# Copilot Instructions for mussel-nf
+# Copilot Instructions for mussel-nf-internal
+
+> **This is the MSK-internal fork** of the public [`pathology-data-mining/mussel-nf`](https://github.com/pathology-data-mining/mussel-nf) repository.
+> It extends the public pipeline with MSK-specific watchers (TCGA GDC, IMPACT), internal dispatcher configs, and internal infrastructure wiring.
+>
+> **Source of truth is the public repo.** Sync periodically:
+> ```bash
+> git fetch public && git merge public/main && git push origin main
+> ```
+> Keep MSK-internal files in directories never touched by the public repo (e.g. `dispatcher/mussel_dispatcher/impact/`, `dispatcher/mussel_dispatcher/tcga/`, `dispatcher/queries/` for internal SQL) to avoid merge conflicts.
+
+---
 
 ## Overview
 
@@ -10,7 +21,7 @@
 # Minimal run (local, docker)
 nextflow run main.nf -profile standard,docker --samples_csv samples.csv
 
-# Cluster (SLURM + Apptainer)
+# MSK cluster (SLURM + Apptainer)
 nextflow run main.nf -profile cluster,slurm,apptainer --samples_csv samples.csv
 
 # Resume a previous run
@@ -172,11 +183,13 @@ dispatcher/
     state.py           # SQLite StateStore for crash recovery
     wds.py             # append_wds() — WDS shard builder / S3 uploader
     databricks_sync.py # Generic Databricks Parquet → Delta MERGE sync
-  queries/
-    databricks_example.sql  # Example SQL for DatabricksWatcher
+    tcga/              # MSK-INTERNAL: TCGA GDC watcher support scripts
+    impact/            # MSK-INTERNAL: IMPACT-specific sync scripts
+  queries/             # SQL files for DatabricksWatcher (internal queries here)
   tests/
-  dispatcher.yaml      # Default config (edit/copy before running)
-  cohort_dispatcher.yaml.example  # Annotated example config
+  dispatcher.yaml               # Default config (edit/copy before running)
+  tcga_dispatcher.yaml          # MSK-INTERNAL: TCGA run config
+  reef_v2_dispatcher.yaml       # MSK-INTERNAL: REEF v2 / IMPACT run config
 ```
 
 ### Running the dispatcher
@@ -204,13 +217,13 @@ pytest tests/
 | `tcga` | `tcga` | TCGA GDC API + local download |
 | `databricks` | `databricks` | Databricks SQL Warehouse query |
 
-**DatabricksWatcher** requires `warehouse_id` + either `query` (inline SQL) or `query_file` (path to `.sql`). The query must return `slide_id`, `slide_path`, and optionally `oncotree_code`. See `queries/databricks_example.sql`.
+**DatabricksWatcher** requires `warehouse_id` + either `query` (inline SQL) or `query_file` (path to `.sql`). The query must return `slide_id`, `slide_path`, and optionally `oncotree_code`.
 
 ### Post-batch hooks
 
 After each successful Nextflow run the scheduler calls hooks in `post_batch_hooks`. Auto-generated hooks (from watcher config):
 - **WDS hook** — invokes `python -m mussel_dispatcher.wds` to push `.pt`/`.h5` feature files to an S3/ECS WDS destination.
-- **Databricks sync hook** — invokes `python -m mussel_dispatcher.databricks_sync` to upload a Parquet inventory snapshot to a Unity Catalog volume, then optionally triggers a job to MERGE it into a Delta table.
+- **Databricks sync hook** — invokes `python -m mussel_dispatcher.databricks_sync` (generic) or `python -m mussel_dispatcher.tcga.sync_databricks` / `python -m mussel_dispatcher.impact.sync_databricks` (MSK-internal) to upload a Parquet inventory snapshot to a Unity Catalog volume, then optionally triggers a Databricks job to MERGE it into a Delta table.
 
 ### Key config fields (`Config`)
 
@@ -249,3 +262,75 @@ The MERGE uses explicit column intersection (`source_cols ∩ target_cols`) to a
 
 - **`scripts/create_manifest.py`**: Manually rebuild manifest from a results directory. Scans for `*.features.pt`, `*.patch.h5` across `features/`, `tiles/`, `filter_tiles/`.
 - **`validate.nf`**: Validates `.h5` (checks for `coords` key) and `.pt` files from a manifest CSV.
+
+---
+
+## MSK-Internal: TCGA Dispatcher
+
+The `tcga/` module handles TCGA GDC inventory management and syncing.
+
+```
+dispatcher/mussel_dispatcher/tcga/
+  prepare_samples.py    # Build samples CSV from tcga_inventory.csv + status
+  sync_databricks.py    # Upload TCGA inventory Parquet to Databricks UC volume
+  sync_inventory.py     # Query GDC API; write/update tcga_inventory.csv
+  update_status.py      # Update status CSV after a batch completes
+```
+
+**Config files:**
+- `dispatcher/tcga_dispatcher.yaml` — full TCGA run config with GDC token, S3 ECS endpoint, inventory CSV paths, WDS destinations, Databricks volume/table
+
+**Key watcher fields for TCGA (`type: tcga`):**
+
+| Field | Description |
+|---|---|
+| `inventory_csv` | Path to `tcga_inventory.csv` (GDC metadata) |
+| `status_csv` | Path to `tcga_status.csv` (per-slide run status) |
+| `local_slides_dir` | Local directory to download slides into |
+| `s3_base` / `s3_endpoint` | ECS S3 endpoint for WDS upload |
+| `project` | TCGA project filter (e.g. `TCGA-BRCA` or blank for all) |
+| `slide_type` | `DX` (diagnostic) or other GDC slide type code |
+| `download_enabled` | If true, dispatcher downloads slides before NF run |
+| `gdc_token_file` | Path to GDC data access token |
+| `wds_destinations` | `{model_type: s3://bucket/prefix}` map |
+| `databricks_volume_folder` | UC Volume path for Parquet export |
+| `databricks_table` | Delta table name for MERGE |
+| `databricks_job_id` | Databricks job ID to trigger after upload |
+
+## MSK-Internal: IMPACT Dispatcher
+
+The `impact/` module handles the IMPACT cohort (MSK-specific internal slide library).
+
+```
+dispatcher/mussel_dispatcher/impact/
+  sync_databricks.py    # Export IMPACT feature inventory Parquet to Databricks UC volume
+```
+
+**Config files:**
+- `dispatcher/reef_v2_dispatcher.yaml` — full IMPACT/REEF v2 run config
+
+The IMPACT sync script reads the dispatcher SQLite database + WDS manifest, builds a Parquet export (one row per slide × model), and uploads it to a Databricks Unity Catalog volume. It optionally triggers a Databricks job to MERGE it into a Delta table.
+
+**IMPACT-specific Parquet columns:** `slide_id` (= `image_id`), `oncotree_code`, `slide_path` (ECS S3 path), `model`, `status`, `failure_reason`, `wds_path`, `first_seen_at`, `completed_at`.
+
+## Public/Private Sync Workflow
+
+```bash
+# In mussel-nf-internal:
+git remote -v
+# origin  git@github.com:pathology-data-mining/mussel-nf-internal.git
+# public  git@github.com:pathology-data-mining/mussel-nf.git
+
+# Pull upstream public changes
+git fetch public
+git merge public/main
+git push origin main
+
+# Or to preview what's coming
+git log HEAD..public/main --oneline
+```
+
+**Rules to avoid merge conflicts:**
+- Never modify files that exist in the public repo from this repo — only add new files in `impact/`, `tcga/`, or new query files.
+- Internal config files (`reef_v2_dispatcher.yaml`, `tcga_dispatcher.yaml`) are fine to keep here as they don't exist in the public repo.
+- If the public repo adds a new file that collides with an internal file, rename the internal one and update imports.

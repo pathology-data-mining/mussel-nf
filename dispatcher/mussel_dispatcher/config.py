@@ -58,8 +58,10 @@ class WatcherConfig:
     databricks_job_id: str = ""
     # databricks watcher
     warehouse_id: str = ""
-    query: str = ""        # inline SQL override
-    query_file: str = ""   # path to a .sql file
+    source_filter: list = field(default_factory=list)
+    additional_where: str = ""
+    query: str = ""        # inline SQL override (replaces built-in template entirely)
+    query_file: str = ""   # path to a .sql file (alternative to inline query)
 
 
 @dataclass
@@ -76,6 +78,7 @@ class Config:
 
     max_concurrent_runs: int = 2
     batch_size: int = 20
+    batch_sizes: list = field(default_factory=list)  # if set, rotate through these sizes for natural stagger
     min_batch_size: int = 1
     max_wait_seconds: int = 300
     retry_failed: bool = True
@@ -225,6 +228,23 @@ class Config:
                     if self.cleanup_results:
                         args.append("--delete-local")
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
+
+            # IMPACT Databricks sync hook — fires when a table is configured
+            if w.type == "databricks" and (w.databricks_table or w.databricks_volume_folder or w.databricks_volume_path):
+                db_path = os.path.join(self.state_dir, "dispatcher.db")
+                extra_args = [
+                    "--db=" + db_path,
+                    "--wds-manifest={outdir}/wds_manifest.csv",
+                ]
+                if w.wds_destinations:
+                    extra_args.append(
+                        "--model-types=" + ",".join(w.wds_destinations.keys())
+                    )
+                db_hooks.append(
+                    _build_db_sync_hook(w, "mussel_dispatcher.impact.sync_databricks",
+                                        extra_args, state_dir=self.state_dir,
+                                        phase="db_sync")
+                )
 
             if w.type != "tcga":
                 continue

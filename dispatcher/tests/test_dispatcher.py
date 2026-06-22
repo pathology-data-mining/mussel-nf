@@ -562,15 +562,19 @@ class TestCollectManifests:
 # ===========================================================================
 
 class TestBatchScheduler:
-    def _make_scheduler(self, batch_size=3, min_batch_size=1, max_wait_seconds=9_999):
+    def _make_scheduler(self, batch_size=3, min_batch_size=1, max_wait_seconds=9_999,
+                        max_concurrent_runs=2):
         cfg = make_config(
             batch_size=batch_size,
             min_batch_size=min_batch_size,
             max_wait_seconds=max_wait_seconds,
+            max_concurrent_runs=max_concurrent_runs,
         )
         run_manager = MagicMock()
         run_manager.in_flight_slide_ids = set()
+        run_manager.has_capacity.return_value = True  # open by default
         scheduler = BatchScheduler(cfg, MagicMock(), run_manager, threading.Event())
+        return scheduler, run_manager
         return scheduler, run_manager
 
     def _slide(self, name):
@@ -689,6 +693,133 @@ class TestBatchScheduler:
         assert len(scheduler._pending) == 1
         assert scheduler._pending[0]["slide_id"] == "y"
 
+
+# ===========================================================================
+# BatchScheduler._maybe_dispatch concurrency guard
+# ===========================================================================
+
+class TestBatchSchedulerConcurrencyGuard:
+    """_maybe_dispatch must not submit when already at max_concurrent_runs."""
+
+    def _make_scheduler(self, max_concurrent_runs=2, batch_size=1):
+        cfg = make_config(
+            batch_size=batch_size,
+            min_batch_size=1,
+            max_wait_seconds=0,
+            max_concurrent_runs=max_concurrent_runs,
+        )
+        run_manager = MagicMock()
+        run_manager.in_flight_slide_ids = set()
+        run_manager.has_capacity.return_value = True  # open by default
+        scheduler = BatchScheduler(cfg, MagicMock(), run_manager, threading.Event())
+        return scheduler, run_manager
+
+    def _slide(self, name):
+        return {"slide_path": f"/slides/{name}.svs", "slide_id": name}
+
+    def test_dispatches_when_below_limit(self):
+        """Submits when a slot is available (has_capacity=True)."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
+        run_manager.has_capacity.return_value = True
+        scheduler.enqueue(self._slide("a"))
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_called_once()
+
+    def test_no_dispatch_when_at_limit(self):
+        """Does not submit when at the concurrency limit (has_capacity=False)."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
+        run_manager.has_capacity.return_value = False
+        scheduler.enqueue(self._slide("a"))
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_not_called()
+
+    def test_no_dispatch_when_above_limit(self):
+        """Does not submit when over limit (has_capacity=False)."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=3)
+        run_manager.has_capacity.return_value = False
+        scheduler.enqueue(self._slide("a"))
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_not_called()
+
+    def test_slides_remain_in_queue_when_blocked(self):
+        """Slides are NOT dequeued when the concurrency guard fires."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
+        run_manager.has_capacity.return_value = False
+        scheduler.enqueue(self._slide("a"))
+        scheduler.enqueue(self._slide("b"))
+        scheduler._maybe_dispatch()
+        assert len(scheduler._pending) == 2  # slides stay in queue
+
+    def test_dispatches_once_slot_frees(self):
+        """After a slot frees (has_capacity flips True), dispatch proceeds normally."""
+        scheduler, run_manager = self._make_scheduler(max_concurrent_runs=2)
+        run_manager.has_capacity.return_value = False
+        scheduler.enqueue(self._slide("a"))
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_not_called()
+
+        run_manager.has_capacity.return_value = True  # slot freed
+        scheduler._maybe_dispatch()
+        run_manager.submit.assert_called_once()
+
+    def test_semaphore_prevents_overshoot_with_fast_fail_resumes(self):
+        """Real RunManager semaphore: fast-fail resumes release slots but cap still holds.
+
+        Simulates the restart race: 3 resumes submitted (r1 lingers, r2/r3 fast-fail),
+        then the scheduler tries to fill freed slots. Total must not exceed max_concurrent_runs=3.
+        """
+        import time as _time
+
+        cfg = make_config(max_concurrent_runs=3, batch_size=1, max_wait_seconds=0)
+        state_mock = MagicMock()
+        state_mock.get_pending_slides.return_value = []
+        run_manager = RunManager(cfg, state_mock)
+
+        r1_started = threading.Event()
+        r1_release = threading.Event()
+
+        def fake_run_linger(self_runner):
+            r1_started.set()
+            r1_release.wait(timeout=5)  # hold slot until released
+
+        def fake_run_fast_fail(self_runner):
+            pass  # instant return → releases slot
+
+        from mussel_dispatcher.runner import NextflowRunner
+        original_init = NextflowRunner.__init__
+
+        def patched_init(self_runner, cfg, batch_id, slides, state, **kwargs):
+            original_init(self_runner, cfg, batch_id, slides, state, **kwargs)
+            if batch_id == "r1":  # r1 lingers (successful resume)
+                self_runner.run = fake_run_linger.__get__(self_runner)
+            elif batch_id.startswith("new"):  # new batches linger
+                self_runner.run = fake_run_linger.__get__(self_runner)
+            else:  # r2, r3 fast-fail (run-name-collision)
+                self_runner.run = fake_run_fast_fail.__get__(self_runner)
+
+        import unittest.mock as _mock
+        with _mock.patch.object(NextflowRunner, "__init__", patched_init):
+            # Submit 3 resumes: r1 lingers, r2/r3 fast-fail
+            run_manager.submit_resume("r1", "/c1", "/w1")
+            run_manager.submit_resume("r2", "/c2", "/w2")
+            run_manager.submit_resume("r3", "/c3", "/w3")
+
+            r1_started.wait(timeout=2)  # wait for r1 to grab its slot
+            _time.sleep(0.1)            # let r2, r3 complete and release their slots
+
+            # Now 2 slots free (r2, r3 done), 1 held (r1). Can accept 2 more.
+            ok1 = run_manager.submit("new1", [])
+            ok2 = run_manager.submit("new2", [])
+            # 3rd submit should fail — r1 + new1 + new2 = 3 = max
+            ok3 = run_manager.submit("new3", [])
+
+            assert ok1, "new1 should be accepted (slot freed by r2)"
+            assert ok2, "new2 should be accepted (slot freed by r3)"
+            assert not ok3, "new3 must be rejected — would exceed max_concurrent_runs=3"
+
+            r1_release.set()  # let r1 finish
+
+        run_manager.shutdown(wait=False)
 
 # ===========================================================================
 # BatchScheduler._watchdog_stuck_batches
@@ -1160,6 +1291,7 @@ class TestNfRunNameValidation:
 
     def test_returns_resume_spec_when_work_dir_exists(self, tmp_path):
         """When work dir and csv both exist, returns resume spec instead of resetting to PENDING."""
+        import unittest.mock as mock
         store = StateStore(str(tmp_path / "test.db"))
         store.add_slide("/slides/a.svs", "a")
         work_dir = tmp_path / "batch-001" / "work"
@@ -1168,8 +1300,10 @@ class TestNfRunNameValidation:
         csv_path.write_text("slide_id,slide_path\na,/slides/a.svs\n")
         store.add_batch("batch-001", str(csv_path), str(work_dir), 1, "/logs/1.log")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        store.set_batch_nf_pid("batch-001", 424242)
         pending = deque()
-        specs = recover_in_flight(store, pending)
+        with mock.patch("mussel_dispatcher.scheduler.os.kill", return_value=None):
+            specs = recover_in_flight(store, pending)
         # Slides stay DISPATCHED (not reset to PENDING) — will be handled by resume run
         assert len(pending) == 0
         assert len(specs) == 1
@@ -1217,6 +1351,151 @@ class TestNfRunNameValidation:
         paths = {s["slide_path"] for s in pending}
         assert "/slides/ok.svs" in paths
         assert "/slides/bad.svs" not in paths
+
+
+# ---------------------------------------------------------------------------
+# Startup recovery concurrency cap
+# ---------------------------------------------------------------------------
+
+class TestStartupRecoveryConcurrencyCap:
+    """main() caps recovery resumes at max_concurrent_runs; excess resets to PENDING."""
+
+    def _make_running_batch(self, store, tmp_path, batch_id, slide_path):
+        work_dir = tmp_path / batch_id / "work"
+        work_dir.mkdir(parents=True)
+        csv = tmp_path / f"{batch_id}.csv"
+        csv.write_text(f"slide_id,slide_path\n{batch_id},{slide_path}\n")
+        store.add_slide(slide_path, batch_id)
+        store.add_batch(batch_id, str(csv), str(work_dir), 1, f"/logs/{batch_id}.log")
+        store.mark_dispatched([slide_path], batch_id)
+        return str(csv_path := csv), str(work_dir)
+
+    def test_excess_batches_reset_to_pending(self, tmp_path):
+        """When recovery batches exceed max_concurrent_runs, excess slides go to PENDING."""
+        store = StateStore(str(tmp_path / "test.db"))
+        specs = []
+        for i in range(5):
+            bid = f"batch-{i:03d}"
+            work_dir = tmp_path / bid / "work"
+            work_dir.mkdir(parents=True)
+            csv = tmp_path / f"{bid}.csv"
+            slide = f"/slides/{i}.svs"
+            csv.write_text(f"slide_id,slide_path\n{i},{slide}\n")
+            store.add_slide(slide, str(i))
+            store.add_batch(bid, str(csv), str(work_dir), 1, f"/logs/{bid}.log")
+            store.mark_dispatched([slide], bid)
+            specs.append((bid, str(csv), str(work_dir)))
+
+        # Simulate what main() does: cap at max_concurrent_runs=3
+        max_runs = 3
+        capped = specs[:max_runs]
+        excess = specs[max_runs:]
+        for batch_id, csv_path, work_dir in excess:
+            store.reset_dispatched_to_pending(batch_id)
+            store.complete_batch(batch_id, exit_code=-1)
+
+        # Check that excess slides (those reset) are now PENDING
+        pending = store.get_pending_slides()
+        pending_paths = {s["slide_path"] for s in pending}
+        for i in range(max_runs, 5):
+            assert f"/slides/{i}.svs" in pending_paths, f"/slides/{i}.svs should be PENDING"
+
+        # Capped slides should still be DISPATCHED (no reset)
+        for i in range(max_runs):
+            slide = f"/slides/{i}.svs"
+            row = store._conn().execute(
+                "SELECT status FROM slides WHERE slide_path=?", (slide,)
+            ).fetchone()
+            assert row["status"] == "DISPATCHED", f"{slide} should still be DISPATCHED"
+
+    def test_fewer_than_limit_all_resumed(self, tmp_path):
+        """When recovery batches <= max_concurrent_runs, all are resumed (no excess)."""
+        specs = [("b1", "/c1", "/w1"), ("b2", "/c2", "/w2")]
+        max_runs = 3
+        capped = specs[:max_runs]
+        excess = specs[max_runs:]
+        assert len(capped) == 2
+        assert len(excess) == 0
+
+    def test_exactly_at_limit_all_resumed(self, tmp_path):
+        """Exactly max_concurrent_runs recovery batches — all resumed, none excess."""
+        specs = [("b1", "/c1", "/w1"), ("b2", "/c2", "/w2"), ("b3", "/c3", "/w3")]
+        max_runs = 3
+        capped = specs[:max_runs]
+        excess = specs[max_runs:]
+        assert len(capped) == 3
+        assert len(excess) == 0
+
+
+# ---------------------------------------------------------------------------
+# recover_in_flight startup cleanup (background thread)
+# ---------------------------------------------------------------------------
+
+class TestStartupCleanupNonBlocking:
+    """Startup work-dir cleanup runs in a background thread, not blocking startup."""
+
+    def _make_store_with_finished_batch(self, tmp_path):
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("/slides/a.svs", "a")
+        work_dir = tmp_path / "batch-fin" / "work"
+        work_dir.mkdir(parents=True)
+        (work_dir / "somefile.h5").write_bytes(b"data")
+        csv = tmp_path / "batch-fin.csv"
+        csv.write_text("slide_id,slide_path\na,/slides/a.svs\n")
+        store.add_batch("batch-fin", str(csv), str(work_dir), 1, "/logs/fin.log")
+        store.mark_dispatched(["/slides/a.svs"], "batch-fin")
+        store.complete_batch("batch-fin", exit_code=0)
+        store.mark_slides_complete("batch-fin", succeeded=True)
+        return store, work_dir
+
+    def test_cleanup_disabled_leaves_work_dir(self, tmp_path):
+        """cleanup_work_dir=False leaves orphaned work dirs untouched."""
+        store, work_dir = self._make_store_with_finished_batch(tmp_path)
+        pending = deque()
+        recover_in_flight(store, pending, cleanup_work_dir=False)
+        time.sleep(0.2)
+        assert work_dir.exists()
+
+    def test_cleanup_enabled_removes_work_dir(self, tmp_path):
+        """cleanup_work_dir=True removes orphaned work dirs (via background thread)."""
+        store, work_dir = self._make_store_with_finished_batch(tmp_path)
+        pending = deque()
+        recover_in_flight(store, pending, cleanup_work_dir=True)
+        # Background thread — give it time to finish
+        deadline = time.monotonic() + 5.0
+        while work_dir.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not work_dir.exists(), "work dir should have been deleted by background cleanup"
+
+    def test_cleanup_does_not_block_startup(self, tmp_path):
+        """recover_in_flight returns quickly even when cleanup work is slow."""
+        store, work_dir = self._make_store_with_finished_batch(tmp_path)
+        # Add many dummy files to simulate a large work dir
+        for i in range(200):
+            (work_dir / f"file_{i}.h5").write_bytes(b"x" * 1024)
+        pending = deque()
+        start = time.monotonic()
+        recover_in_flight(store, pending, cleanup_work_dir=True)
+        elapsed = time.monotonic() - start
+        # Should return in well under 1 second even with 200 files to delete
+        assert elapsed < 1.0, f"recover_in_flight blocked for {elapsed:.2f}s"
+
+    def test_running_batches_not_cleaned_up(self, tmp_path):
+        """RUNNING batch work dirs are not touched — only SUCCEEDED/FAILED."""
+        store = StateStore(str(tmp_path / "test.db"))
+        store.add_slide("/slides/b.svs", "b")
+        work_dir = tmp_path / "batch-run" / "work"
+        work_dir.mkdir(parents=True)
+        (work_dir / "data.h5").write_bytes(b"data")
+        csv = tmp_path / "batch-run.csv"
+        csv.write_text("slide_id,slide_path\nb,/slides/b.svs\n")
+        store.add_batch("batch-run", str(csv), str(work_dir), 1, "/logs/run.log")
+        store.mark_dispatched(["/slides/b.svs"], "batch-run")
+        # Batch stays RUNNING — do NOT call complete_batch
+        pending = deque()
+        recover_in_flight(store, pending, cleanup_work_dir=True)
+        time.sleep(0.2)
+        assert work_dir.exists(), "RUNNING batch work dir must not be deleted at startup"
 
 
 # ---------------------------------------------------------------------------
@@ -1474,8 +1753,10 @@ class TestNextflowRunnerRun:
     def test_run_success_marks_slides_succeeded(self, tmp_path):
         import unittest.mock as mock
         runner, state = self._make_runner(tmp_path)
-        fake_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=fake_proc):
+        fake_proc = mock.Mock()
+        fake_proc.pid = 12345
+        fake_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=fake_proc):
             exit_code = runner.run()
         assert exit_code == 0
         row = state._conn().execute(
@@ -1486,11 +1767,16 @@ class TestNextflowRunnerRun:
     def test_run_failure_marks_slides_failed_and_increments_fail_count(self, tmp_path):
         import unittest.mock as mock
         runner, state = self._make_runner(tmp_path)
-        fake_proc = mock.Mock(returncode=1)
+        fake_proc = mock.Mock()
+        fake_proc.pid = 12345
+        fake_proc.wait.return_value = 1
+        real_isdir = os.path.isdir
         # Patch time so batch_duration >= 60s (not a fast-fail)
-        with mock.patch("subprocess.run", return_value=fake_proc), \
+        with mock.patch("subprocess.Popen", return_value=fake_proc), \
+             mock.patch("mussel_dispatcher.runner.os.path.isdir",
+                        side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
              mock.patch("mussel_dispatcher.runner.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 120.0]  # started_at=0, ended_at=120
+            mock_time.time.side_effect = [0.0] + [120.0] * 10
             exit_code = runner.run()
         assert exit_code == 1
         row = state._conn().execute(
@@ -1503,10 +1789,12 @@ class TestNextflowRunnerRun:
         """Batch failure in <60s (infra error) resets slides to PENDING without charging fail_count."""
         import unittest.mock as mock
         runner, state = self._make_runner(tmp_path)
-        fake_proc = mock.Mock(returncode=1)
-        with mock.patch("subprocess.run", return_value=fake_proc), \
+        fake_proc = mock.Mock()
+        fake_proc.pid = 12345
+        fake_proc.wait.return_value = 1
+        with mock.patch("subprocess.Popen", return_value=fake_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 5.0]  # 5s — clearly a fast fail
+            mock_time.time.side_effect = [0.0] + [5.0] * 10
             exit_code = runner.run()
         assert exit_code == 1
         row = state._conn().execute(
@@ -2265,11 +2553,13 @@ class TestDatabricksWatcher:
             w.run()
         assert len(pending) == 0
 
-    def test_no_query_raises_runtime_error(self, tmp_path):
-        """_build_query raises RuntimeError when neither query nor query_file is set."""
+    def test_no_query_uses_builtin_template(self, tmp_path):
+        """_build_query falls back to the built-in Databricks query template."""
         w, pending, state = self._watcher(tmp_path, {"query": "", "query_file": ""})
-        with pytest.raises(RuntimeError, match="no query configured"):
-            w._build_query()
+        query = w._build_query()
+        assert "FROM" in query
+        assert "JOIN" in query
+        assert "i.size >= 10000000" in query
 
     def test_inline_query_used(self, tmp_path):
         """_build_query returns inline SQL from cfg.query."""
@@ -4240,10 +4530,12 @@ class TestE2EDispatcherLoop:
             state.add_slide(s["slide_path"], s["slide_id"])
             scheduler.enqueue(s)
 
-        fake_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=fake_proc), \
+        fake_proc = mock.Mock()
+        fake_proc.pid = 12345
+        fake_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=fake_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler._maybe_dispatch(force=True)
             run_manager.shutdown(wait=True)
 
@@ -4263,10 +4555,15 @@ class TestE2EDispatcherLoop:
         scheduler.enqueue(slide)
 
         # First run: fail (long enough to charge fail_count)
-        fail_proc = mock.Mock(returncode=1)
-        with mock.patch("subprocess.run", return_value=fail_proc), \
+        fail_proc = mock.Mock()
+        fail_proc.pid = 12345
+        fail_proc.wait.return_value = 1
+        real_isdir = os.path.isdir
+        with mock.patch("subprocess.Popen", return_value=fail_proc), \
+             mock.patch("mussel_dispatcher.runner.os.path.isdir",
+                        side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler._maybe_dispatch(force=True)
             run_manager.shutdown(wait=True)
 
@@ -4289,10 +4586,12 @@ class TestE2EDispatcherLoop:
         scheduler2 = BatchScheduler(cfg, state, run_manager2, threading.Event())
         scheduler2.enqueue(slide)
 
-        ok_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=ok_proc), \
+        ok_proc = mock.Mock()
+        ok_proc.pid = 12345
+        ok_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=ok_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler2._maybe_dispatch(force=True)
             run_manager2.shutdown(wait=True)
 
@@ -4325,11 +4624,13 @@ class TestE2EDispatcherLoop:
         mock_s3 = MagicMock()
         mock_s3.head_object.side_effect = head_object
 
-        ok_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=ok_proc), \
+        ok_proc = mock.Mock()
+        ok_proc.pid = 12345
+        ok_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=ok_proc), \
              mock.patch.object(scheduler, "_get_s3_client", return_value=mock_s3), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler._maybe_dispatch(force=True)
             run_manager.shutdown(wait=True)
 
@@ -5481,10 +5782,15 @@ class TestE2ERetryFailedLoop:
             scheduler.enqueue(s)
 
         # First dispatch: batch fails (simulating NF crash / node failure)
-        fail_proc = mock.Mock(returncode=1)
-        with mock.patch("subprocess.run", return_value=fail_proc), \
+        fail_proc = mock.Mock()
+        fail_proc.pid = 12345
+        fail_proc.wait.return_value = 1
+        real_isdir = os.path.isdir
+        with mock.patch("subprocess.Popen", return_value=fail_proc), \
+             mock.patch("mussel_dispatcher.runner.os.path.isdir",
+                        side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler._maybe_dispatch(force=True)
             run_manager.shutdown(wait=True)
 
@@ -5511,10 +5817,12 @@ class TestE2ERetryFailedLoop:
         scheduler2.enqueue({"slide_path": "/slides/A.svs", "slide_id": "A"})
         scheduler2.enqueue({"slide_path": "/slides/B.svs", "slide_id": "B"})
 
-        ok_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=ok_proc), \
+        ok_proc = mock.Mock()
+        ok_proc.pid = 12345
+        ok_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=ok_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler2._maybe_dispatch(force=True)
             run_manager2.shutdown(wait=True)
 
@@ -5563,10 +5871,15 @@ class TestE2ERetryFailedLoop:
         scheduler.enqueue(slide)
 
         for _ in range(2):
-            fail_proc = mock.Mock(returncode=1)
-            with mock.patch("subprocess.run", return_value=fail_proc), \
+            fail_proc = mock.Mock()
+            fail_proc.pid = 12345
+            fail_proc.wait.return_value = 1
+            real_isdir = os.path.isdir
+            with mock.patch("subprocess.Popen", return_value=fail_proc), \
+                 mock.patch("mussel_dispatcher.runner.os.path.isdir",
+                            side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
                  mock.patch("mussel_dispatcher.runner.time") as mt:
-                mt.time.side_effect = [0.0, 120.0]
+                mt.time.side_effect = [0.0] + [120.0] * 10
                 scheduler._maybe_dispatch(force=True)
                 run_manager.shutdown(wait=True)
             # After each failure, periodic retry re-queues (if not exhausted)

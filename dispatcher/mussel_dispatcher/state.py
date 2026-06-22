@@ -81,6 +81,11 @@ class StateStore:
         ).fetchone()
         if not has_nf_pid:
             conn.execute("ALTER TABLE batches ADD COLUMN nf_pid INTEGER")
+
+        # Ensure performance indexes exist (idempotent).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_slides_status ON slides(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_slides_batch_id ON slides(batch_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status)")
         conn.commit()
 
     # -----------------------------------------------------------------------
@@ -402,7 +407,7 @@ class StateStore:
 
     def get_finished_batches_with_work_dirs(self) -> list:
         rows = self._conn().execute(
-            "SELECT batch_id, work_dir FROM batches WHERE status IN ('SUCCEEDED','FAILED') AND work_dir IS NOT NULL"
+            "SELECT batch_id, work_dir, status FROM batches WHERE status IN ('SUCCEEDED','FAILED') AND work_dir IS NOT NULL"
         ).fetchall()
         return [dict(r) for r in rows]
 

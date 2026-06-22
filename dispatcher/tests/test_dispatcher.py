@@ -965,6 +965,21 @@ class TestWatchdogStuckBatches:
         scheduler._watchdog_stuck_batches()
         assert killed == []
 
+    def test_disabled_when_timeout_negative(self, tmp_path, monkeypatch):
+        """A negative timeout_hours is treated as disabled — no batches killed."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=-1.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "abc123", "nf_pid": 9999}
+        ]
+        self._write_log(tmp_path, "abc123", age_seconds=999_999)
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
     def test_no_running_batches_does_nothing(self, tmp_path, monkeypatch):
         """Watchdog is a no-op when there are no RUNNING batches."""
         scheduler = self._make_scheduler(tmp_path)
@@ -1021,6 +1036,25 @@ class TestWatchdogStuckBatches:
         )
         scheduler._watchdog_stuck_batches()
         assert killed == []
+
+    def test_uses_stored_log_path_from_db(self, tmp_path, monkeypatch):
+        """Watchdog uses log_path from the DB row, not a reconstructed path."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        custom_log = tmp_path / "custom" / "run.log"
+        custom_log.parent.mkdir()
+        custom_log.write_text("NF progress\n")
+        mtime = time.time() - 5 * 3600  # 5h old — stuck
+        os.utime(custom_log, (mtime, mtime))
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "custom01", "nf_pid": 1234, "log_path": str(custom_log)}
+        ]
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == [1234]
 
     def test_batch_without_pid_skipped(self, tmp_path, monkeypatch):
         """A RUNNING batch with no nf_pid recorded is skipped (can't kill)."""
@@ -1494,6 +1528,7 @@ class TestNfRunNameValidation:
 
     def test_returns_resume_spec_when_work_dir_exists(self, tmp_path):
         """When work dir and csv both exist, returns resume spec instead of resetting to PENDING."""
+        import unittest.mock as mock
         store = StateStore(str(tmp_path / "test.db"))
         store.add_slide("/slides/a.svs", "a")
         work_dir = tmp_path / "batch-001" / "work"
@@ -1502,8 +1537,10 @@ class TestNfRunNameValidation:
         csv_path.write_text("slide_id,slide_path\na,/slides/a.svs\n")
         store.add_batch("batch-001", str(csv_path), str(work_dir), 1, "/logs/1.log")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        store.set_batch_nf_pid("batch-001", 424242)
         pending = deque()
-        specs = recover_in_flight(store, pending)
+        with mock.patch("mussel_dispatcher.scheduler.os.kill", return_value=None):
+            specs = recover_in_flight(store, pending)
         # Slides stay DISPATCHED (not reset to PENDING) — will be handled by resume run
         assert len(pending) == 0
         assert len(specs) == 1
@@ -2025,7 +2062,7 @@ class TestNextflowRunnerRun:
              mock.patch("mussel_dispatcher.runner.os.path.isdir",
                         side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
              mock.patch("mussel_dispatcher.runner.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 120.0, 120.0]
+            mock_time.time.side_effect = [0.0] + [120.0] * 10
             exit_code = runner.run()
         assert exit_code == 1
         row = state._conn().execute(
@@ -2043,7 +2080,7 @@ class TestNextflowRunnerRun:
         fake_proc.wait.return_value = 1
         with mock.patch("subprocess.Popen", return_value=fake_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 5.0, 5.0]
+            mock_time.time.side_effect = [0.0] + [5.0] * 10
             exit_code = runner.run()
         assert exit_code == 1
         row = state._conn().execute(

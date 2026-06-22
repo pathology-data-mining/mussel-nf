@@ -445,7 +445,7 @@ class BatchScheduler:
         process while never firing on a congested cluster.  Set to 0 to disable.
         """
         timeout_hours = self.cfg.stuck_batch_timeout_hours
-        if not timeout_hours:
+        if timeout_hours <= 0:
             return
         cutoff = time.time() - timeout_hours * 3600
         # NF polls squeue every ~5 min and writes to its internal log each time.
@@ -459,7 +459,8 @@ class BatchScheduler:
                 continue
 
             # Primary signal: NF internal debug log (present on newer batches).
-            nf_log_path = os.path.join(self.cfg.log_dir, f"batch_{batch_id}.nf.log")
+            log_path = batch.get("log_path") or os.path.join(self.cfg.log_dir, f"batch_{batch_id}.log")
+            nf_log_path = _batch_nf_log_path(self.cfg.log_dir, batch_id)
             try:
                 nf_log_mtime = os.path.getmtime(nf_log_path)
             except OSError:
@@ -474,7 +475,6 @@ class BatchScheduler:
                 signal_name = "nf.log"
             else:
                 # Fallback for batches dispatched before the -log flag was added.
-                log_path = os.path.join(self.cfg.log_dir, f"batch_{batch_id}.log")
                 try:
                     stale_mtime = os.path.getmtime(log_path)
                 except OSError:

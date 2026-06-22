@@ -12,8 +12,9 @@ log = logging.getLogger("mussel-dispatcher")
 
 
 class StateStore:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, manifest_id_set: frozenset | None = None):
         self.db_path = db_path
+        self._manifest_id_set = manifest_id_set  # slide_ids with priority=0; others get priority=1
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._init_schema()
@@ -66,6 +67,12 @@ class StateStore:
         ).fetchone()
         if not has_col:
             conn.execute("ALTER TABLE slides ADD COLUMN oncotree_code TEXT NOT NULL DEFAULT ''")
+        # Migrate existing DBs that predate the priority column.
+        has_priority = conn.execute(
+            "SELECT name FROM pragma_table_info('slides') WHERE name='priority'"
+        ).fetchone()
+        if not has_priority:
+            conn.execute("ALTER TABLE slides ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
         # Migrate existing DBs where batches column was named nf_session_id instead of session_id.
         has_session_id = conn.execute(
             "SELECT name FROM pragma_table_info('batches') WHERE name='session_id'"
@@ -97,14 +104,18 @@ class StateStore:
                   file_id: str = "", file_name: str = "",
                   needs_download: bool = False) -> bool:
         """Insert a new slide. Returns True if inserted, False if already known."""
+        priority = (
+            1 if (self._manifest_id_set is not None and slide_id not in self._manifest_id_set)
+            else 0
+        )
         try:
             self._conn().execute(
                 """INSERT INTO slides (slide_path, slide_id, oncotree_code, status, first_seen_at,
-                   file_id, file_name, needs_download)
-                   VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?)""",
+                   file_id, file_name, needs_download, priority)
+                   VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)""",
                 (slide_path, slide_id, oncotree_code,
                  datetime.now(timezone.utc).isoformat(),
-                 file_id, file_name, int(needs_download)),
+                 file_id, file_name, int(needs_download), priority),
             )
             self._conn().commit()
             return True
@@ -134,7 +145,8 @@ class StateStore:
     def get_pending_slides(self) -> list:
         rows = self._conn().execute(
             """SELECT slide_path, slide_id, oncotree_code, download_path, file_id, file_name, needs_download
-               FROM slides WHERE status='PENDING' AND slide_path != ''"""
+               FROM slides WHERE status='PENDING' AND slide_path != ''
+               ORDER BY priority DESC, ROWID ASC"""
         ).fetchall()
         slides = [dict(r) for r in rows]
         # Backfill file_id/file_name from gdc:// URIs for rows from older DB schema
@@ -381,6 +393,12 @@ class StateStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def count_running_batches(self) -> int:
+        row = self._conn().execute(
+            "SELECT COUNT(*) FROM batches WHERE status='RUNNING'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     def set_batch_session_id(self, batch_id: str, session_id: str):
         self._conn().execute(
             "UPDATE batches SET session_id=? WHERE batch_id=?", (session_id, batch_id)
@@ -437,9 +455,9 @@ class StateStore:
             FROM slides
             WHERE status = 'SUCCEEDED'
               AND completed_at IS NOT NULL
-              AND completed_at >= datetime('now', :neg_window)
+              AND julianday(completed_at) >= julianday('now') - (:window_hours / 24.0)
             """,
-            {"neg_window": f"-{window_hours} hours"},
+            {"window_hours": float(window_hours)},
         ).fetchone()
 
         cnt = row["cnt"] or 0
@@ -449,9 +467,10 @@ class StateStore:
 
         if cnt >= 2 and row["oldest"]:
             try:
-                fmt = "%Y-%m-%d %H:%M:%S"
-                t0 = datetime.strptime(row["oldest"][:19], fmt)
-                now = datetime.utcnow()
+                t0 = datetime.fromisoformat(str(row["oldest"]).replace(" ", "T"))
+                if t0.tzinfo is None:
+                    t0 = t0.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
                 # Use time since first completion in window, capped at window_hours.
                 # This avoids burst inflation (MAX-MIN) while not over-inflating the
                 # denominator when the run just started.

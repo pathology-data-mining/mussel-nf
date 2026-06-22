@@ -278,6 +278,7 @@ async function loadStatus() {
       syncTile.title = 'No sync status recorded yet. Sync runs after each successful batch.';
     } else {
       const ok  = ss.status === 'SUCCESS';
+      const pending = ss.status === 'PENDING' || ss.status === 'RESET';
       const ago = ss.updated_at ? Math.round((Date.now() - new Date(ss.updated_at)) / 60000) : null;
       const runActive = (c.PENDING || 0) + (c.DISPATCHED || 0) + (d.running_batches || 0) > 0;
       const stale = ago != null && ago > 24 * 60 && runActive;  // >24h stale only if run still active
@@ -287,6 +288,9 @@ async function loadStatus() {
       } else if (ok && stale) {
         syncEl.textContent = '⚠ Stale';
         syncEl.style.color = '#fbbf24';
+      } else if (pending) {
+        syncEl.textContent = '--';
+        syncEl.style.color = '#94a3b8';
       } else {
         syncEl.textContent = '✗ Failed';
         syncEl.style.color = '#f87171';

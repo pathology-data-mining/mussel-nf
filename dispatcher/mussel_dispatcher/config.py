@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,7 @@ class WatcherConfig:
     download_enabled: bool = False  # if True, dispatcher downloads slides locally before NF run
     download_dir: str = ""          # local directory for downloaded slides (required if download_enabled)
     scripts_dir: str = ""
+    wds_destination: str = ""
     wds_destinations: dict = field(default_factory=dict)
     wds_staging_dir: str = ""
     wds_s3_max_concurrency: int = 4
@@ -89,6 +91,11 @@ class Config:
     cleanup_batch_csv: bool = False
     cleanup_logs_after_days: int = 0
     cleanup_results: bool = False
+    # Shared run guard. By default this is derived from WDS destinations and
+    # prevents two dispatcher configs from processing the same output cohort.
+    cohort_lock_name: str = ""
+    cohort_lock_dir: str = ""
+    allow_shared_cohort: bool = False
     nextflow_config: str = ""
     nextflow_params_file: str = ""
     nextflow_version: str = ""
@@ -103,6 +110,8 @@ class Config:
     secrets_env_file: str = ""
     nextflow_secrets: list = field(default_factory=list)
     combined_manifest_path: Optional[str] = None
+    manifest_path: Optional[str] = None     # CSV with image_ids; slides NOT in it get priority=1
+    manifest_id_column: int = 0             # 0-based column index containing the image_id
     post_batch_hooks: list = field(default_factory=list)
     watchers: list = field(default_factory=list)
 
@@ -125,6 +134,8 @@ class Config:
         raw["dispatch_dir"]  = _resolve("dispatch_dir",  "batches")
         raw["state_dir"]     = _resolve("state_dir",     "state")
         raw["log_dir"]       = _resolve("log_dir",       "logs")
+        if raw.get("cohort_lock_dir"):
+            raw["cohort_lock_dir"] = _resolve("cohort_lock_dir", raw["cohort_lock_dir"])
 
         for key in ("outdir", "nextflow_config", "nextflow_params_file", "secrets_env_file"):
             val = raw.get(key, "")
@@ -150,11 +161,8 @@ class Config:
         raw["watchers"] = watcher_cfgs
         cfg = cls(**raw)
 
-        # Apply default wds_staging_dir after state_dir is resolved so the
-        # default path ({state_dir}/wds-staging) is always absolute.
+        # Auto-derive watcher defaults that do not depend on model discovery.
         for w in cfg.watchers:
-            if not w.wds_staging_dir and w.wds_destinations:
-                w.wds_staging_dir = os.path.join(cfg.state_dir, "wds-staging")
             # Auto-derive volume folder from table name so only databricks_table is required.
             if not w.databricks_volume_folder and not w.databricks_volume_path and w.databricks_table:
                 parts = w.databricks_table.split(".")
@@ -196,14 +204,47 @@ class Config:
         for w in cfg.watchers:
             if not w.models:
                 if nf_models is None:
-                    nf_models = _read_nf_model_types(cfg.repo_dir)
+                    nf_models = _read_nf_model_types(
+                        cfg.repo_dir, nextflow_params_file=cfg.nextflow_params_file
+                    )
                     if nf_models:
-                        log.info("Auto-detected model_types from nextflow.config: %s",
+                        source = cfg.nextflow_params_file or os.path.join(cfg.repo_dir, "nextflow.config")
+                        log.info("Auto-detected model_types from %s: %s",
+                                 source,
                                  ", ".join(nf_models))
                 w.models = nf_models
+            _apply_wds_destination_defaults(w)
+            if not w.wds_staging_dir and (w.wds_destination or w.wds_destinations):
+                w.wds_staging_dir = os.path.join(cfg.state_dir, "wds-staging")
 
         cfg.post_batch_hooks = cfg._build_auto_hooks() + cfg.post_batch_hooks
         return cfg
+
+    def cohort_lock_keys(self) -> list[str]:
+        """Return normalized output-cohort keys this dispatcher mutates.
+
+        Keys are based on WDS destination and model, because those define the
+        shared output namespace. Multiple configs targeting the same key must
+        not run concurrently unless explicitly allowed.
+        """
+        keys: set[str] = set()
+        for w in self.watchers:
+            for model, dest in (w.wds_destinations or {}).items():
+                if dest and model:
+                    keys.add(f"{dest.rstrip('/')}::{model}")
+        if self.cohort_lock_name:
+            keys.add(self.cohort_lock_name)
+        return sorted(keys)
+
+    def resolved_cohort_lock_dir(self) -> str:
+        if self.cohort_lock_dir:
+            return self.cohort_lock_dir
+        return str(Path(self.state_dir).resolve().parent / "locks")
+
+    @staticmethod
+    def lock_filename_for_key(key: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", key).strip("_")
+        return (safe or "cohort") + ".lock"
 
     def _build_auto_hooks(self) -> list:
         """Generate WDS-append and Databricks-sync post-batch hooks from watcher config."""
@@ -223,6 +264,7 @@ class Config:
                     ]
                     if w.wds_staging_dir:
                         args.append("--staging-dir=" + w.wds_staging_dir)
+                    args.append("--lock-dir=" + self.resolved_cohort_lock_dir())
                     if w.wds_s3_max_concurrency != 4:
                         args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
                     if self.cleanup_results:
@@ -263,6 +305,7 @@ class Config:
                     ]
                     if w.wds_staging_dir:
                         args.append("--staging-dir=" + w.wds_staging_dir)
+                    args.append("--lock-dir=" + self.resolved_cohort_lock_dir())
                     if w.wds_s3_max_concurrency != 4:
                         args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
                     if w.s3_endpoint:
@@ -308,6 +351,30 @@ def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str],
     if phase:
         hook["_phase"] = phase
     return hook
+
+
+def _apply_wds_destination_defaults(w: WatcherConfig) -> None:
+    """Expand a single WDS destination root across configured models.
+
+    Preferred config is `wds_destination: s3://bucket/wds`, which applies to
+    every model in `watcher.models`. For backward compatibility, if
+    `wds_destinations` contains a single unique destination root, missing models
+    also inherit that root automatically.
+    """
+    if not w.models:
+        return
+
+    default_dest = w.wds_destination
+    if not default_dest and w.wds_destinations:
+        unique_dests = {dest for dest in w.wds_destinations.values() if dest}
+        if len(unique_dests) == 1:
+            default_dest = next(iter(unique_dests))
+
+    if not default_dest:
+        return
+
+    for model in w.models:
+        w.wds_destinations.setdefault(model, default_dest)
 
 
 def _load_secrets_env(path: str, watcher: WatcherConfig) -> None:
@@ -369,9 +436,24 @@ def _load_nf_secrets(secret_names: list | dict, target: object) -> None:
             log.warning("Could not load Nextflow secret %s: %s", secret_name, exc)
 
 
-def _read_nf_model_types(repo_dir: str) -> list[str]:
-    """Parse model_types list from nextflow.config."""
+def _read_nf_model_types(repo_dir: str, nextflow_params_file: str = "") -> list[str]:
+    """Parse model_types from the active Nextflow config surface.
+
+    Prefer `nextflow_params_file` when present, since it overrides the repo
+    defaults actually used by the dispatcher's Nextflow runs. Fall back to the
+    first `model_types = [...]` list found in `nextflow.config`.
+    """
     import re
+    if nextflow_params_file:
+        try:
+            with open(nextflow_params_file) as f:
+                data = yaml.safe_load(f) or {}
+            models = (data.get("featurize") or {}).get("model_types") or []
+            if isinstance(models, list):
+                return [str(m) for m in models]
+        except OSError:
+            log.warning("Could not read %s — falling back to nextflow.config", nextflow_params_file)
+
     config_path = os.path.join(repo_dir, "nextflow.config")
     try:
         text = Path(config_path).read_text()

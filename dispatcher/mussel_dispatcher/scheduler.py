@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import os
+import csv
+import re
 import signal
 import subprocess
 import sys
@@ -22,6 +24,12 @@ from .watchers import LocalWatcher, S3Watcher, DatabricksWatcher, TcgaWatcher
 from .runner import NextflowRunner, collect_manifests, MANIFEST_HEADER
 
 log = logging.getLogger("mussel-dispatcher")
+
+_SLURM_JOB_ID_RE = re.compile(r"\bjobId:\s*(\d+)\b")
+_SLURM_PROCESSES = (
+    "MUSSEL:EXTRACT_FEATURES:TESSELLATE",
+    "MUSSEL:EXTRACT_FEATURES:FEATURIZE_BATCH",
+)
 
 
 import socket as _socket
@@ -86,6 +94,84 @@ def _start_sidecars(cfg: Config, config_path: str) -> list[subprocess.Popen]:
             procs.append(proxy)
 
     return procs
+
+
+def _batch_trace_path(log_dir: str, batch_id: str) -> str:
+    return os.path.join(log_dir, f"batch_{batch_id}.trace.tsv")
+
+
+def _batch_nf_log_path(log_dir: str, batch_id: str) -> str:
+    return os.path.join(log_dir, f"batch_{batch_id}.nf.log")
+
+
+def _collect_slurm_job_ids(trace_path: str | None = None, nf_log_path: str | None = None) -> list[str]:
+    """Collect SLURM job IDs submitted by a single Nextflow batch."""
+    job_ids: set[str] = set()
+
+    if trace_path:
+        try:
+            with open(trace_path, newline="") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                for row in reader:
+                    name = row.get("name") or ""
+                    if not any(proc in name for proc in _SLURM_PROCESSES):
+                        continue
+                    native_id = (row.get("native_id") or "").strip()
+                    if native_id.isdigit():
+                        job_ids.add(native_id)
+        except OSError:
+            pass
+
+    if nf_log_path:
+        try:
+            with open(nf_log_path) as f:
+                for line in f:
+                    if "[SLURM] submitted process" not in line:
+                        continue
+                    if not any(proc in line for proc in _SLURM_PROCESSES):
+                        continue
+                    match = _SLURM_JOB_ID_RE.search(line)
+                    if match:
+                        job_ids.add(match.group(1))
+        except OSError:
+            pass
+
+    return sorted(job_ids, key=int)
+
+
+def _scancel_slurm_jobs(batch_id: str, job_ids: list[str]) -> int:
+    """Cancel submitted SLURM jobs for a batch. Returns number of IDs submitted to scancel."""
+    if not job_ids:
+        return 0
+
+    cancelled = 0
+    chunk_size = 100
+    for i in range(0, len(job_ids), chunk_size):
+        chunk = job_ids[i:i + chunk_size]
+        try:
+            result = subprocess.run(
+                ["scancel", *chunk],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.warning("Batch %s: failed to scancel %d SLURM job(s): %s", batch_id, len(chunk), exc)
+            continue
+        if result.returncode == 0:
+            cancelled += len(chunk)
+        else:
+            stderr = (result.stderr or result.stdout or "").strip()
+            log.warning(
+                "Batch %s: scancel returned %d for %d SLURM job(s): %s",
+                batch_id,
+                result.returncode,
+                len(chunk),
+                stderr,
+            )
+    if cancelled:
+        log.info("Batch %s: requested cancellation for %d SLURM job(s)", batch_id, cancelled)
+    return cancelled
 
 
 
@@ -339,43 +425,77 @@ class BatchScheduler:
     def _watchdog_stuck_batches(self):
         """Kill NF processes whose log file has not been updated recently.
 
-        A Nextflow process can silently hang — all SLURM tasks finish and write
-        their .exitcode files, but NF's monitoring thread never polls the result,
-        so the batch stays RUNNING forever.  The log file is updated on every NF
-        progress tick, so a stale mtime reliably signals a hung process.
+        Uses two signals to distinguish a genuinely dead NF process from one
+        that is alive but waiting for queued SLURM jobs:
 
-        When a stuck batch is detected its NF process is killed (SIGTERM then
-        SIGKILL).  The RunManager's _on_done callback fires, marks the batch
-        FAILED, and the periodic retry sweep resets slides to PENDING for
-        re-dispatch.
+        1. **NF internal debug log** (``batch_{id}.nf.log``) — Nextflow writes
+           to this file every ~5 min while it polls ``squeue``, even when every
+           SLURM job is still PENDING.  If this log was updated within the last
+           20 minutes the NF JVM is alive; the cluster is simply busy and no
+           kill is issued regardless of how old the stdout log is.
 
-        Controlled by ``stuck_batch_timeout_hours`` in the dispatcher config
-        (default 4 h).  Set to 0 to disable.
+        2. **Batch stdout log** (``batch_{id}.log``) — only updated when a task
+           starts or finishes.  Used as the staleness signal when the internal
+           log does not exist (batches dispatched before the ``-log`` flag was
+           added).
+
+        ``stuck_batch_timeout_hours`` is applied against whichever log is used
+        as the staleness signal.  Because a healthy NF updates its internal log
+        every 5 min, a value of 1 h is sufficient to catch a genuinely crashed
+        process while never firing on a congested cluster.  Set to 0 to disable.
         """
         timeout_hours = self.cfg.stuck_batch_timeout_hours
         if not timeout_hours:
             return
         cutoff = time.time() - timeout_hours * 3600
+        # NF polls squeue every ~5 min and writes to its internal log each time.
+        # If the log was touched within this window the JVM is running normally.
+        nf_alive_window = 20 * 60  # seconds
+
         for batch in self.state.get_running_batches():
             batch_id = batch["batch_id"]
             nf_pid = batch.get("nf_pid")
             if not nf_pid:
                 continue
-            log_path = os.path.join(self.cfg.log_dir, f"batch_{batch_id}.log")
+
+            # Primary signal: NF internal debug log (present on newer batches).
+            nf_log_path = os.path.join(self.cfg.log_dir, f"batch_{batch_id}.nf.log")
             try:
-                mtime = os.path.getmtime(log_path)
+                nf_log_mtime = os.path.getmtime(nf_log_path)
             except OSError:
-                continue
-            if mtime < cutoff:
-                idle_hours = (time.time() - mtime) / 3600
+                nf_log_mtime = None
+
+            if nf_log_mtime is not None:
+                if time.time() - nf_log_mtime < nf_alive_window:
+                    # NF is alive and actively polling SLURM.  The cluster is
+                    # congested but the batch is not stuck — skip.
+                    continue
+                stale_mtime = nf_log_mtime
+                signal_name = "nf.log"
+            else:
+                # Fallback for batches dispatched before the -log flag was added.
+                log_path = os.path.join(self.cfg.log_dir, f"batch_{batch_id}.log")
+                try:
+                    stale_mtime = os.path.getmtime(log_path)
+                except OSError:
+                    continue
+                signal_name = "log"
+
+            if stale_mtime < cutoff:
+                idle_hours = (time.time() - stale_mtime) / 3600
                 log.warning(
-                    "Batch %s: log file silent for %.1fh (last update %s) — "
+                    "Batch %s: %s silent for %.1fh (last update %s) — "
                     "killing stuck NF process PID=%d",
-                    batch_id, idle_hours,
-                    datetime.fromtimestamp(mtime).strftime("%H:%M:%S"),
+                    batch_id, signal_name, idle_hours,
+                    datetime.fromtimestamp(stale_mtime).strftime("%H:%M:%S"),
                     nf_pid,
                 )
-                _kill_orphaned_nf(batch_id, nf_pid)
+                _kill_orphaned_nf(
+                    batch_id,
+                    nf_pid,
+                    trace_path=_batch_trace_path(self.cfg.log_dir, batch_id),
+                    nf_log_path=_batch_nf_log_path(self.cfg.log_dir, batch_id),
+                )
 
     def _cleanup_failed_work_dirs(self):
         """Periodically remove orphaned work dirs for FAILED batches.
@@ -415,7 +535,7 @@ class BatchScheduler:
         # Don't submit a new batch if we're already at the concurrency limit.
         # Uses a BoundedSemaphore (not len(_futures)) to avoid the TOCTOU race where
         # fast-fail resumes release their slot between the check and submit().
-        if not self.run_manager.has_capacity():
+        if not self.run_manager.has_fresh_dispatch_capacity():
             return
         with self._lock:
             n = len(self._pending)
@@ -447,7 +567,17 @@ class BatchScheduler:
                 return
             batch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
             log.info("_maybe_dispatch: generated batch_id=%s for %d slides", batch_id, len(batch))
-            self.run_manager.submit(batch_id, batch)
+            if not self.run_manager.submit(batch_id, batch):
+                with self._lock:
+                    self._pending.extendleft(reversed(batch))
+                    if self._first_seen_at is None:
+                        self._first_seen_at = time.monotonic()
+                log.info(
+                    "Batch %s was not submitted because capacity disappeared; "
+                    "returned %d slide(s) to pending queue",
+                    batch_id,
+                    len(batch),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +590,7 @@ class RunManager:
         self.state = state
         self._executor = ThreadPoolExecutor(max_workers=cfg.max_concurrent_runs,
                                             thread_name_prefix="nextflow-run")
+        self._shutdown_event = threading.Event()
         self._futures: dict = {}
         # Maps batch_id → set of slide_ids that have been popped from the dispatch
         # deque and submitted to the thread pool but not yet written as DISPATCHED in
@@ -488,6 +619,26 @@ class RunManager:
             self._slots.release()
         return acquired
 
+    def has_fresh_dispatch_capacity(self) -> bool:
+        """Return True when both in-process and persisted batch state have room.
+
+        The semaphore only knows about futures owned by this Python process.  If
+        the dispatcher is killed after launching Nextflow, the replacement
+        process can otherwise start fresh batches while old RUNNING rows and
+        their SLURM children still exist.  Treat the DB as authoritative for
+        fresh dispatch and let startup recovery decide whether to resume or reset
+        existing RUNNING rows.
+        """
+        running = self.state.count_running_batches()
+        if running >= self.cfg.max_concurrent_runs:
+            log.debug(
+                "Fresh dispatch blocked: %d RUNNING batch(es) in DB >= max_concurrent_runs=%d",
+                running,
+                self.cfg.max_concurrent_runs,
+            )
+            return False
+        return self.has_capacity()
+
     def submit(self, batch_id: str, slides: list) -> bool:
         """Submit a new batch.  Returns False if at the concurrency limit."""
         # Fail fast if an old batch_id slips through — this should never happen
@@ -506,11 +657,23 @@ class RunManager:
         except (ValueError, AttributeError):
             pass
 
+        running = self.state.count_running_batches()
+        if running >= self.cfg.max_concurrent_runs:
+            log.warning(
+                "Refusing fresh batch %s: %d RUNNING batch(es) already in DB "
+                "(max_concurrent_runs=%d)",
+                batch_id,
+                running,
+                self.cfg.max_concurrent_runs,
+            )
+            return False
         if not self._slots.acquire(blocking=False):
             return False
         log.debug("submit: batch_id=%s slides=%d", batch_id, len(slides))
         slide_ids = {s["slide_id"] for s in slides if s.get("slide_id")}
-        runner = NextflowRunner(self.cfg, batch_id, slides, self.state)
+        runner = NextflowRunner(
+            self.cfg, batch_id, slides, self.state, shutdown_event=self._shutdown_event
+        )
         with self._lock:
             self._in_flight[batch_id] = slide_ids
             future: Future = self._executor.submit(runner.run)
@@ -541,7 +704,9 @@ class RunManager:
             return False
         # Resume batches have slides already DISPATCHED in DB — no in-flight tracking needed.
         runner = NextflowRunner(self.cfg, batch_id, [], self.state,
-                                resume=True, existing_csv_path=csv_path, existing_work_dir=work_dir)
+                                resume=True, existing_csv_path=csv_path,
+                                existing_work_dir=work_dir,
+                                shutdown_event=self._shutdown_event)
         with self._lock:
             future: Future = self._executor.submit(runner.run)
             self._futures[batch_id] = future
@@ -559,6 +724,7 @@ class RunManager:
             log.error("Unhandled exception in batch %s: %s", batch_id, e)
 
     def shutdown(self, wait: bool = True):
+        self._shutdown_event.set()
         log.info("RunManager shutting down (wait=%s)…", wait)
         self._executor.shutdown(wait=wait)
 
@@ -571,6 +737,7 @@ class RunManager:
 
         Returns the number of batches that were marked FAILED.
         """
+        self._shutdown_event.set()
         with self._lock:
             active = list(self._futures.keys())
 
@@ -579,7 +746,13 @@ class RunManager:
             nf_pid = self.state.get_batch_nf_pid(batch_id)
             if nf_pid:
                 try:
-                    _kill_orphaned_nf(batch_id, nf_pid, sigterm_wait=3.0)
+                    _kill_orphaned_nf(
+                        batch_id,
+                        nf_pid,
+                        sigterm_wait=3.0,
+                        trace_path=_batch_trace_path(self.cfg.log_dir, batch_id),
+                        nf_log_path=_batch_nf_log_path(self.cfg.log_dir, batch_id),
+                    )
                 except Exception:
                     pass
             self.state.reset_dispatched_to_pending(batch_id)
@@ -598,7 +771,13 @@ class RunManager:
 # Recovery
 # ---------------------------------------------------------------------------
 
-def _kill_orphaned_nf(batch_id: str, pid: int, sigterm_wait: float = 10.0) -> None:
+def _kill_orphaned_nf(
+    batch_id: str,
+    pid: int,
+    sigterm_wait: float = 10.0,
+    trace_path: str | None = None,
+    nf_log_path: str | None = None,
+) -> None:
     """SIGTERM then SIGKILL an orphaned NF process so its run name is freed.
 
     NF registers the run name in ~/.nextflow/history as 'active' for the lifetime
@@ -611,12 +790,14 @@ def _kill_orphaned_nf(batch_id: str, pid: int, sigterm_wait: float = 10.0) -> No
         os.kill(pid, 0)  # Check if process exists
     except OSError:
         log.debug("Batch %s: orphaned NF PID %d already gone", batch_id, pid)
+        _scancel_slurm_jobs(batch_id, _collect_slurm_job_ids(trace_path, nf_log_path))
         return
 
     log.info("Batch %s: terminating orphaned NF process PID=%d", batch_id, pid)
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
+        _scancel_slurm_jobs(batch_id, _collect_slurm_job_ids(trace_path, nf_log_path))
         return  # Already gone
 
     # Wait up to sigterm_wait seconds for graceful exit, then SIGKILL.
@@ -626,6 +807,7 @@ def _kill_orphaned_nf(batch_id: str, pid: int, sigterm_wait: float = 10.0) -> No
             os.kill(pid, 0)
         except OSError:
             log.debug("Batch %s: PID %d exited after SIGTERM", batch_id, pid)
+            _scancel_slurm_jobs(batch_id, _collect_slurm_job_ids(trace_path, nf_log_path))
             return
         time.sleep(0.5)
 
@@ -634,6 +816,7 @@ def _kill_orphaned_nf(batch_id: str, pid: int, sigterm_wait: float = 10.0) -> No
         log.warning("Batch %s: PID %d did not exit after SIGTERM; sent SIGKILL", batch_id, pid)
     except OSError:
         pass
+    _scancel_slurm_jobs(batch_id, _collect_slurm_job_ids(trace_path, nf_log_path))
 
 
 def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: bool = True,
@@ -680,6 +863,10 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
             batch_id = batch["batch_id"]
             work_dir = batch.get("work_dir")
             csv_path = batch.get("csv_path")
+            log_path = batch.get("log_path")
+            batch_log_dir = os.path.dirname(log_path) if log_path else ""
+            trace_path = _batch_trace_path(batch_log_dir, batch_id) if batch_log_dir else None
+            nf_log_path = _batch_nf_log_path(batch_log_dir, batch_id) if batch_log_dir else None
 
             # Skip batches whose batch_id encodes a creation time older than 24 hours.
             # batch_ids are formatted as "%Y%m%dT%H%M%S_<uuid>" — parse the prefix.
@@ -698,41 +885,53 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
             except (ValueError, KeyError):
                 pass  # batch_id doesn't match expected format; proceed normally
 
-            # If nf_pid is recorded but the process is no longer alive, the batch
-            # is a zombie left by a SIGKILL'd dispatcher whose runner thread wrote
-            # to the DB but never cleaned up.  Mark it FAILED immediately so its
-            # slides return to PENDING without needing a resume attempt.
-            # Also treat nf_pid=None as zombie: the runner thread wrote add_batch()
-            # but was killed before recording the NF PID, meaning we cannot track
-            # or resume the batch reliably.
+            has_resume_state = bool(
+                work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path)
+            )
+
+            # If nf_pid is missing or dead but the work dir and batch CSV still
+            # exist, prefer a Nextflow -resume over resetting the slides. This
+            # covers dispatcher interruptions that happen after a batch has
+            # started doing real work but before the runner thread can clean up.
             nf_pid = batch.get("nf_pid")
             if not nf_pid:
-                log.info("  Batch %s: no nf_pid recorded — zombie (runner died before NF start), "
-                         "resetting slides to PENDING", batch_id)
+                if has_resume_state:
+                    _scancel_slurm_jobs(batch_id, _collect_slurm_job_ids(trace_path, nf_log_path))
+                    log.info("  Batch %s: no nf_pid recorded but work dir is intact — will resume with -resume",
+                             batch_id)
+                    resume_specs.append((batch_id, csv_path, work_dir))
+                    continue
+                log.info("  Batch %s: no nf_pid recorded and no resumable state — resetting slides to PENDING",
+                         batch_id)
                 state.reset_dispatched_to_pending(batch_id)
                 state.complete_batch(batch_id, exit_code=-1)
                 continue
+
+            nf_alive = True
             try:
                 os.kill(nf_pid, 0)   # raises OSError if process is dead
             except OSError:
-                log.info("  Batch %s: NF process PID=%d is dead — resetting slides to PENDING",
-                         batch_id, nf_pid)
-                state.reset_dispatched_to_pending(batch_id)
-                state.complete_batch(batch_id, exit_code=-1)
-                continue
+                nf_alive = False
 
-            if work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path):
+            if has_resume_state:
                 # Kill any orphaned NF process from the previous dispatcher run.
                 # Without this, NF refuses to resume with "-name <same_name>" because the
                 # original process still holds the run name in ~/.nextflow/history.
-                nf_pid = batch.get("nf_pid")
-                if nf_pid:
-                    _kill_orphaned_nf(batch_id, nf_pid)
-
-                log.info("  Batch %s: work dir intact — will resume with -resume", batch_id)
+                if nf_alive:
+                    _kill_orphaned_nf(batch_id, nf_pid, trace_path=trace_path, nf_log_path=nf_log_path)
+                    log.info("  Batch %s: work dir intact and NF PID=%d is alive — will resume with -resume",
+                             batch_id, nf_pid)
+                else:
+                    _scancel_slurm_jobs(batch_id, _collect_slurm_job_ids(trace_path, nf_log_path))
+                    log.info("  Batch %s: NF PID=%d is dead but work dir is intact — will resume with -resume",
+                             batch_id, nf_pid)
                 resume_specs.append((batch_id, csv_path, work_dir))
                 # Leave slides in DISPATCHED state; they'll transition to DONE/FAILED on resume completion
             else:
+                if nf_alive:
+                    _kill_orphaned_nf(batch_id, nf_pid, trace_path=trace_path, nf_log_path=nf_log_path)
+                else:
+                    _scancel_slurm_jobs(batch_id, _collect_slurm_job_ids(trace_path, nf_log_path))
                 log.info("  Batch %s: work dir missing — resetting slides to PENDING", batch_id)
                 state.reset_dispatched_to_pending(batch_id)
                 state.complete_batch(batch_id, exit_code=-1)
@@ -750,6 +949,68 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
         log.info("Re-enqueued %d slide(s) for dispatch.", len(pending))
 
     return resume_specs
+
+
+def _pid_is_alive(pid: int) -> bool:
+    proc_path = f"/proc/{pid}"
+    if os.path.isdir("/proc") and not os.path.exists(proc_path):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _read_lock_pid(path: str) -> int | None:
+    try:
+        with open(path) as fh:
+            return int(fh.read().strip().split()[0])
+    except (FileNotFoundError, ValueError, OSError, IndexError):
+        return None
+
+
+def _acquire_pid_lock(path: str, *, label: str, payload: str = "") -> None:
+    """Atomically acquire a PID lock, removing it only when the PID is stale."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            try:
+                body = f"{os.getpid()} {payload}\n".strip() + "\n"
+                os.write(fd, body.encode())
+            finally:
+                os.close(fd)
+            log.info("%s lockfile written: %s (PID=%d)", label, path, os.getpid())
+            return
+        except FileExistsError:
+            old_pid = _read_lock_pid(path)
+            if old_pid and _pid_is_alive(old_pid):
+                log.error(
+                    "%s is already locked by PID %d (%s). Stop that dispatcher first, "
+                    "or remove the lockfile if it is stale.",
+                    label, old_pid, path,
+                )
+                sys.exit(1)
+            if old_pid:
+                log.warning("Stale %s lockfile (PID %d no longer running). Removing: %s",
+                            label, old_pid, path)
+            else:
+                log.warning("Unreadable stale %s lockfile. Removing: %s", label, path)
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+
+def _release_lock(path: str) -> None:
+    try:
+        if _read_lock_pid(path) == os.getpid():
+            os.unlink(path)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -779,8 +1040,10 @@ def main():
         stream=sys.stderr,
     )
 
-    cfg = Config.load(sys.argv[1])
-    log.info("Configuration loaded from %s", sys.argv[1])
+    config_arg = sys.argv[1]
+    config_path = os.path.realpath(config_arg)
+    cfg = Config.load(config_arg)
+    log.info("Configuration loaded from %s", config_arg)
 
     # Auto-derive tower_endpoint from tower_proxy_port if not explicitly set.
     if not cfg.tower_endpoint and cfg.tower_proxy_port:
@@ -807,63 +1070,93 @@ def main():
     )
     _existing_pids = [int(p) for p in _scan.stdout.split() if p.strip().isdigit() and int(p) != os.getpid()]
     if _existing_pids:
-        # Filter out our own child processes (sidecars, etc.) — only flag true dispatcher processes
+        # Filter out our own child processes (sidecars, etc.) and only block
+        # a live dispatcher that is using the same config file. Separate
+        # dispatchers with isolated configs/state are allowed.
         _rogue = []
         for _pid in _existing_pids:
             try:
-                _cmd = open(f"/proc/{_pid}/cmdline").read().replace("\x00", " ")
-                if "mussel_dispatcher" in _cmd and "tower" not in _cmd and "dashboard" not in _cmd:
-                    _rogue.append((_pid, _cmd[:80]))
+                _raw_cmd = open(f"/proc/{_pid}/cmdline").read().replace("\x00", " ").strip()
+                if "mussel_dispatcher" not in _raw_cmd or "tower" in _raw_cmd or "dashboard" in _raw_cmd:
+                    continue
+                _exe = os.path.basename(os.readlink(f"/proc/{_pid}/exe"))
+                if not _exe.startswith("python"):
+                    continue
+                _parts = _raw_cmd.split()
+                if not _parts:
+                    continue
+                _other_cfg = _parts[-1]
+                if not os.path.isabs(_other_cfg):
+                    _cwd = os.readlink(f"/proc/{_pid}/cwd")
+                    _other_cfg = os.path.join(_cwd, _other_cfg)
+                if os.path.realpath(_other_cfg) == config_path:
+                    _rogue.append((_pid, _raw_cmd[:120]))
             except OSError:
                 pass
         if _rogue:
-            log.error(
-                "Found %d existing mussel_dispatcher process(es) — refusing to start to prevent "
-                "duplicate dispatching. Kill them first: %s",
+            log.warning(
+                "Found %d existing mussel_dispatcher-like process(es) for config %s. "
+                "Continuing to authoritative PID/cohort lock checks because process scans can "
+                "return stale or transient matches: %s",
                 len(_rogue),
+                config_path,
                 ", ".join(f"PID {p} ({c}...)" for p, c in _rogue),
             )
-            sys.exit(1)
 
-    def _write_pid_lock():
-        """Atomically create the lockfile, raising FileExistsError if it already exists."""
-        fd = os.open(pid_lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        try:
-            os.write(fd, str(os.getpid()).encode())
-        finally:
-            os.close(fd)
+    _acquire_pid_lock(pid_lock_path, label="PID", payload=config_path)
 
-    while True:
-        try:
-            _write_pid_lock()
-            break  # acquired
-        except FileExistsError:
-            # Lockfile exists — check if holder is still alive
-            try:
-                with open(pid_lock_path) as _fh:
-                    old_pid = int(_fh.read().strip())
-                os.kill(old_pid, 0)
-                log.error(
-                    "Another dispatcher instance is already running (PID %d, lockfile %s). "
-                    "Kill it first or delete the lockfile if it is stale.",
-                    old_pid, pid_lock_path,
-                )
-                sys.exit(1)
-            except ProcessLookupError:
-                log.warning("Stale PID lockfile (PID %d no longer running). Removing.", old_pid)
-                os.unlink(pid_lock_path)
-                # Loop back to retry atomic create
-            except (FileNotFoundError, ValueError, OSError):
-                # Lockfile vanished or unreadable — retry
-                pass
-    log.info("PID lockfile written: %s (PID=%d)", pid_lock_path, os.getpid())
+    cohort_lock_paths: list[str] = []
+    if cfg.allow_shared_cohort:
+        log.warning("allow_shared_cohort=true: skipping shared cohort lock")
+    else:
+        lock_dir = cfg.resolved_cohort_lock_dir()
+        for key in cfg.cohort_lock_keys():
+            lock_path = os.path.join(lock_dir, Config.lock_filename_for_key(key))
+            _acquire_pid_lock(lock_path, label=f"cohort {key}", payload=config_path)
+            cohort_lock_paths.append(lock_path)
 
     # Launch dashboard and tower_proxy sidecars (ports from config).
-    sidecar_procs = _start_sidecars(cfg, sys.argv[1])
+    sidecar_procs = _start_sidecars(cfg, config_arg)
 
     db_path = os.path.join(cfg.state_dir, "dispatcher.db")
-    state = StateStore(db_path)
+
+    # Load manifest for priority dispatch (slides NOT in manifest get priority=1).
+    manifest_id_set: frozenset | None = None
+    if cfg.manifest_path:
+        import csv as _csv
+        try:
+            _ids: set[str] = set()
+            with open(cfg.manifest_path, newline="") as _f:
+                for _row in _csv.reader(_f):
+                    if _row:
+                        _ids.add(_row[cfg.manifest_id_column].strip())
+            manifest_id_set = frozenset(_ids)
+            log.info("Loaded manifest: %s (%d IDs) — slides not in manifest get priority=1",
+                     cfg.manifest_path, len(manifest_id_set))
+        except Exception as _e:
+            log.warning("Could not load manifest %s: %s — priority dispatch disabled", cfg.manifest_path, _e)
+
+    state = StateStore(db_path, manifest_id_set=manifest_id_set)
     log.info("State store: %s", db_path)
+
+    # Apply startup priority update: set priority=1 for existing PENDING slides not in manifest.
+    if manifest_id_set is not None:
+        import tempfile as _tmp
+        try:
+            _conn = state._conn()
+            _conn.execute("CREATE TEMP TABLE IF NOT EXISTS _manifest_ids (id TEXT PRIMARY KEY)")
+            _conn.execute("DELETE FROM _manifest_ids")
+            _conn.executemany("INSERT OR IGNORE INTO _manifest_ids VALUES (?)",
+                              ((mid,) for mid in manifest_id_set))
+            _updated = _conn.execute(
+                "UPDATE slides SET priority=1 WHERE priority=0 "
+                "AND slide_id NOT IN (SELECT id FROM _manifest_ids)"
+            ).rowcount
+            _conn.execute("DROP TABLE IF EXISTS _manifest_ids")
+            _conn.commit()
+            log.info("Priority update: set priority=1 for %d slide(s) not in manifest", _updated)
+        except Exception as _e:
+            log.warning("Priority startup update failed: %s", _e)
 
     stop_event = threading.Event()
 
@@ -942,6 +1235,8 @@ def main():
 
     if not watchers:
         log.error("No watchers configured. Exiting.")
+        for lock_path in cohort_lock_paths:
+            _release_lock(lock_path)
         try:
             os.unlink(pid_lock_path)
         except OSError:
@@ -968,6 +1263,8 @@ def main():
         os.unlink(pid_lock_path)
     except OSError:
         pass
+    for lock_path in cohort_lock_paths:
+        _release_lock(lock_path)
 
 
 if __name__ == "__main__":

@@ -46,11 +46,15 @@ Usage
 
 import argparse
 import csv
+import fcntl
 import io
 import json
 import logging
+import os
+import re
 import sys
 import tarfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import h5py
@@ -58,6 +62,32 @@ import numpy as np
 import torch
 
 log = logging.getLogger(__name__)
+
+
+def _lock_filename_for_key(key: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", key).strip("_")
+    return (safe or "wds") + ".lock"
+
+
+@contextmanager
+def _wds_append_lock(lock_dir: Path | None, wds_dest: str, model_type: str):
+    """Serialize WDS index/shard mutation across dispatcher configs."""
+    if lock_dir is None:
+        yield
+        return
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / _lock_filename_for_key(f"{wds_dest.rstrip('/')}::{model_type}")
+    with lock_path.open("a+") as fh:
+        fh.write(f"pid={os.getpid()}\n")
+        fh.flush()
+        log.info("Waiting for WDS append lock: %s", lock_path)
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        log.info("Acquired WDS append lock: %s", lock_path)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            log.info("Released WDS append lock: %s", lock_path)
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +441,7 @@ def append_wds(
     delete_local: bool = False,
     manifest_csv: Path | None = None,
     s3_max_concurrency: int = 4,
+    lock_dir: Path | None = None,
     slide_to_project: "dict[str, str] | None" = None,
     failed_slides: "set[str] | None" = None,
     also_delete_pt_dirs: "list[Path] | None" = None,
@@ -431,6 +462,27 @@ def append_wds(
       .pt files that are no longer needed after the slide encoder is in WDS).
     Returns the updated index dict.
     """
+    if lock_dir is not None:
+        with _wds_append_lock(lock_dir, wds_dest, model_type):
+            return append_wds(
+                pt_dir=pt_dir,
+                h5_dir=h5_dir,
+                inventory_df=inventory_df,
+                wds_dest=wds_dest,
+                model_type=model_type,
+                staging_dir=staging_dir,
+                max_shard_bytes=max_shard_bytes,
+                dry_run=dry_run,
+                slide_id_filter=slide_id_filter,
+                delete_local=delete_local,
+                manifest_csv=manifest_csv,
+                s3_max_concurrency=s3_max_concurrency,
+                lock_dir=None,
+                slide_to_project=slide_to_project,
+                failed_slides=failed_slides,
+                also_delete_pt_dirs=also_delete_pt_dirs,
+            )
+
     # Build slide_id → project_id lookup: prefer explicit dict, fall back to inventory_df
     if slide_to_project is None:
         inv = inventory_df.copy()
@@ -679,6 +731,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Maximum number of parallel boto3 transfer threads per S3 "
                              "upload/download (default: 4). Reduce to limit ECS endpoint load "
                              "when multiple batches are running concurrently.")
+    parser.add_argument("--lock-dir", default=None,
+                        help="Shared directory for WDS append locks. When set, append operations "
+                             "for the same wds-dest/model are serialized across dispatchers.")
     parser.add_argument("--s3-endpoint", default=None,
                         help="Custom S3 endpoint URL (e.g. http://your-s3-endpoint:9020 for "
                              "ECS). Falls back to S3_ENDPOINT_URL / ECS_ENDPOINT_URL env vars.")
@@ -808,6 +863,7 @@ def main(argv: list[str] | None = None) -> int:
                 delete_local=args.delete_local,
                 manifest_csv=Path(args.manifest_csv) if args.manifest_csv else None,
                 s3_max_concurrency=args.s3_max_concurrency,
+                lock_dir=Path(args.lock_dir) if args.lock_dir else None,
                 slide_to_project=slide_to_project,
                 failed_slides=failed_slides,
                 also_delete_pt_dirs=[Path(d) for d in args.also_delete_pt_dirs.split(",")]

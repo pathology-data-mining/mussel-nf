@@ -206,6 +206,12 @@
                     "type": ["boolean", "string"],
                     "default": false,
                     "description": "generate stitched tiles"
+                },
+                "workflow_batch_size": {
+                    "type": "integer",
+                    "default": 1,
+                    "minimum": 1,
+                    "description": "Number of slides grouped into one TESSELLATE task. 1 preserves per-slide tessellation jobs."
                 }
             }
         },
@@ -347,7 +353,11 @@
                 },
                 "model_precision_overrides": {
                     "type": "object",
-                    "description": "Per-model embedding precision overrides. Takes precedence over embedding_precision. Keys are model type names (e.g. 'optimus'), values are 'float32', 'float16', or 'bfloat16'."
+                    "description": "Per-model embedding precision overrides. Takes precedence over embedding_precision. Keys are model type names (e.g. 'optimus'), values are 'float32', 'float16', or 'bfloat16'.",
+                    "additionalProperties": {
+                        "type": "string",
+                        "enum": ["float32", "float16", "bfloat16"]
+                    }
                 },
                 "benchmark_precisions": {
                     "type": "array",

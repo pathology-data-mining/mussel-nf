@@ -13,8 +13,8 @@ process FEATURIZE_BATCH {
 
     // Publish slide encoder features (always created)
     publishDir path: { def prefix = post_filter ? '' : 'prefilter_'; "${params.outdir}/features/${prefix}${model_type_input}" }, mode: "${params.publish_mode}", pattern: "*.features.{pt,h5}"
-    // Publish patch encoder features (only created when using slide-level model)
-    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; def prefix = post_filter ? '' : 'prefilter_'; "${params.outdir}/features/${prefix}${mt}" }, mode: "${params.publish_mode}", pattern: "*.patch_features.{pt,h5}"
+    // Two-step slide-level extraction writes intermediate patch features only as HDF5.
+    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; def prefix = post_filter ? '' : 'prefilter_'; "${params.outdir}/features/${prefix}${mt}" }, mode: "${params.publish_mode}", pattern: "*.patch_features.h5"
 
     input:
     tuple val(slide_batch), path(slides), path(patch_h5s)
@@ -27,8 +27,7 @@ process FEATURIZE_BATCH {
     output:
     tuple val(batch_metadata), val(model_type_input), path("*.features.pt"), emit: pt
     tuple val(batch_metadata), val(model_type_input), path("*.features.h5"), emit: h5
-    // Patch-level features are only produced when using slide-level encoders (optional)
-    tuple val(batch_metadata), val(model_type), path("*.patch_features.pt"), optional: true, emit: patch_pt
+    // Patch-level H5 features are produced when using slide-level encoders.
     tuple val(batch_metadata), val(model_type), path("*.patch_features.h5"), optional: true, emit: patch_h5
 
     script:
@@ -85,8 +84,49 @@ process FEATURIZE_BATCH {
     embedding_precision_str = (precision != 'float32') ? "embedding_precision=${precision}" : ""
 
     """
+    # For slide-level models (e.g. titan_slide), TITAN runs attention over ALL patch embeddings
+    # simultaneously, making memory O(N²) in patch count. Subsample H5 coords to
+    # slide_max_patches before feature extraction so large slides don't OOM.
+    # Patch encoders (hoptimus1, optimus) are O(N) and use the full H5 — skip this block.
+    PATCH_H5_PATHS="${patch_h5_paths_str}"
+    if [ -n "${slide_model_str}" ]; then
+        python3 - <<'PYEOF'
+import h5py, numpy as np, os, sys
+
+max_p = ${params.featurize.slide_max_patches ?: 0}
+if max_p <= 0:
+    sys.exit(0)
+
+out_paths = []
+for h5_path in [p.strip() for p in "${patch_h5_paths_str}".split(",")]:
+    with h5py.File(h5_path, "r") as f:
+        coords = f["coords"][:]
+        attrs  = dict(f["coords"].attrs)
+    n = len(coords)
+    if n <= max_p:
+        out_paths.append(h5_path)
+        continue
+    rng = np.random.default_rng(abs(hash(h5_path)) % (2**31))
+    idx = np.sort(rng.choice(n, max_p, replace=False))
+    sub_path = h5_path.replace(".patch.h5", ".sub.patch.h5")
+    with h5py.File(sub_path, "w") as f:
+        ds = f.create_dataset("coords", data=coords[idx])
+        for k, v in attrs.items():
+            ds.attrs[k] = v
+    out_paths.append(sub_path)
+    print(f"[subsample_patches] {h5_path}: {n} -> {max_p} patches (wrote {sub_path})",
+          flush=True)
+
+with open(".sub_patch_h5_paths", "w") as fh:
+    fh.write(",".join(out_paths))
+PYEOF
+        if [ -f .sub_patch_h5_paths ]; then
+            PATCH_H5_PATHS=\$(cat .sub_patch_h5_paths)
+        fi
+    fi
+
     extract_features \
-        patch_h5_paths='[${patch_h5_paths_str}]' \
+        patch_h5_paths="[\${PATCH_H5_PATHS}]" \
         slide_paths='[${slide_paths_str}]' \
         slide_ids='[${slide_ids_str}]' \
         output_dir=. \

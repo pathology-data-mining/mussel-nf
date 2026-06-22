@@ -4,7 +4,7 @@ include { ABMIL_BENCHMARK_WORKFLOW } from './abmil_benchmark/main'
 
 include { FEATURIZE_BATCH; FEATURIZE_BATCH as FILTER_FEATURIZE } from './featurize'
 
-include { TESSELLATE; FILTER_TILES; EMIT_MPP_META } from './tessellation'
+include { TESSELLATE; TESSELLATE_BATCH; EMIT_TESSELLATE_PATH_META; FILTER_TILES; EMIT_MPP_META } from './tessellation'
 
 include { TESSELLATE_FEATURIZE_BATCH } from './tessellate_featurize'
 
@@ -20,8 +20,34 @@ workflow EXTRACT_FEATURES {
         ch_samples // tuple val(meta), file(slide)
 
     main:
-        ch_patches = TESSELLATE(ch_samples)
-        EMIT_MPP_META(ch_patches.h5)
+        tessellation_batch_size = params.tiling.workflow_batch_size ?: 1
+        if (tessellation_batch_size > 1) {
+            ch_tessellation_batches = ch_samples
+                .collate(tessellation_batch_size)
+                .map { batch ->
+                    def metas = batch.collect { meta, slide -> meta }
+                    def slides = batch.collect { meta, slide -> slide }
+                    tuple(metas, slides)
+                }
+
+            TESSELLATE_BATCH(ch_tessellation_batches)
+
+            ch_patches_h5 = TESSELLATE_BATCH.out.h5
+                .flatMap { batch_meta, patch_h5_files ->
+                    def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
+                    def meta_by_slide = batch_meta.collectEntries { meta -> [meta.slide_id.toString(), meta] }
+                    files_list.collect { patch_h5_file ->
+                        def slide_id = patch_h5_file.name.replaceFirst(/\.patch\.h5$/, '')
+                        tuple(meta_by_slide[slide_id], patch_h5_file)
+                    }.findAll { meta, patch_h5_file -> meta != null }
+                }
+            EMIT_TESSELLATE_PATH_META(ch_patches_h5)
+        } else {
+            TESSELLATE(ch_samples)
+            ch_patches_h5 = TESSELLATE.out.h5
+        }
+
+        EMIT_MPP_META(ch_patches_h5)
 
         if (params.tiling.filter_tiles) {
             // Batch slides for filtering feature extraction
@@ -29,7 +55,7 @@ workflow EXTRACT_FEATURES {
             // Then FILTER_TILES will use the classifier_pkl to filter tiles
             filter_model_type = Channel.of(params.tiling.filter_model_type)
 
-            ch_filter_slide_batches = ch_samples.combine(ch_patches.h5, by: 0)
+            ch_filter_slide_batches = ch_samples.combine(ch_patches_h5, by: 0)
                 .collate(params.featurize.workflow_batch_size ?: params.featurize.slide_batch_size ?: 8)
                 .map { batch ->
                     def slides = batch.collect { meta, slide, patch_h5 -> slide }
@@ -47,7 +73,7 @@ workflow EXTRACT_FEATURES {
                     // Sort both lists by slide_id so positional pairing is correct
                     // regardless of channel arrival order (which is nondeterministic).
                     def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                    def sorted_files = files_list.sort { it.name }
+                    def sorted_files = files_list.toSorted { it.name }
                     [sorted_meta, model_type, sorted_files]
                 }
                 .transpose(by: [0, 2])
@@ -81,7 +107,7 @@ workflow EXTRACT_FEATURES {
                 .flatMap { batch_meta, model_type, pt_files ->
                     def files_list = pt_files instanceof List ? pt_files : [pt_files]
                     def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                    def sorted_files = files_list.sort { it.name }
+                    def sorted_files = files_list.toSorted { it.name }
                     [sorted_meta, sorted_files].transpose().collect { meta, pt_file ->
                         tuple(meta, model_type, pt_file)
                     }
@@ -91,7 +117,7 @@ workflow EXTRACT_FEATURES {
                 .flatMap { batch_meta, model_type, h5_files ->
                     def files_list = h5_files instanceof List ? h5_files : [h5_files]
                     def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                    def sorted_files = files_list.sort { it.name }
+                    def sorted_files = files_list.toSorted { it.name }
                     [sorted_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
@@ -101,7 +127,7 @@ workflow EXTRACT_FEATURES {
                 .flatMap { batch_meta, model_type, patch_h5_files ->
                     def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
                     def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                    def sorted_files = files_list.sort { it.name }
+                    def sorted_files = files_list.toSorted { it.name }
                     [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
                         tuple(meta, model_type, patch_h5_file)
                     }
@@ -111,7 +137,7 @@ workflow EXTRACT_FEATURES {
             ch_model_types = Channel.fromList(params.featurize.model_types)
 
             // Batch slides together for processing (workflow batching)
-            ch_slide_batches = ch_samples.combine(ch_patches.h5, by: 0)
+            ch_slide_batches = ch_samples.combine(ch_patches_h5, by: 0)
                 .collate(params.featurize.workflow_batch_size ?: params.featurize.slide_batch_size ?: 8)
                 .map { batch ->
                     def slides = batch.collect { meta, slide, patch_h5 -> slide }
@@ -131,7 +157,7 @@ workflow EXTRACT_FEATURES {
                 .flatMap { batch_meta, model_type, pt_files ->
                     def files_list = pt_files instanceof List ? pt_files : [pt_files]
                     def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                    def sorted_files = files_list.sort { it.name }
+                    def sorted_files = files_list.toSorted { it.name }
                     [sorted_meta, sorted_files].transpose().collect { meta, pt_file ->
                         tuple(meta, model_type, pt_file)
                     }
@@ -141,7 +167,7 @@ workflow EXTRACT_FEATURES {
                 .flatMap { batch_meta, model_type, h5_files ->
                     def files_list = h5_files instanceof List ? h5_files : [h5_files]
                     def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                    def sorted_files = files_list.sort { it.name }
+                    def sorted_files = files_list.toSorted { it.name }
                     [sorted_meta, sorted_files].transpose().collect { meta, h5_file ->
                         tuple(meta, model_type, h5_file)
                     }
@@ -151,7 +177,7 @@ workflow EXTRACT_FEATURES {
                 .flatMap { batch_meta, model_type, patch_h5_files ->
                     def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
                     def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                    def sorted_files = files_list.sort { it.name }
+                    def sorted_files = files_list.toSorted { it.name }
                     [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
                         tuple(meta, model_type, patch_h5_file)
                     }
@@ -160,7 +186,7 @@ workflow EXTRACT_FEATURES {
 
 
     emit:
-        patches_h5 = ch_patches.h5
+        patches_h5 = ch_patches_h5
         pt = ch_pt_out
         h5 = ch_h5_out
         patch_h5 = ch_patch_h5_out
@@ -194,7 +220,7 @@ workflow EXTRACT_FEATURES_ONE_STEP {
             .flatMap { batch_meta, model_type, pt_files ->
                 def files_list = pt_files instanceof List ? pt_files : [pt_files]
                 def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                def sorted_files = files_list.sort { it.name }
+                def sorted_files = files_list.toSorted { it.name }
                 [sorted_meta, sorted_files].transpose().collect { meta, pt_file ->
                     tuple(meta, model_type, pt_file)
                 }
@@ -204,7 +230,7 @@ workflow EXTRACT_FEATURES_ONE_STEP {
             .flatMap { batch_meta, model_type, h5_files ->
                 def files_list = h5_files instanceof List ? h5_files : [h5_files]
                 def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                def sorted_files = files_list.sort { it.name }
+                def sorted_files = files_list.toSorted { it.name }
                 [sorted_meta, sorted_files].transpose().collect { meta, h5_file ->
                     tuple(meta, model_type, h5_file)
                 }
@@ -214,7 +240,7 @@ workflow EXTRACT_FEATURES_ONE_STEP {
             .flatMap { batch_meta, patch_h5_files ->
                 def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
                 def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                def sorted_files = files_list.sort { it.name }
+                def sorted_files = files_list.toSorted { it.name }
                 [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
                     tuple(meta, patch_h5_file)
                 }
@@ -224,7 +250,7 @@ workflow EXTRACT_FEATURES_ONE_STEP {
             .flatMap { batch_meta, model_type, patch_h5_files ->
                 def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
                 def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                def sorted_files = files_list.sort { it.name }
+                def sorted_files = files_list.toSorted { it.name }
                 [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
                     tuple(meta, model_type, patch_h5_file)
                 }
@@ -253,22 +279,23 @@ workflow MUSSEL {
             ch_extract_feat = EXTRACT_FEATURES(ch_samples)
         }
 
-        // ── Multi-slide sample aggregation ───────────────────────────────────────
-        // When multiple slides share the same sample_id, aggregate their per-slide
-        // feature H5 files (already computed above) into one per-sample output.
-        // Groups by (sample_id, model_type) so each invocation handles one model.
-        ch_sample_feat_h5 = ch_extract_feat.h5
-            .filter { meta, model_type, h5 -> (meta.n_slides ?: 1) > 1 }
-            .map { meta, model_type, h5 ->
-                tuple(groupKey([sample_id: meta.sample_id, model_type: model_type], meta.n_slides), meta, h5)
-            }
-            .groupTuple(remainder: true)
-            .map { key, metas, h5s ->
-                tuple(key.sample_id, metas, key.model_type, h5s)
-            }
+        if (params.featurize.merge_sample_features) {
+            // ── Multi-slide sample aggregation ───────────────────────────────────
+            // When multiple slides share the same sample_id, aggregate their
+            // per-slide feature H5 files into one per-sample output.
+            ch_sample_feat_h5 = ch_extract_feat.h5
+                .filter { meta, model_type, h5 -> (meta.n_slides ?: 1) > 1 }
+                .map { meta, model_type, h5 ->
+                    tuple(groupKey([sample_id: meta.sample_id, model_type: model_type], meta.n_slides), meta, h5)
+                }
+                .groupTuple(remainder: true)
+                .map { key, metas, h5s ->
+                    tuple(key.sample_id, metas, key.model_type, h5s)
+                }
 
-        MERGE_SAMPLE_FEATURES(ch_sample_feat_h5)
-        // ─────────────────────────────────────────────────────────────────────────
+            MERGE_SAMPLE_FEATURES(ch_sample_feat_h5)
+            // ─────────────────────────────────────────────────────────────────────
+        }
 
         // ── Precision benchmarking ────────────────────────────────────────────
         // When benchmark_precisions is set, cast float32 features to each listed
@@ -364,4 +391,3 @@ workflow MUSSEL {
         h5         = ch_extract_feat.h5
         wds_shards = ch_wds_shards
 }
-

@@ -1,0 +1,32 @@
+nextflow_pipeline {
+    name   "MUSSEL two-step pipeline — stub mode with titan_slide"
+    script "../main.nf"
+    profile "test_stub_two_step_titan"
+    options "-stub"
+
+    // This test exercises the slide-level model (titan_slide / CONCH1_5) code path
+    // in featurize.nf, which is NOT covered by pipeline_stub_two_step (resnet50 only).
+    //
+    // Specifically it covers the featurize.nf FEATURIZE_BATCH script block where
+    // slide_model_str is non-empty, including the H5 patch subsampling logic and the
+    // ${slide_model_str} / aggregation_str variable substitutions.
+    //
+    // NOTE: Stub mode does not execute the script: block, so bash syntax errors in
+    // generated scripts are NOT caught here. This test covers process graph structure,
+    // publishDir paths, and output declarations. For full Groovy GString generation
+    // validation, a real (non-stub) integration test with a mock TITAN model is needed.
+    test("two-step titan_slide stub workflow succeeds and publishes feature files") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            // titan_slide features: published under features/titan_slide/
+            assert path("${outputDir}/features/titan_slide/948176.features.pt").exists()
+            assert path("${outputDir}/features/titan_slide/948176.features.h5").exists()
+            // Tessellated patches
+            assert path("${outputDir}/tiles/9481/948176.patch.h5").exists()
+            // Note: patch_features (CONCH1_5 intermediate) are optional and not emitted by the stub
+        }
+    }
+}

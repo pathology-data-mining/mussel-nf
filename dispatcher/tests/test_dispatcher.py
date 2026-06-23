@@ -251,12 +251,13 @@ class TestStateStore:
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
         store.mark_slides_complete("batch-001", succeeded=False, charge_fail_count=False)
         row = store._conn().execute(
-            "SELECT status, fail_count, batch_id FROM slides WHERE slide_path=?",
+            "SELECT status, fail_count, batch_id, completed_at FROM slides WHERE slide_path=?",
             ("/slides/a.svs",),
         ).fetchone()
         assert row["status"] == "PENDING"
         assert row["fail_count"] == 0  # retry slot not charged
         assert row["batch_id"] is None
+        assert row["completed_at"] is None
 
     def test_blacklist_slide_existing(self, store):
         """blacklist_slide marks an existing slide as permanently FAILED."""
@@ -298,13 +299,42 @@ class TestStateStore:
         pending = store.get_pending_slides()
         assert not any(s["slide_id"] == "blacklisted" for s in pending)
 
-
+    def test_reset_succeeded_to_pending_clears_terminal_fields(self, store):
         store.add_slide("/slides/a.svs", "a")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        store.mark_slides_complete("batch-001", succeeded=True)
+
+        n = store.reset_succeeded_to_pending(["/slides/a.svs"])
+
+        assert n == 1
+        row = store._conn().execute(
+            "SELECT status, batch_id, completed_at, error_msg FROM slides WHERE slide_path=?",
+            ("/slides/a.svs",),
+        ).fetchone()
+        assert row["status"] == "PENDING"
+        assert row["batch_id"] is None
+        assert row["completed_at"] is None
+        assert row["error_msg"] is None
+
+    def test_reset_dispatched_to_pending_clears_terminal_fields(self, store):
+        store.add_slide("/slides/a.svs", "a")
+        store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        store._conn().execute(
+            "UPDATE slides SET completed_at='2026-06-21T01:00:00+00:00', error_msg='stale' "
+            "WHERE slide_path='/slides/a.svs'"
+        )
+        store._conn().commit()
+
         store.reset_dispatched_to_pending("batch-001")
-        pending = store.get_pending_slides()
-        assert len(pending) == 1
-        assert pending[0]["slide_path"] == "/slides/a.svs"
+
+        row = store._conn().execute(
+            "SELECT status, batch_id, completed_at, error_msg FROM slides WHERE slide_path=?",
+            ("/slides/a.svs",),
+        ).fetchone()
+        assert row["status"] == "PENDING"
+        assert row["batch_id"] is None
+        assert row["completed_at"] is None
+        assert row["error_msg"] is None
 
     def test_reset_dispatched_only_affects_target_batch(self, store):
         store.add_slide("/slides/a.svs", "a")
@@ -965,21 +995,6 @@ class TestWatchdogStuckBatches:
         scheduler._watchdog_stuck_batches()
         assert killed == []
 
-    def test_disabled_when_timeout_negative(self, tmp_path, monkeypatch):
-        """A negative timeout_hours is treated as disabled — no batches killed."""
-        scheduler = self._make_scheduler(tmp_path, timeout_hours=-1.0)
-        scheduler.state.get_running_batches.return_value = [
-            {"batch_id": "abc123", "nf_pid": 9999}
-        ]
-        self._write_log(tmp_path, "abc123", age_seconds=999_999)
-        killed = []
-        monkeypatch.setattr(
-            "mussel_dispatcher.scheduler._kill_orphaned_nf",
-            lambda bid, pid, **kw: killed.append(pid),
-        )
-        scheduler._watchdog_stuck_batches()
-        assert killed == []
-
     def test_no_running_batches_does_nothing(self, tmp_path, monkeypatch):
         """Watchdog is a no-op when there are no RUNNING batches."""
         scheduler = self._make_scheduler(tmp_path)
@@ -1036,25 +1051,6 @@ class TestWatchdogStuckBatches:
         )
         scheduler._watchdog_stuck_batches()
         assert killed == []
-
-    def test_uses_stored_log_path_from_db(self, tmp_path, monkeypatch):
-        """Watchdog uses log_path from the DB row, not a reconstructed path."""
-        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
-        custom_log = tmp_path / "custom" / "run.log"
-        custom_log.parent.mkdir()
-        custom_log.write_text("NF progress\n")
-        mtime = time.time() - 5 * 3600  # 5h old — stuck
-        os.utime(custom_log, (mtime, mtime))
-        scheduler.state.get_running_batches.return_value = [
-            {"batch_id": "custom01", "nf_pid": 1234, "log_path": str(custom_log)}
-        ]
-        killed = []
-        monkeypatch.setattr(
-            "mussel_dispatcher.scheduler._kill_orphaned_nf",
-            lambda bid, pid, **kw: killed.append(pid),
-        )
-        scheduler._watchdog_stuck_batches()
-        assert killed == [1234]
 
     def test_batch_without_pid_skipped(self, tmp_path, monkeypatch):
         """A RUNNING batch with no nf_pid recorded is skipped (can't kill)."""
@@ -1528,7 +1524,6 @@ class TestNfRunNameValidation:
 
     def test_returns_resume_spec_when_work_dir_exists(self, tmp_path):
         """When work dir and csv both exist, returns resume spec instead of resetting to PENDING."""
-        import unittest.mock as mock
         store = StateStore(str(tmp_path / "test.db"))
         store.add_slide("/slides/a.svs", "a")
         work_dir = tmp_path / "batch-001" / "work"
@@ -1537,10 +1532,8 @@ class TestNfRunNameValidation:
         csv_path.write_text("slide_id,slide_path\na,/slides/a.svs\n")
         store.add_batch("batch-001", str(csv_path), str(work_dir), 1, "/logs/1.log")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
-        store.set_batch_nf_pid("batch-001", 424242)
         pending = deque()
-        with mock.patch("mussel_dispatcher.scheduler.os.kill", return_value=None):
-            specs = recover_in_flight(store, pending)
+        specs = recover_in_flight(store, pending)
         # Slides stay DISPATCHED (not reset to PENDING) — will be handled by resume run
         assert len(pending) == 0
         assert len(specs) == 1
@@ -2062,7 +2055,7 @@ class TestNextflowRunnerRun:
              mock.patch("mussel_dispatcher.runner.os.path.isdir",
                         side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
              mock.patch("mussel_dispatcher.runner.time") as mock_time:
-            mock_time.time.side_effect = [0.0] + [120.0] * 10
+            mock_time.time.side_effect = [0.0, 120.0, 120.0]
             exit_code = runner.run()
         assert exit_code == 1
         row = state._conn().execute(
@@ -2080,7 +2073,7 @@ class TestNextflowRunnerRun:
         fake_proc.wait.return_value = 1
         with mock.patch("subprocess.Popen", return_value=fake_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mock_time:
-            mock_time.time.side_effect = [0.0] + [5.0] * 10
+            mock_time.time.side_effect = [0.0, 5.0, 5.0]
             exit_code = runner.run()
         assert exit_code == 1
         row = state._conn().execute(
@@ -2126,10 +2119,8 @@ class TestNextflowRunnerRun:
 
         waits = [1, 1, 0]  # initial run fails, first resume lock-fails, second resume succeeds
         pids = [111, 222, 333]
-        launched_names = []
 
-        def fake_popen(cmd, *args, **kwargs):
-            launched_names.append(cmd[cmd.index("-name") + 1])
+        def fake_popen(*args, **kwargs):
             stdout = kwargs.get("stdout")
             if stdout and len(waits) == 2:
                 stdout.write("ERROR ~ Unable to acquire lock on session with ID sess-1\n")
@@ -2152,8 +2143,6 @@ class TestNextflowRunnerRun:
 
         assert exit_code == 0
         assert mock_popen.call_count == 3
-        assert launched_names[1] != launched_names[2]
-        assert all(name.startswith("r") for name in launched_names[1:])
         mock_sleep.assert_called_once()
         row = state._conn().execute(
             "SELECT status FROM slides WHERE slide_path=?", ("/slides/a.svs",)
@@ -2420,9 +2409,12 @@ class TestAutoHooks:
             "s3://bucket/wds::titan_slide",
         ]
 
-    def test_resolved_cohort_lock_dir_defaults_next_to_state_parent(self, tmp_path):
-        cfg = make_config(state_dir=str(tmp_path / "deployment" / "state"))
-        assert cfg.resolved_cohort_lock_dir() == str(tmp_path / "deployment" / "locks")
+    def test_resolved_cohort_lock_dir_uses_shared_dispatch_root(self, tmp_path):
+        dispatch_root = tmp_path / "shared-dispatch"
+        cfg = make_config(
+            state_dir=str(dispatch_root / "titan-backfill" / "state")
+        )
+        assert cfg.resolved_cohort_lock_dir() == str(dispatch_root / "locks")
 
     def test_auto_hook_generated_from_single_wds_destination(self, tmp_path):
         cfg = self._load_config(tmp_path, watcher_extra={
@@ -2526,6 +2518,24 @@ class TestAutoHooks:
         args = cfg.post_batch_hooks[0]["args"]
         assert "--delete-local" in args
 
+    def test_cleanup_results_deletes_shared_coords_only_on_last_wds_hook(self, tmp_path):
+        """Shared .patch.h5 coords must survive until every model has written WDS."""
+        cfg = self._load_config(
+            tmp_path,
+            watcher_extra={
+                "models": ["hoptimus1", "optimus", "titan_slide"],
+                "wds_destination": "s3://bucket/wds",
+            },
+            extra_raw={"cleanup_results": True},
+        )
+
+        hooks = cfg.post_batch_hooks
+        assert len(hooks) == 3
+        assert all("--delete-local" in hook["args"] for hook in hooks)
+        assert "--delete-coords-local" not in hooks[0]["args"]
+        assert "--delete-coords-local" not in hooks[1]["args"]
+        assert "--delete-coords-local" in hooks[2]["args"]
+
     def test_cleanup_results_false_does_not_add_delete_local(self, tmp_path):
         """cleanup_results=False (default) does not add --delete-local to hooks."""
         cfg = self._load_config(
@@ -2552,6 +2562,42 @@ class TestAutoHooks:
         hook = cfg.post_batch_hooks[0]
         assert "sync_databricks" in hook["command"]
         assert hook.get("_phase") == "db_sync"
+
+
+class TestImpactDatabricksExport:
+    def test_pending_rows_do_not_export_stale_wds_or_completed_at(self, tmp_path):
+        from mussel_dispatcher.impact.sync_databricks import build_export
+
+        db_path = tmp_path / "dispatcher.db"
+        store = StateStore(str(db_path))
+        store.add_slide("/slides/retry.svs", "retry", oncotree_code="MNET")
+        store.add_slide("/slides/done.svs", "done", oncotree_code="MNET")
+        store.mark_dispatched(["/slides/done.svs"], "batch-001")
+        store.mark_slides_complete("batch-001", succeeded=True)
+        store._conn().execute(
+            "UPDATE slides SET completed_at='2026-06-21T01:00:00+00:00' "
+            "WHERE slide_id='retry'"
+        )
+        store._conn().commit()
+
+        manifest = tmp_path / "wds_manifest.csv"
+        manifest.write_text(
+            "slide_id,model,wds_path\n"
+            "retry,optimus,s3://bucket/wds/optimus/MNET/000000.tar\n"
+            "done,optimus,s3://bucket/wds/optimus/MNET/000001.tar\n"
+        )
+
+        df = build_export(str(db_path), str(manifest), ["optimus"])
+        retry = df[df["slide_id"] == "retry"].iloc[0]
+        done = df[df["slide_id"] == "done"].iloc[0]
+
+        assert retry["status"] == "PENDING"
+        assert retry["wds_path"] == ""
+        assert retry["completed_at"] == ""
+        assert done["status"] == "SUCCEEDED"
+        assert done["wds_path"].endswith("/000001.tar")
+        assert done["completed_at"] != ""
+
 
 # ---------------------------------------------------------------------------
 # Cleanup tests

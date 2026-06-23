@@ -382,6 +382,17 @@ class NextflowRunner:
                 resume_session_id = _lookup_nf_session_id(
                     self.cfg.repo_dir, self.batch_id, log_path, nf_log_path=nf_log_path
                 )
+            # Use a fresh run name to avoid NF's "run name already used" rejection
+            # (NF ≥ 23.x rejects reusing a name in .nextflow/history, even with -resume).
+            resume_nf_run_name = "r" + uuid.uuid4().hex[:8]
+            resume_cmd = list(cmd)
+            try:
+                _ni = resume_cmd.index("-name")
+                resume_cmd[_ni + 1] = resume_nf_run_name
+            except ValueError:
+                pass  # -name always present in cmd; this branch shouldn't be reached
+            resume_cmd += (["-resume", resume_session_id] if resume_session_id
+                           else ["-resume"])
             if resume_session_id:
                 log.info("Batch %s: auto-resuming NF session %s to salvage completed tasks",
                          self.batch_id, resume_session_id)
@@ -390,17 +401,6 @@ class NextflowRunner:
                             "concurrent batches)", self.batch_id)
             for resume_attempt in (1, 2):
                 try:
-                    # Use a fresh run name on every auto-resume launch to avoid
-                    # NF's "run name already used" rejection if an earlier
-                    # attempt registered the name before failing on a session lock.
-                    resume_cmd = list(cmd)
-                    try:
-                        _ni = resume_cmd.index("-name")
-                        resume_cmd[_ni + 1] = "r" + uuid.uuid4().hex[:8]
-                    except ValueError:
-                        pass  # -name always present in cmd; this branch shouldn't be reached
-                    resume_cmd += (["-resume", resume_session_id] if resume_session_id
-                                   else ["-resume"])
                     with open(log_path, "a") as lf:
                         lf.write(f"\n\n--- AUTO-RESUME ATTEMPT {resume_attempt} ---\n\n")
                         resume_proc = subprocess.Popen(
@@ -632,7 +632,7 @@ class NextflowRunner:
         if retryable:
             conn.executemany(
                 "UPDATE slides SET status='PENDING', fail_count=fail_count+1, "
-                "batch_id=NULL, dispatched_at=NULL "
+                "batch_id=NULL, dispatched_at=NULL, completed_at=NULL "
                 "WHERE slide_id=? AND status='SUCCEEDED'",
                 [(sid,) for sid in retryable],
             )

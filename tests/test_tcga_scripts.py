@@ -99,6 +99,18 @@ def make_h5_file(path: Path, n_patches: int = 8) -> None:
         f.create_dataset("coords", data=np.random.randint(0, 1000, (n_patches, 2)))
 
 
+def _tar_npy_entries(tar_path: Path) -> dict[str, list[np.ndarray]]:
+    entries: dict[str, list[np.ndarray]] = {}
+    with tarfile.open(tar_path) as tf:
+        for member in tf.getmembers():
+            if not member.name.endswith(".npy"):
+                continue
+            fh = tf.extractfile(member)
+            assert fh is not None
+            entries.setdefault(member.name, []).append(np.load(io.BytesIO(fh.read())))
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # 0. tcga_sync_inventory — _parse_hit()
 # ---------------------------------------------------------------------------
@@ -792,6 +804,86 @@ class TestAppendWds:
 
         assert len(index2) - 1 == len(index1) - 1 == 3  # -1 for _stats key
 
+    def test_retry_after_lost_index_compacts_duplicate_tar_entries(self, tmp_path):
+        """If index save is lost after tar append, retry replaces stale tar entries."""
+        from mussel_dispatcher.wds import append_wds
+
+        model = "ctranspath"
+        slide = "TCGA-BR-A44T-01Z-00-DX1"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        wds_dest = str(tmp_path / "wds")
+        pt_file = pt_dir / f"{slide}.features.pt"
+        h5_file = h5_dir / f"{slide}.patch.h5"
+
+        make_pt_file(pt_file, n_patches=8)
+        make_h5_file(h5_file, n_patches=8)
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+        )
+
+        # Simulate successful tar append followed by lost index save.
+        (Path(wds_dest) / model / "wds_index.json").unlink()
+        make_pt_file(pt_file, n_patches=12)
+        make_h5_file(h5_file, n_patches=12)
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+        )
+
+        shard = Path(wds_dest) / model / "TCGA-BRCA" / "000000.tar"
+        entries = _tar_npy_entries(shard)
+        assert list(entries) == [f"{slide}.features.npy", f"{slide}.coords.npy"]
+        assert len(entries[f"{slide}.features.npy"]) == 1
+        assert len(entries[f"{slide}.coords.npy"]) == 1
+        assert entries[f"{slide}.features.npy"][0].shape[0] == 12
+        assert entries[f"{slide}.coords.npy"][0].shape[0] == 12
+
+    def test_repair_wds_tar_restores_missing_coords_from_h5(self, tmp_path):
+        from mussel_dispatcher.wds import _add_npy_to_tar, _npy_bytes, repair_wds_shards
+
+        model = "ctranspath"
+        slide = "TCGA-BR-A44T-01Z-00-DX1"
+        wds_dest = tmp_path / "wds"
+        tar_path = wds_dest / model / "TCGA-BRCA" / "000000.tar"
+        tar_path.parent.mkdir(parents=True)
+        h5_dir = tmp_path / "tile_h5"
+        h5_path = h5_dir / f"{slide}.patch.h5"
+        make_h5_file(h5_path, n_patches=12)
+
+        with tarfile.open(tar_path, "w") as tf:
+            _add_npy_to_tar(tf, f"{slide}.features.npy", _npy_bytes(np.zeros((8, 4), dtype="float32")))
+            _add_npy_to_tar(tf, f"{slide}.coords.npy", _npy_bytes(np.zeros((8, 2), dtype="int64")))
+            _add_npy_to_tar(tf, f"{slide}.features.npy", _npy_bytes(np.ones((12, 4), dtype="float32")))
+
+        stats = repair_wds_shards(
+            str(wds_dest),
+            model,
+            staging_dir=None,
+            h5_dir=h5_dir,
+            require_coords=True,
+        )
+
+        assert stats["shards"] == 1
+        assert stats["duplicate_slides"] == 1
+        assert stats["repaired_coords_from_h5"] == 1
+        assert stats["rewritten"] == 1
+        entries = _tar_npy_entries(tar_path)
+        assert list(entries) == [f"{slide}.features.npy", f"{slide}.coords.npy"]
+        assert entries[f"{slide}.features.npy"][0].shape[0] == 12
+        assert entries[f"{slide}.coords.npy"][0].shape[0] == 12
+
 
 # ---------------------------------------------------------------------------
 # 4. End-to-end pipeline: status → prepare → append
@@ -800,7 +892,7 @@ class TestAppendWds:
 class TestDeleteLocal:
     """append_wds() with delete_local=True removes source files after WDS flush."""
 
-    def test_delete_local_removes_pt_and_h5(self, tmp_path):
+    def test_delete_local_removes_model_files_but_keeps_shared_coords(self, tmp_path):
         from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
@@ -825,7 +917,35 @@ class TestDeleteLocal:
         )
 
         assert not pt_file.exists(), ".pt should be deleted after WDS flush"
-        assert not h5_file.exists(), ".patch.h5 should be deleted after WDS flush"
+        assert h5_file.exists(), ".patch.h5 should be kept for later model WDS hooks"
+
+    def test_delete_coords_local_removes_shared_coords(self, tmp_path):
+        from mussel_dispatcher.wds import append_wds
+
+        model = "ctranspath"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        wds_dest = str(tmp_path / "wds")
+
+        pt_file = pt_dir / "TCGA-BR-A44T-01Z-00-DX1.features.pt"
+        h5_file = h5_dir / "TCGA-BR-A44T-01Z-00-DX1.patch.h5"
+        make_pt_file(pt_file)
+        make_h5_file(h5_file)
+
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+            delete_local=True,
+            delete_coords_local=True,
+        )
+
+        assert not pt_file.exists(), ".pt should be deleted after WDS flush"
+        assert not h5_file.exists(), ".patch.h5 should be deleted only when explicitly requested"
 
     def test_delete_local_false_keeps_files(self, tmp_path):
         from mussel_dispatcher.wds import append_wds

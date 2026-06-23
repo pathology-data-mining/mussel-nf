@@ -214,7 +214,9 @@ class StateStore:
         elif not succeeded and not charge_fail_count:
             # Infra/config failure — reset to PENDING without charging fail_count
             conn.execute(
-                "UPDATE slides SET status='PENDING', batch_id=NULL WHERE batch_id=? AND status='DISPATCHED'",
+                """UPDATE slides
+                   SET status='PENDING', batch_id=NULL, completed_at=NULL, error_msg=NULL
+                   WHERE batch_id=? AND status='DISPATCHED'""",
                 (batch_id,),
             )
         else:
@@ -233,7 +235,9 @@ class StateStore:
 
     def reset_dispatched_to_pending(self, batch_id: str):
         self._conn().execute(
-            "UPDATE slides SET status='PENDING', batch_id=NULL WHERE batch_id=? AND status='DISPATCHED'",
+            """UPDATE slides
+               SET status='PENDING', batch_id=NULL, completed_at=NULL, error_msg=NULL
+               WHERE batch_id=? AND status='DISPATCHED'""",
             (batch_id,),
         )
         self._conn().commit()
@@ -243,7 +247,8 @@ class StateStore:
         conn = self._conn()
         if max_retries > 0:
             conn.execute(
-                "UPDATE slides SET status='PENDING', batch_id=NULL, dispatched_at=NULL, error_msg=NULL "
+                "UPDATE slides SET status='PENDING', batch_id=NULL, dispatched_at=NULL, "
+                "completed_at=NULL, error_msg=NULL "
                 "WHERE status='FAILED' AND fail_count < ?",
                 (max_retries,),
             )
@@ -257,7 +262,7 @@ class StateStore:
         else:
             conn.execute(
                 "UPDATE slides SET status='PENDING', batch_id=NULL, dispatched_at=NULL, "
-                "error_msg=NULL WHERE status='FAILED'"
+                "completed_at=NULL, error_msg=NULL WHERE status='FAILED'"
             )
         conn.commit()
         return conn.execute(
@@ -280,7 +285,9 @@ class StateStore:
         conn = self._conn()
         placeholders = ",".join("?" * len(slide_paths))
         conn.execute(
-            f"UPDATE slides SET status='PENDING', batch_id=NULL, fail_count=0 "
+            f"""UPDATE slides
+                SET status='PENDING', batch_id=NULL, fail_count=0,
+                    dispatched_at=NULL, completed_at=NULL, error_msg=NULL """
             f"WHERE slide_path IN ({placeholders}) AND status='SUCCEEDED'",
             slide_paths,
         )

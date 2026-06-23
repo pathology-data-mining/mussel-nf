@@ -239,7 +239,15 @@ class Config:
     def resolved_cohort_lock_dir(self) -> str:
         if self.cohort_lock_dir:
             return self.cohort_lock_dir
-        return str(Path(self.state_dir).resolve().parent / "locks")
+
+        state = Path(self.state_dir).resolve()
+        # Multi-config deployments often live under a shared *-dispatch root
+        # with separate state dirs. Put locks at that root so related configs
+        # contend on the same files.
+        for parent in [state, *state.parents]:
+            if parent.name.endswith("-dispatch"):
+                return str(parent / "locks")
+        return str(state.parent / "locks")
 
     @staticmethod
     def lock_filename_for_key(key: str) -> str:
@@ -252,7 +260,8 @@ class Config:
         db_hooks = []
         for w in self.watchers:
             if w.type == "databricks" and w.wds_destinations:
-                for model, dest in w.wds_destinations.items():
+                destinations = list(w.wds_destinations.items())
+                for idx, (model, dest) in enumerate(destinations):
                     args = [
                         "--pt-dir={outdir}/features/" + model,
                         "--h5-dir={outdir}/tiles",
@@ -269,6 +278,8 @@ class Config:
                         args.append(f"--s3-max-concurrency={w.wds_s3_max_concurrency}")
                     if self.cleanup_results:
                         args.append("--delete-local")
+                        if idx == len(destinations) - 1:
+                            args.append("--delete-coords-local")
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
             # IMPACT Databricks sync hook — fires when a table is configured
@@ -292,7 +303,8 @@ class Config:
                 continue
 
             if w.wds_destinations:
-                for model, dest in w.wds_destinations.items():
+                destinations = list(w.wds_destinations.items())
+                for idx, (model, dest) in enumerate(destinations):
                     args = [
                         "--pt-dir={outdir}/features/" + model,
                         "--h5-dir={outdir}/tiles",
@@ -312,6 +324,8 @@ class Config:
                         args.append("--s3-endpoint=" + w.s3_endpoint)
                     if self.cleanup_results:
                         args.append("--delete-local")
+                        if idx == len(destinations) - 1:
+                            args.append("--delete-coords-local")
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args})
 
             if w.databricks_volume_folder or w.databricks_volume_path:

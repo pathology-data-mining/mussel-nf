@@ -80,6 +80,12 @@
             "help_text": "When true, uses TESSELLATE_FEATURIZE_BATCH for combined tessellation and feature extraction. When false, uses separate TESSELLATE and FEATURIZE_BATCH processes.",
             "default": false
         },
+        "tessellate_only": {
+            "type": ["boolean", "string"],
+            "description": "Run tessellation only and skip feature extraction",
+            "help_text": "When true, emits tile H5 outputs and manifests without running feature extraction, linear probe, CLIP, or WDS steps.",
+            "default": false
+        },
         "tiling": {
             "title": "Tessellation options",
             "type": "object",

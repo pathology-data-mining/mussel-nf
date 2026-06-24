@@ -3,6 +3,22 @@ process TESSELLATE_FEATURIZE_BATCH {
     label "gpuTask"
     label "parallelTask"
 
+    beforeScript '''
+    export HDF5_USE_FILE_LOCKING=FALSE
+    export NXF_TASK_CACHE_DIR="${PWD}/.task-cache"
+    mkdir -p "${NXF_TASK_CACHE_DIR}/hf" "${NXF_TASK_CACHE_DIR}/xdg" "${NXF_TASK_CACHE_DIR}/mpl"
+    export HF_HOME="${NXF_TASK_CACHE_DIR}/hf"
+    export HF_HUB_CACHE="${HF_HOME}/hub"
+    export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
+    export XDG_CACHE_HOME="${NXF_TASK_CACHE_DIR}/xdg"
+    export MPLCONFIGDIR="${NXF_TASK_CACHE_DIR}/mpl"
+    export APPTAINERENV_HF_HOME="${HF_HOME}"
+    export APPTAINERENV_HF_HUB_CACHE="${HF_HUB_CACHE}"
+    export APPTAINERENV_TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE}"
+    export APPTAINERENV_XDG_CACHE_HOME="${XDG_CACHE_HOME}"
+    export APPTAINERENV_MPLCONFIGDIR="${MPLCONFIGDIR}"
+    '''
+
     secret 'HF_TOKEN'
 
     // Publish slide encoder features (always created)

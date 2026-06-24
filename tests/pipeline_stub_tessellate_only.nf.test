@@ -1,0 +1,17 @@
+nextflow_pipeline {
+    name   "MUSSEL tessellate-only pipeline — stub mode"
+    script "../main.nf"
+    profile "test_stub_tessellate_only"
+    options "-stub"
+
+    test("tessellate-only stub workflow publishes patch h5s and skips features") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            assert path("${outputDir}/tiles/9481/948176.patch.h5").exists()
+            assert !path("${outputDir}/features").exists()
+        }
+    }
+}

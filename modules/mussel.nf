@@ -15,7 +15,7 @@ include { MERGE_SAMPLE_FEATURES } from './sample_merge'
 include { resolvePrecision } from './utils'
 
 
-workflow EXTRACT_FEATURES {
+workflow TESSELLATE_PATCHES {
     take:
         ch_samples // tuple val(meta), file(slide)
 
@@ -48,6 +48,19 @@ workflow EXTRACT_FEATURES {
         }
 
         EMIT_MPP_META(ch_patches_h5)
+
+    emit:
+        patches_h5 = ch_patches_h5
+}
+
+
+workflow EXTRACT_FEATURES {
+    take:
+        ch_samples // tuple val(meta), file(slide)
+
+    main:
+        ch_tessellation = TESSELLATE_PATCHES(ch_samples)
+        ch_patches_h5 = ch_tessellation.patches_h5
 
         if (params.tiling.filter_tiles) {
             // Batch slides for filtering feature extraction
@@ -193,6 +206,21 @@ workflow EXTRACT_FEATURES {
 }
 
 
+workflow TESSELLATE_ONLY {
+    take:
+        ch_samples // tuple val(meta), file(slide)
+
+    main:
+        ch_tessellation = TESSELLATE_PATCHES(ch_samples)
+
+    emit:
+        patches_h5 = ch_tessellation.patches_h5
+        pt = Channel.empty()
+        h5 = Channel.empty()
+        patch_h5 = Channel.empty()
+}
+
+
 workflow EXTRACT_FEATURES_ONE_STEP {
     take:
         ch_samples // tuple val(meta), file(slide)
@@ -272,8 +300,10 @@ workflow MUSSEL {
         ch_annotations // tuple val(meta), file(annotation_bmp_path)
 
     main:
-        // Choose between one-step or two-step workflow
-        if (params.use_one_step_workflow) {
+        // Choose between tessellate-only, one-step, or two-step workflow.
+        if (params.tessellate_only) {
+            ch_extract_feat = TESSELLATE_ONLY(ch_samples)
+        } else if (params.use_one_step_workflow) {
             ch_extract_feat = EXTRACT_FEATURES_ONE_STEP(ch_samples)
         } else {
             ch_extract_feat = EXTRACT_FEATURES(ch_samples)

@@ -343,7 +343,7 @@ def _build_handler(cfg: Config):
                 FROM slides
                 WHERE status = 'SUCCEEDED'
                   AND completed_at IS NOT NULL
-                  AND completed_at >= datetime('now', '-6 hours')
+                  AND julianday(completed_at) >= julianday('now') - (6.0 / 24.0)
                 """
             ).fetchone()
             remaining = conn.execute(

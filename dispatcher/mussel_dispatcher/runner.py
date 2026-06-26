@@ -21,8 +21,18 @@ MANIFEST_HEADER = ["slide_id", "workflow_id", "key", "value"]
 # Nextflow run name must match this pattern (validated before launch to catch
 # regressions in name generation before NF rejects them at invocation time).
 _NF_RUN_NAME_RE = re.compile(r'^[a-z](?:[a-z\d]|[-_](?=[a-z\d])){0,79}$')
+_NF_SESSION_LOCK_ERROR = "Unable to acquire lock on session"
+_AUTO_RESUME_LOCK_RETRY_DELAY_SECONDS = 30
 
 log = logging.getLogger("mussel-dispatcher")
+
+
+def _file_contains(path: str, needle: str) -> bool:
+    try:
+        with open(path, errors="ignore") as f:
+            return needle in f.read()
+    except OSError:
+        return False
 
 def collect_manifests(outdir: str, combined_path: str) -> int:
     """
@@ -161,13 +171,34 @@ def _extract_nf_session_id_from_log(log_path: str, repo_dir: str) -> str | None:
     return _lookup_session_id_in_history(repo_dir, run_name)
 
 
-def _lookup_nf_session_id(repo_dir: str, batch_id: str, log_path: str) -> str | None:
-    """Look up the NF session UUID for a batch, trying DB first then log file.
+def _extract_session_id_from_nf_debug_log(nf_log_path: str) -> str | None:
+    """Extract the NF session UUID directly from Nextflow's debug log."""
+    try:
+        with open(nf_log_path) as f:
+            for line in f:
+                if "Session UUID:" not in line:
+                    continue
+                candidate = line.rsplit("Session UUID:", 1)[-1].strip()
+                if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", candidate):
+                    return candidate
+    except OSError:
+        pass
+    return None
+
+
+def _lookup_nf_session_id(
+    repo_dir: str, batch_id: str, log_path: str, nf_log_path: str | None = None
+) -> str | None:
+    """Look up the NF session UUID for a batch, preferring the NF debug log.
 
     The session ID is stored in the DB after the first run completes.
     For batches that ran before this feature was added, fall back to parsing
     the run name from the log file and looking it up in .nextflow/history.
     """
+    if nf_log_path:
+        session_id = _extract_session_id_from_nf_debug_log(nf_log_path)
+        if session_id:
+            return session_id
     return _extract_nf_session_id_from_log(log_path, repo_dir)
 
 
@@ -177,7 +208,8 @@ def _lookup_nf_session_id(repo_dir: str, batch_id: str, log_path: str) -> str | 
 
 class NextflowRunner:
     def __init__(self, cfg: Config, batch_id: str, slides: list, state: StateStore,
-                 *, resume: bool = False, existing_csv_path: str = None, existing_work_dir: str = None):
+                 *, resume: bool = False, existing_csv_path: str = None,
+                 existing_work_dir: str = None, shutdown_event: threading.Event | None = None):
         self.cfg = cfg
         self.batch_id = batch_id
         self.slides = slides  # list of {"slide_path": ..., "slide_id": ..., "oncotree_code": ...}
@@ -185,6 +217,7 @@ class NextflowRunner:
         self._resume = resume
         self._existing_csv_path = existing_csv_path
         self._existing_work_dir = existing_work_dir
+        self._shutdown_event = shutdown_event
 
     def run(self):
         if self._resume:
@@ -220,7 +253,13 @@ class NextflowRunner:
         # Use the 8-char UUID hash as the NF run name so it fits within
         # Seqera Platform's 16-char workflow.id field limit.
         # Prefix with "r" to ensure it starts with a letter (Nextflow requirement).
-        nf_run_name = "r" + self.batch_id.rsplit("_", 1)[-1]  # e.g. "r410bb3ce"
+        # For resumes: generate a fresh UUID to avoid NF's "run name already used"
+        # rejection — NF ≥ 23.x tracks all run names in .nextflow/history and rejects
+        # reuse even when -resume <session_id> is supplied.
+        if self._resume:
+            nf_run_name = "r" + uuid.uuid4().hex[:8]
+        else:
+            nf_run_name = "r" + self.batch_id.rsplit("_", 1)[-1]  # e.g. "r410bb3ce"
         if not _NF_RUN_NAME_RE.match(nf_run_name):
             raise ValueError(
                 f"Generated NF run name {nf_run_name!r} does not match Nextflow's "
@@ -228,8 +267,10 @@ class NextflowRunner:
                 f"This is a bug in run name generation (batch_id={self.batch_id!r})."
             )
         trace_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.trace.tsv")
+        nf_log_path = os.path.join(self.cfg.log_dir, f"batch_{self.batch_id}.nf.log")
         cmd = [
-            "nextflow", "run", self.cfg.repo_dir,
+            "nextflow", "-log", nf_log_path,
+            "run", self.cfg.repo_dir,
             "-profile", self.cfg.nextflow_profiles,
             "-work-dir", work_dir,
             "--samples_csv", csv_path,
@@ -259,7 +300,7 @@ class NextflowRunner:
             if not session_id:
                 # Fall back to parsing from log + history (for pre-fix batches)
                 session_id = _lookup_nf_session_id(
-                    self.cfg.repo_dir, self.batch_id, log_path
+                    self.cfg.repo_dir, self.batch_id, log_path, nf_log_path=nf_log_path
                 )
             if session_id:
                 cmd += ["-resume", session_id]
@@ -310,10 +351,89 @@ class NextflowRunner:
             if not session_id:
                 session_id = _lookup_session_id_in_history(self.cfg.repo_dir, nf_run_name)
             if not session_id:
+                session_id = _extract_session_id_from_nf_debug_log(nf_log_path)
+            if not session_id:
                 session_id = _extract_nf_session_id_from_log(log_path, self.cfg.repo_dir)
             if session_id:
                 self.state.set_batch_session_id(self.batch_id, session_id)
                 log.debug("Batch %s: recorded NF session ID %s", self.batch_id, session_id)
+
+        # Auto-resume: if the first run failed but did real work, attempt one NF
+        # -resume to salvage already-completed tasks (handles cause:null crashes where
+        # many featurize tasks finished before NF's finalizer thread died).
+        # Only on first failure (not a resume itself), only if the run lasted ≥60 s
+        # (real work was attempted), and only if the work dir is still intact.
+        run_duration = time.time() - run_started_at
+        if exit_code != 0 and not self._resume and run_duration >= 60 and os.path.isdir(work_dir):
+            if self._shutdown_event and self._shutdown_event.is_set():
+                log.info(
+                    "Batch %s: skipping auto-resume because dispatcher shutdown is in progress",
+                    self.batch_id,
+                )
+                self.state.complete_batch(self.batch_id, exit_code)
+                self.state.mark_slides_complete(
+                    self.batch_id, False, charge_fail_count=False
+                )
+                log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
+                self._cleanup(csv_path, log_path, work_dir, succeeded=False)
+                return exit_code
+            resume_session_id = self.state.get_batch_session_id(self.batch_id)
+            if not resume_session_id:
+                resume_session_id = _lookup_nf_session_id(
+                    self.cfg.repo_dir, self.batch_id, log_path, nf_log_path=nf_log_path
+                )
+            # Use a fresh run name to avoid NF's "run name already used" rejection
+            # (NF ≥ 23.x rejects reusing a name in .nextflow/history, even with -resume).
+            resume_nf_run_name = "r" + uuid.uuid4().hex[:8]
+            resume_cmd = list(cmd)
+            try:
+                _ni = resume_cmd.index("-name")
+                resume_cmd[_ni + 1] = resume_nf_run_name
+            except ValueError:
+                pass  # -name always present in cmd; this branch shouldn't be reached
+            resume_cmd += (["-resume", resume_session_id] if resume_session_id
+                           else ["-resume"])
+            if resume_session_id:
+                log.info("Batch %s: auto-resuming NF session %s to salvage completed tasks",
+                         self.batch_id, resume_session_id)
+            else:
+                log.warning("Batch %s: auto-resuming (no session ID found — may conflict with "
+                            "concurrent batches)", self.batch_id)
+            for resume_attempt in (1, 2):
+                try:
+                    with open(log_path, "a") as lf:
+                        lf.write(f"\n\n--- AUTO-RESUME ATTEMPT {resume_attempt} ---\n\n")
+                        resume_proc = subprocess.Popen(
+                            resume_cmd, stdout=lf, stderr=subprocess.STDOUT,
+                            cwd=self.cfg.repo_dir, env=run_env, start_new_session=True,
+                        )
+                    self.state.set_batch_nf_pid(self.batch_id, resume_proc.pid)
+                    resume_started_at = time.time()
+                    resume_exit = resume_proc.wait()
+                    self.state.set_batch_nf_pid(self.batch_id, None)
+                    if resume_exit == 0:
+                        log.info("Batch %s: auto-resume succeeded — treating as success", self.batch_id)
+                        exit_code = 0
+                        run_started_at = resume_started_at  # for manifest collection window
+                        break
+                    if (
+                        resume_attempt == 1
+                        and _file_contains(log_path, _NF_SESSION_LOCK_ERROR)
+                    ):
+                        log.warning(
+                            "Batch %s: auto-resume hit NF session lock; retrying once in %ds",
+                            self.batch_id,
+                            _AUTO_RESUME_LOCK_RETRY_DELAY_SECONDS,
+                        )
+                        time.sleep(_AUTO_RESUME_LOCK_RETRY_DELAY_SECONDS)
+                        continue
+                    log.warning("Batch %s: auto-resume also failed (exit %d) — giving up",
+                                self.batch_id, resume_exit)
+                    break
+                except Exception as exc:
+                    self.state.set_batch_nf_pid(self.batch_id, None)
+                    log.error("Batch %s: auto-resume failed to launch: %s", self.batch_id, exc)
+                    break
 
         self.state.complete_batch(self.batch_id, exit_code)
 
@@ -512,7 +632,7 @@ class NextflowRunner:
         if retryable:
             conn.executemany(
                 "UPDATE slides SET status='PENDING', fail_count=fail_count+1, "
-                "batch_id=NULL, dispatched_at=NULL "
+                "batch_id=NULL, dispatched_at=NULL, completed_at=NULL "
                 "WHERE slide_id=? AND status='SUCCEEDED'",
                 [(sid,) for sid in retryable],
             )
@@ -660,4 +780,3 @@ class NextflowRunner:
 # ---------------------------------------------------------------------------
 # BatchScheduler
 # ---------------------------------------------------------------------------
-

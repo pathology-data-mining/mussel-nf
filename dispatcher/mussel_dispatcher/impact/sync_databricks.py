@@ -119,6 +119,11 @@ def build_export(
             failure_reason = ""
 
         for model in model_types:
+            completed_at = slide.get("completed_at") or ""
+            wds_path = wds_index.get((slide_id, model)) or ""
+            if status != "SUCCEEDED":
+                completed_at = ""
+                wds_path = ""
             rows.append({
                 "slide_id": str(slide_id),
                 "oncotree_code": slide.get("oncotree_code") or "",
@@ -126,9 +131,9 @@ def build_export(
                 "model": model,
                 "status": status,
                 "failure_reason": failure_reason,
-                "wds_path": wds_index.get((slide_id, model)) or "",
+                "wds_path": wds_path,
                 "first_seen_at": slide.get("first_seen_at") or "",
-                "completed_at": slide.get("completed_at") or "",
+                "completed_at": completed_at,
             })
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[

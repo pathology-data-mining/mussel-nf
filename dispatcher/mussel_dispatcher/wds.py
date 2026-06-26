@@ -46,11 +46,15 @@ Usage
 
 import argparse
 import csv
+import fcntl
 import io
 import json
 import logging
+import os
+import re
 import sys
 import tarfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import h5py
@@ -58,6 +62,32 @@ import numpy as np
 import torch
 
 log = logging.getLogger(__name__)
+
+
+def _lock_filename_for_key(key: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", key).strip("_")
+    return (safe or "wds") + ".lock"
+
+
+@contextmanager
+def _wds_append_lock(lock_dir: Path | None, wds_dest: str, model_type: str):
+    """Serialize WDS index/shard mutation across dispatcher configs."""
+    if lock_dir is None:
+        yield
+        return
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / _lock_filename_for_key(f"{wds_dest.rstrip('/')}::{model_type}")
+    with lock_path.open("a+") as fh:
+        fh.write(f"pid={os.getpid()}\n")
+        fh.flush()
+        log.info("Waiting for WDS append lock: %s", lock_path)
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        log.info("Acquired WDS append lock: %s", lock_path)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            log.info("Released WDS append lock: %s", lock_path)
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +107,152 @@ def _add_npy_to_tar(tar: tarfile.TarFile, arcname: str, data: bytes) -> None:
     info.uid = info.gid = 0
     info.uname = info.gname = ""
     tar.addfile(info, io.BytesIO(data))
+
+
+def _slide_id_from_member(name: str) -> str | None:
+    if name.endswith(".features.npy"):
+        return name[:-len(".features.npy")]
+    if name.endswith(".coords.npy"):
+        return name[:-len(".coords.npy")]
+    return None
+
+
+def _rewrite_tar_excluding_slides(tar_path: Path, slide_ids: set[str]) -> bool:
+    """Rewrite a tar in place without entries for slide_ids.
+
+    Returns True if any entry was removed. Used before retry appends so a failed
+    index save followed by resume does not leave duplicate tar member names.
+    """
+    if not tar_path.exists() or not slide_ids:
+        return False
+
+    tmp_path = tar_path.with_suffix(tar_path.suffix + ".tmp")
+    removed = 0
+    try:
+        with tarfile.open(tar_path, "r") as src, tarfile.open(tmp_path, "w") as dst:
+            for member in src.getmembers():
+                sid = _slide_id_from_member(member.name)
+                if sid in slide_ids:
+                    removed += 1
+                    continue
+                fh = src.extractfile(member) if member.isfile() else None
+                dst.addfile(member, fh)
+                if fh is not None:
+                    fh.close()
+        if removed:
+            tmp_path.replace(tar_path)
+            log.warning("Compacted %s: removed %d stale duplicate member(s)", tar_path, removed)
+            return True
+        tmp_path.unlink(missing_ok=True)
+        return False
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _read_npy_member(tar: tarfile.TarFile, member: tarfile.TarInfo) -> np.ndarray:
+    fh = tar.extractfile(member)
+    if fh is None:
+        raise RuntimeError(f"Could not read tar member {member.name}")
+    try:
+        return np.load(io.BytesIO(fh.read()))
+    finally:
+        fh.close()
+
+
+def _repair_wds_tar(
+    tar_path: Path,
+    *,
+    h5_lookup: dict[str, Path] | None = None,
+    require_coords: bool = False,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Compact duplicate WDS tar entries and restore coords when possible.
+
+    For each slide, keeps the last features entry and one coords entry matching
+    feature row count. If no matching coords entry exists, a local .patch.h5 can
+    provide coords via h5_lookup. This repairs retry-created duplicate tar
+    members without rerunning feature extraction.
+    """
+    stats = {
+        "slides": 0,
+        "duplicate_slides": 0,
+        "missing_coords": 0,
+        "repaired_coords_from_h5": 0,
+        "mismatched_coords": 0,
+        "rewritten": 0,
+    }
+    if not tar_path.exists():
+        return stats
+
+    grouped: dict[str, dict[str, list[tarfile.TarInfo]]] = {}
+    with tarfile.open(tar_path, "r") as tar:
+        members = tar.getmembers()
+        for member in members:
+            sid = _slide_id_from_member(member.name)
+            if sid is None:
+                continue
+            kind = "features" if member.name.endswith(".features.npy") else "coords"
+            grouped.setdefault(sid, {"features": [], "coords": []})[kind].append(member)
+
+        repaired: list[tuple[str, np.ndarray, np.ndarray | None]] = []
+        for sid, parts in grouped.items():
+            stats["slides"] += 1
+            if len(parts["features"]) > 1 or len(parts["coords"]) > 1:
+                stats["duplicate_slides"] += 1
+            if not parts["features"]:
+                continue
+
+            features = _read_npy_member(tar, parts["features"][-1])
+            feature_rows = features.shape[0] if features.ndim > 1 else 1
+            coords = None
+            for coord_member in reversed(parts["coords"]):
+                candidate = _read_npy_member(tar, coord_member)
+                coord_rows = candidate.shape[0] if candidate.ndim > 1 else 1
+                if coord_rows == feature_rows:
+                    coords = candidate
+                    break
+                stats["mismatched_coords"] += 1
+
+            if coords is None and h5_lookup and sid in h5_lookup:
+                candidate = _load_coords(h5_lookup[sid])
+                if candidate is not None:
+                    coord_rows = candidate.shape[0] if candidate.ndim > 1 else 1
+                    if coord_rows == feature_rows:
+                        coords = candidate
+                        stats["repaired_coords_from_h5"] += 1
+                    else:
+                        stats["mismatched_coords"] += 1
+
+            if coords is None and require_coords:
+                stats["missing_coords"] += 1
+            repaired.append((sid, features, coords))
+
+    expected_members = sum(1 + (1 if coords is not None else 0) for _, _, coords in repaired)
+    existing_data_members = sum(
+        len(parts["features"]) + len(parts["coords"]) for parts in grouped.values()
+    )
+    needs_rewrite = (
+        existing_data_members != expected_members
+        or stats["duplicate_slides"] > 0
+        or stats["repaired_coords_from_h5"] > 0
+    )
+    if not needs_rewrite or dry_run:
+        return stats
+
+    tmp_path = tar_path.with_suffix(tar_path.suffix + ".repair.tmp")
+    try:
+        with tarfile.open(tmp_path, "w") as out:
+            for sid, features, coords in repaired:
+                _add_npy_to_tar(out, f"{sid}.features.npy", _npy_bytes(features))
+                if coords is not None:
+                    _add_npy_to_tar(out, f"{sid}.coords.npy", _npy_bytes(coords))
+        tmp_path.replace(tar_path)
+        stats["rewritten"] = 1
+        return stats
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _load_features(pt_path: Path) -> np.ndarray:
@@ -261,6 +437,68 @@ def _save_index(index: dict, wds_dest: str, model: str, staging_dir: Path | None
         tmp_p.replace(p)
 
 
+def _build_h5_lookup(h5_dir: Path | None) -> dict[str, Path]:
+    h5_lookup: dict[str, Path] = {}
+    if h5_dir is not None:
+        for h5_path in h5_dir.rglob("*.patch.h5"):
+            sid = h5_path.name.split(".")[0]
+            h5_lookup[sid] = h5_path
+        log.info("Found %d .patch.h5 files in %s", len(h5_lookup), h5_dir)
+    return h5_lookup
+
+
+def repair_wds_shards(
+    wds_dest: str,
+    model: str,
+    staging_dir: Path | None,
+    h5_dir: Path | None = None,
+    *,
+    require_coords: bool = False,
+    dry_run: bool = False,
+    s3_max_concurrency: int = 4,
+) -> dict[str, int]:
+    """Repair local/staged WDS shards for one model and upload replacements if S3."""
+    use_s3 = _is_s3(wds_dest)
+    if use_s3:
+        assert staging_dir, "--staging-dir required for S3 destinations"
+        root = staging_dir / model
+    else:
+        root = Path(wds_dest) / model
+    h5_lookup = _build_h5_lookup(h5_dir)
+    totals = {
+        "shards": 0,
+        "rewritten": 0,
+        "slides": 0,
+        "duplicate_slides": 0,
+        "missing_coords": 0,
+        "repaired_coords_from_h5": 0,
+        "mismatched_coords": 0,
+    }
+    if not root.exists():
+        return totals
+    for tar_path in sorted(root.rglob("*.tar")):
+        stats = _repair_wds_tar(
+            tar_path,
+            h5_lookup=h5_lookup,
+            require_coords=require_coords,
+            dry_run=dry_run,
+        )
+        totals["shards"] += 1
+        for key in (
+            "rewritten",
+            "slides",
+            "duplicate_slides",
+            "missing_coords",
+            "repaired_coords_from_h5",
+            "mismatched_coords",
+        ):
+            totals[key] += stats[key]
+        if stats["rewritten"] and use_s3 and not dry_run:
+            rel = tar_path.relative_to(staging_dir)
+            _s3_upload(tar_path, f"{wds_dest.rstrip('/')}/{rel}", s3_max_concurrency)
+    return totals
+
+
 # ---------------------------------------------------------------------------
 # Per-project shard writer
 # ---------------------------------------------------------------------------
@@ -297,6 +535,7 @@ class _ShardWriter:
         self._current_path: Path | None = None
         self._current_index: int = 0
         self._current_bytes: int = 0
+        self._local_slide_locations: dict[str, set[Path]] | None = None
         self._init_current_shard()
 
     def _init_current_shard(self) -> None:
@@ -343,6 +582,29 @@ class _ShardWriter:
     def _active_path(self) -> Path:
         return self._work_dir / f"{self._current_index:06d}.tar"
 
+    def _build_local_slide_locations(self) -> dict[str, set[Path]]:
+        locations: dict[str, set[Path]] = {}
+        for shard_path in sorted(self._work_dir.glob("*.tar")):
+            try:
+                with tarfile.open(shard_path) as tar:
+                    for member in tar.getmembers():
+                        sid = _slide_id_from_member(member.name)
+                        if sid is not None:
+                            locations.setdefault(sid, set()).add(shard_path)
+            except tarfile.TarError as exc:
+                log.warning("Could not inspect existing shard %s: %s", shard_path, exc)
+        return locations
+
+    def _remove_existing_slide_entries(self, slide_id: str) -> None:
+        if self._local_slide_locations is None:
+            self._local_slide_locations = self._build_local_slide_locations()
+        for shard_path in sorted(self._local_slide_locations.get(slide_id, set())):
+            if shard_path.exists():
+                _rewrite_tar_excluding_slides(shard_path, {slide_id})
+        self._local_slide_locations.pop(slide_id, None)
+        if self._current_path and self._current_path.exists():
+            self._current_bytes = self._current_path.stat().st_size
+
     def append(
         self, slide_id: str, features: np.ndarray, coords: np.ndarray | None
     ) -> str:
@@ -361,6 +623,8 @@ class _ShardWriter:
                      slide_id, self._model, self._project_id, shard_path.name)
             return shard_path.name
 
+        self._remove_existing_slide_entries(slide_id)
+
         mode = "a" if shard_path.exists() else "w"
         with tarfile.open(shard_path, mode) as tar:
             _add_npy_to_tar(tar, f"{slide_id}.features.npy", feat_bytes)
@@ -369,6 +633,8 @@ class _ShardWriter:
 
         self._current_path = shard_path
         self._current_bytes = shard_path.stat().st_size
+        if self._local_slide_locations is not None:
+            self._local_slide_locations.setdefault(slide_id, set()).add(shard_path)
         return shard_path.name
 
     def _seal_and_rotate(self) -> None:
@@ -377,7 +643,9 @@ class _ShardWriter:
             s3_uri = (f"{self._wds_dest.rstrip('/')}/{self._model}/"
                       f"{self._project_id}/{self._current_path.name}")
             _s3_upload(self._current_path, s3_uri, self._s3_max_concurrency)
-            self._current_path.unlink()
+            # Keep the sealed local staging shard. If upload succeeds but index
+            # save fails, a retry can inspect/compact the shard instead of
+            # blindly appending duplicate slide entries.
         self._current_index += 1
         self._current_path = None
         self._current_bytes = 0
@@ -409,8 +677,10 @@ def append_wds(
     dry_run: bool = False,
     slide_id_filter: set[str] | None = None,
     delete_local: bool = False,
+    delete_coords_local: bool = False,
     manifest_csv: Path | None = None,
     s3_max_concurrency: int = 4,
+    lock_dir: Path | None = None,
     slide_to_project: "dict[str, str] | None" = None,
     failed_slides: "set[str] | None" = None,
     also_delete_pt_dirs: "list[Path] | None" = None,
@@ -418,8 +688,11 @@ def append_wds(
     """Append all .features.pt files in pt_dir to WDS shards.
 
     If slide_id_filter is provided, only those slide_ids are appended.
-    If delete_local is True, the source .pt and .patch.h5 files are deleted
-    after all writers have been flushed (i.e. after S3 upload completes).
+    If delete_local is True, the source .pt and companion .features.h5 files
+    are deleted after all writers have been flushed (i.e. after S3 upload
+    completes). If delete_coords_local is also True, shared .patch.h5 coordinate
+    files are deleted too. Keep this off until every model sharing the same
+    coordinates has been written to WDS.
     If manifest_csv is set, appends rows (slide_id, model, wds_path) to that
     CSV so callers can look up the full S3 shard path for each slide.
     s3_max_concurrency limits boto3 multipart threads per upload/download.
@@ -431,6 +704,28 @@ def append_wds(
       .pt files that are no longer needed after the slide encoder is in WDS).
     Returns the updated index dict.
     """
+    if lock_dir is not None:
+        with _wds_append_lock(lock_dir, wds_dest, model_type):
+            return append_wds(
+                pt_dir=pt_dir,
+                h5_dir=h5_dir,
+                inventory_df=inventory_df,
+                wds_dest=wds_dest,
+                model_type=model_type,
+                staging_dir=staging_dir,
+                max_shard_bytes=max_shard_bytes,
+                dry_run=dry_run,
+                slide_id_filter=slide_id_filter,
+                delete_local=delete_local,
+                delete_coords_local=delete_coords_local,
+                manifest_csv=manifest_csv,
+                s3_max_concurrency=s3_max_concurrency,
+                lock_dir=None,
+                slide_to_project=slide_to_project,
+                failed_slides=failed_slides,
+                also_delete_pt_dirs=also_delete_pt_dirs,
+            )
+
     # Build slide_id → project_id lookup: prefer explicit dict, fall back to inventory_df
     if slide_to_project is None:
         inv = inventory_df.copy()
@@ -463,12 +758,7 @@ def append_wds(
     log.info("Found %d .pt files in %s", len(pt_files), pt_dir)
 
     # Pre-build a slide_id → h5_path lookup to avoid O(N²) rglob calls in the loop.
-    h5_lookup: dict[str, Path] = {}
-    if h5_dir is not None:
-        for h5_path in h5_dir.rglob("*.patch.h5"):
-            sid = h5_path.name.split(".")[0]
-            h5_lookup[sid] = h5_path
-        log.info("Found %d .patch.h5 files in %s", len(h5_lookup), h5_dir)
+    h5_lookup = _build_h5_lookup(h5_dir)
 
     writers: dict[str, _ShardWriter] = {}
     n_appended = n_skipped = n_missing_project = 0
@@ -542,19 +832,28 @@ def append_wds(
     # Includes both newly-appended slides and already-indexed slides whose
     # local files were still present (cleanup of files from prior runs).
     # Also deletes the companion .features.h5 (H5 duplicate of the .pt data)
-    # that the pipeline publishes alongside every .features.pt file.
+    # that the pipeline publishes alongside every .features.pt file. The
+    # .patch.h5 coordinate file is shared by all model hooks, so it is deleted
+    # only when explicitly requested by the final hook.
     if delete_local and not dry_run and appended_locals:
         n_deleted = 0
+        n_coords_deleted = 0
         for pt_path, h5_path in appended_locals:
             pt_path.unlink(missing_ok=True)
             # Delete the .features.h5 companion published next to the .pt file
             # pt_path ends in .features.pt; .with_suffix(".h5") gives .features.h5
             companion_h5 = pt_path.with_suffix(".h5")
             companion_h5.unlink(missing_ok=True)
-            if h5_path:
+            if delete_coords_local and h5_path:
                 h5_path.unlink(missing_ok=True)
+                n_coords_deleted += 1
             n_deleted += 1
-        log.info("Deleted %d local source file pair(s) (pt + features.h5 + patch.h5)", n_deleted)
+        log.info(
+            "Deleted %d local feature source file pair(s) (pt + features.h5); "
+            "deleted %d shared coordinate file(s)",
+            n_deleted,
+            n_coords_deleted,
+        )
 
     # Delete companion files from additional directories (e.g. patch encoder .pt files
     # whose features have been consumed by a slide encoder now safely in WDS).
@@ -667,9 +966,22 @@ def main(argv: list[str] | None = None) -> int:
                              "Appended to on each run so it builds up over time. "
                              "Created with a header row if it does not yet exist.")
     parser.add_argument("--delete-local", action="store_true",
-                        help="Delete local .pt and .patch.h5 source files after they are "
-                             "successfully flushed to WDS (including S3 upload). "
+                        help="Delete local .pt and companion .features.h5 source files "
+                             "after they are successfully flushed to WDS (including S3 upload). "
                              "Has no effect with --dry-run.")
+    parser.add_argument("--delete-coords-local", action="store_true",
+                        help="Also delete shared .patch.h5 coordinate files after WDS flush. "
+                             "Use only on the final WDS hook for a batch because coords are "
+                             "shared by all model outputs. Requires --delete-local.")
+    parser.add_argument("--repair-existing-shards", action="store_true",
+                        help="Before appending, compact existing local/staged WDS shards for "
+                             "this model. Duplicate slide entries are collapsed to one "
+                             "features/coords pair; missing coords are restored from --h5-dir "
+                             "when available. For S3 destinations, repaired staged shards are "
+                             "uploaded back to the same S3 keys.")
+    parser.add_argument("--repair-require-coords", action="store_true",
+                        help="When repairing shards, count slides still missing coords after "
+                             "tar/H5 recovery. Intended for tile embedding models.")
     parser.add_argument("--also-delete-pt-dirs", default=None,
                         help="Comma-separated list of additional directories from which to "
                              "delete all files matching {slide_id}.* when --delete-local is "
@@ -679,6 +991,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Maximum number of parallel boto3 transfer threads per S3 "
                              "upload/download (default: 4). Reduce to limit ECS endpoint load "
                              "when multiple batches are running concurrently.")
+    parser.add_argument("--lock-dir", default=None,
+                        help="Shared directory for WDS append locks. When set, append operations "
+                             "for the same wds-dest/model are serialized across dispatchers.")
     parser.add_argument("--s3-endpoint", default=None,
                         help="Custom S3 endpoint URL (e.g. http://your-s3-endpoint:9020 for "
                              "ECS). Falls back to S3_ENDPOINT_URL / ECS_ENDPOINT_URL env vars.")
@@ -714,6 +1029,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.project_id_column and not args.slide_ids_csv:
         log.error("--project-id-column requires --slide-ids-csv")
+        return 1
+    if args.delete_coords_local and not args.delete_local:
+        log.error("--delete-coords-local requires --delete-local")
         return 1
 
     # Optional: restrict to a specific set of slide_ids AND/OR build routing lookup
@@ -795,6 +1113,17 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         try:
+            if args.repair_existing_shards:
+                repair_stats = repair_wds_shards(
+                    wds_dest=args.wds_dest,
+                    model=model,
+                    staging_dir=staging_dir,
+                    h5_dir=h5_dir if h5_dir and h5_dir.exists() else None,
+                    require_coords=args.repair_require_coords,
+                    dry_run=args.dry_run,
+                    s3_max_concurrency=args.s3_max_concurrency,
+                )
+                log.info("WDS repair stats for %s: %s", model, repair_stats)
             append_wds(
                 pt_dir=pt_dir,
                 h5_dir=h5_dir if h5_dir and h5_dir.exists() else None,
@@ -806,8 +1135,10 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 slide_id_filter=slide_id_filter,
                 delete_local=args.delete_local,
+                delete_coords_local=args.delete_coords_local,
                 manifest_csv=Path(args.manifest_csv) if args.manifest_csv else None,
                 s3_max_concurrency=args.s3_max_concurrency,
+                lock_dir=Path(args.lock_dir) if args.lock_dir else None,
                 slide_to_project=slide_to_project,
                 failed_slides=failed_slides,
                 also_delete_pt_dirs=[Path(d) for d in args.also_delete_pt_dirs.split(",")]

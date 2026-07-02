@@ -215,9 +215,9 @@
                 },
                 "workflow_batch_size": {
                     "type": "integer",
-                    "default": 1,
+                    "default": 4,
                     "minimum": 1,
-                    "description": "Number of slides grouped into one TESSELLATE task. 1 preserves per-slide tessellation jobs."
+                    "description": "tiling.workflow_batch_size: number of slides grouped into one TESSELLATE task. Conservative batching reduces scheduler overhead."
                 }
             }
         },
@@ -287,7 +287,7 @@
                 "workflow_batch_size": {
                     "type": "integer",
                     "default": 12,
-                    "description": "Number of slides grouped into a single Nextflow task. Reduces scheduler overhead."
+                    "description": "featurize.workflow_batch_size: number of slides grouped into a single feature-extraction task. Reduces scheduler overhead."
                 },
                 "slide_batch_size": {
                     "type": "integer",

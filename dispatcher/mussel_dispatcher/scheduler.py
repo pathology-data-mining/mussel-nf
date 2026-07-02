@@ -353,7 +353,7 @@ class BatchScheduler:
         (default 4 h).  Set to 0 to disable.
         """
         timeout_hours = self.cfg.stuck_batch_timeout_hours
-        if not timeout_hours:
+        if timeout_hours <= 0:
             return
         cutoff = time.time() - timeout_hours * 3600
         for batch in self.state.get_running_batches():
@@ -361,7 +361,7 @@ class BatchScheduler:
             nf_pid = batch.get("nf_pid")
             if not nf_pid:
                 continue
-            log_path = os.path.join(self.cfg.log_dir, f"batch_{batch_id}.log")
+            log_path = batch.get("log_path") or os.path.join(self.cfg.log_dir, f"batch_{batch_id}.log")
             try:
                 mtime = os.path.getmtime(log_path)
             except OSError:

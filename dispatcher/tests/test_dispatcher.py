@@ -862,6 +862,21 @@ class TestWatchdogStuckBatches:
         scheduler._watchdog_stuck_batches()
         assert killed == []
 
+    def test_disabled_when_timeout_negative(self, tmp_path, monkeypatch):
+        """A negative timeout_hours is treated as disabled — no batches killed."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=-1.0)
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "abc123", "nf_pid": 9999}
+        ]
+        self._write_log(tmp_path, "abc123", age_seconds=999_999)
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == []
+
     def test_no_running_batches_does_nothing(self, tmp_path, monkeypatch):
         """Watchdog is a no-op when there are no RUNNING batches."""
         scheduler = self._make_scheduler(tmp_path)
@@ -918,6 +933,25 @@ class TestWatchdogStuckBatches:
         )
         scheduler._watchdog_stuck_batches()
         assert killed == []
+
+    def test_uses_stored_log_path_from_db(self, tmp_path, monkeypatch):
+        """Watchdog uses log_path from the DB row, not a reconstructed path."""
+        scheduler = self._make_scheduler(tmp_path, timeout_hours=4.0)
+        custom_log = tmp_path / "custom" / "run.log"
+        custom_log.parent.mkdir()
+        custom_log.write_text("NF progress\n")
+        mtime = time.time() - 5 * 3600  # 5h old — stuck
+        os.utime(custom_log, (mtime, mtime))
+        scheduler.state.get_running_batches.return_value = [
+            {"batch_id": "custom01", "nf_pid": 1234, "log_path": str(custom_log)}
+        ]
+        killed = []
+        monkeypatch.setattr(
+            "mussel_dispatcher.scheduler._kill_orphaned_nf",
+            lambda bid, pid, **kw: killed.append(pid),
+        )
+        scheduler._watchdog_stuck_batches()
+        assert killed == [1234]
 
     def test_batch_without_pid_skipped(self, tmp_path, monkeypatch):
         """A RUNNING batch with no nf_pid recorded is skipped (can't kill)."""
@@ -1257,6 +1291,7 @@ class TestNfRunNameValidation:
 
     def test_returns_resume_spec_when_work_dir_exists(self, tmp_path):
         """When work dir and csv both exist, returns resume spec instead of resetting to PENDING."""
+        import unittest.mock as mock
         store = StateStore(str(tmp_path / "test.db"))
         store.add_slide("/slides/a.svs", "a")
         work_dir = tmp_path / "batch-001" / "work"
@@ -1265,8 +1300,10 @@ class TestNfRunNameValidation:
         csv_path.write_text("slide_id,slide_path\na,/slides/a.svs\n")
         store.add_batch("batch-001", str(csv_path), str(work_dir), 1, "/logs/1.log")
         store.mark_dispatched(["/slides/a.svs"], "batch-001")
+        store.set_batch_nf_pid("batch-001", 424242)
         pending = deque()
-        specs = recover_in_flight(store, pending)
+        with mock.patch("mussel_dispatcher.scheduler.os.kill", return_value=None):
+            specs = recover_in_flight(store, pending)
         # Slides stay DISPATCHED (not reset to PENDING) — will be handled by resume run
         assert len(pending) == 0
         assert len(specs) == 1
@@ -1716,8 +1753,10 @@ class TestNextflowRunnerRun:
     def test_run_success_marks_slides_succeeded(self, tmp_path):
         import unittest.mock as mock
         runner, state = self._make_runner(tmp_path)
-        fake_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=fake_proc):
+        fake_proc = mock.Mock()
+        fake_proc.pid = 12345
+        fake_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=fake_proc):
             exit_code = runner.run()
         assert exit_code == 0
         row = state._conn().execute(
@@ -1728,11 +1767,16 @@ class TestNextflowRunnerRun:
     def test_run_failure_marks_slides_failed_and_increments_fail_count(self, tmp_path):
         import unittest.mock as mock
         runner, state = self._make_runner(tmp_path)
-        fake_proc = mock.Mock(returncode=1)
+        fake_proc = mock.Mock()
+        fake_proc.pid = 12345
+        fake_proc.wait.return_value = 1
+        real_isdir = os.path.isdir
         # Patch time so batch_duration >= 60s (not a fast-fail)
-        with mock.patch("subprocess.run", return_value=fake_proc), \
+        with mock.patch("subprocess.Popen", return_value=fake_proc), \
+             mock.patch("mussel_dispatcher.runner.os.path.isdir",
+                        side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
              mock.patch("mussel_dispatcher.runner.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 120.0]  # started_at=0, ended_at=120
+            mock_time.time.side_effect = [0.0] + [120.0] * 10
             exit_code = runner.run()
         assert exit_code == 1
         row = state._conn().execute(
@@ -1745,10 +1789,12 @@ class TestNextflowRunnerRun:
         """Batch failure in <60s (infra error) resets slides to PENDING without charging fail_count."""
         import unittest.mock as mock
         runner, state = self._make_runner(tmp_path)
-        fake_proc = mock.Mock(returncode=1)
-        with mock.patch("subprocess.run", return_value=fake_proc), \
+        fake_proc = mock.Mock()
+        fake_proc.pid = 12345
+        fake_proc.wait.return_value = 1
+        with mock.patch("subprocess.Popen", return_value=fake_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 5.0]  # 5s — clearly a fast fail
+            mock_time.time.side_effect = [0.0] + [5.0] * 10
             exit_code = runner.run()
         assert exit_code == 1
         row = state._conn().execute(
@@ -2507,11 +2553,13 @@ class TestDatabricksWatcher:
             w.run()
         assert len(pending) == 0
 
-    def test_no_query_raises_runtime_error(self, tmp_path):
-        """_build_query raises RuntimeError when neither query nor query_file is set."""
+    def test_no_query_uses_builtin_template(self, tmp_path):
+        """_build_query falls back to the built-in Databricks query template."""
         w, pending, state = self._watcher(tmp_path, {"query": "", "query_file": ""})
-        with pytest.raises(RuntimeError, match="no query configured"):
-            w._build_query()
+        query = w._build_query()
+        assert "FROM" in query
+        assert "JOIN" in query
+        assert "i.size >= 10000000" in query
 
     def test_inline_query_used(self, tmp_path):
         """_build_query returns inline SQL from cfg.query."""
@@ -4482,10 +4530,12 @@ class TestE2EDispatcherLoop:
             state.add_slide(s["slide_path"], s["slide_id"])
             scheduler.enqueue(s)
 
-        fake_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=fake_proc), \
+        fake_proc = mock.Mock()
+        fake_proc.pid = 12345
+        fake_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=fake_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler._maybe_dispatch(force=True)
             run_manager.shutdown(wait=True)
 
@@ -4505,10 +4555,15 @@ class TestE2EDispatcherLoop:
         scheduler.enqueue(slide)
 
         # First run: fail (long enough to charge fail_count)
-        fail_proc = mock.Mock(returncode=1)
-        with mock.patch("subprocess.run", return_value=fail_proc), \
+        fail_proc = mock.Mock()
+        fail_proc.pid = 12345
+        fail_proc.wait.return_value = 1
+        real_isdir = os.path.isdir
+        with mock.patch("subprocess.Popen", return_value=fail_proc), \
+             mock.patch("mussel_dispatcher.runner.os.path.isdir",
+                        side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler._maybe_dispatch(force=True)
             run_manager.shutdown(wait=True)
 
@@ -4531,10 +4586,12 @@ class TestE2EDispatcherLoop:
         scheduler2 = BatchScheduler(cfg, state, run_manager2, threading.Event())
         scheduler2.enqueue(slide)
 
-        ok_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=ok_proc), \
+        ok_proc = mock.Mock()
+        ok_proc.pid = 12345
+        ok_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=ok_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler2._maybe_dispatch(force=True)
             run_manager2.shutdown(wait=True)
 
@@ -4567,11 +4624,13 @@ class TestE2EDispatcherLoop:
         mock_s3 = MagicMock()
         mock_s3.head_object.side_effect = head_object
 
-        ok_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=ok_proc), \
+        ok_proc = mock.Mock()
+        ok_proc.pid = 12345
+        ok_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=ok_proc), \
              mock.patch.object(scheduler, "_get_s3_client", return_value=mock_s3), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler._maybe_dispatch(force=True)
             run_manager.shutdown(wait=True)
 
@@ -5723,10 +5782,15 @@ class TestE2ERetryFailedLoop:
             scheduler.enqueue(s)
 
         # First dispatch: batch fails (simulating NF crash / node failure)
-        fail_proc = mock.Mock(returncode=1)
-        with mock.patch("subprocess.run", return_value=fail_proc), \
+        fail_proc = mock.Mock()
+        fail_proc.pid = 12345
+        fail_proc.wait.return_value = 1
+        real_isdir = os.path.isdir
+        with mock.patch("subprocess.Popen", return_value=fail_proc), \
+             mock.patch("mussel_dispatcher.runner.os.path.isdir",
+                        side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler._maybe_dispatch(force=True)
             run_manager.shutdown(wait=True)
 
@@ -5753,10 +5817,12 @@ class TestE2ERetryFailedLoop:
         scheduler2.enqueue({"slide_path": "/slides/A.svs", "slide_id": "A"})
         scheduler2.enqueue({"slide_path": "/slides/B.svs", "slide_id": "B"})
 
-        ok_proc = mock.Mock(returncode=0)
-        with mock.patch("subprocess.run", return_value=ok_proc), \
+        ok_proc = mock.Mock()
+        ok_proc.pid = 12345
+        ok_proc.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=ok_proc), \
              mock.patch("mussel_dispatcher.runner.time") as mt:
-            mt.time.side_effect = [0.0, 120.0]
+            mt.time.side_effect = [0.0] + [120.0] * 10
             scheduler2._maybe_dispatch(force=True)
             run_manager2.shutdown(wait=True)
 
@@ -5805,10 +5871,15 @@ class TestE2ERetryFailedLoop:
         scheduler.enqueue(slide)
 
         for _ in range(2):
-            fail_proc = mock.Mock(returncode=1)
-            with mock.patch("subprocess.run", return_value=fail_proc), \
+            fail_proc = mock.Mock()
+            fail_proc.pid = 12345
+            fail_proc.wait.return_value = 1
+            real_isdir = os.path.isdir
+            with mock.patch("subprocess.Popen", return_value=fail_proc), \
+                 mock.patch("mussel_dispatcher.runner.os.path.isdir",
+                            side_effect=lambda p: False if p.endswith("/work") else real_isdir(p)), \
                  mock.patch("mussel_dispatcher.runner.time") as mt:
-                mt.time.side_effect = [0.0, 120.0]
+                mt.time.side_effect = [0.0] + [120.0] * 10
                 scheduler._maybe_dispatch(force=True)
                 run_manager.shutdown(wait=True)
             # After each failure, periodic retry re-queues (if not exhausted)

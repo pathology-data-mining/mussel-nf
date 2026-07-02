@@ -3,6 +3,8 @@ process TESSELLATE_FEATURIZE_BATCH {
     label "gpuTask"
     label "parallelTask"
 
+    beforeScript 'export HDF5_USE_FILE_LOCKING=FALSE'
+
     secret 'HF_TOKEN'
 
     // Publish slide encoder features (always created)

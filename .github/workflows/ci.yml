@@ -179,6 +179,7 @@ jobs:
         run: |
           nf-test test \
             tests/pipeline_stub_two_step.nf.test \
+            tests/pipeline_stub_two_step_titan.nf.test \
             tests/pipeline_stub_filter.nf.test \
             tests/pipeline_stub_wds.nf.test \
             tests/pipeline_stub_wds_grouped.nf.test \

@@ -24,7 +24,11 @@ workflow {
     validateParameters()
 
     // Print summary of supplied parameters
-    log.info paramsSummaryLog(workflow)
+    try {
+        log.info paramsSummaryLog(workflow)
+    } catch (Exception e) {
+        log.warn "Could not render parameter summary: ${e.message}"
+    }
 
     def timestamp = new Date().getTime()
 
@@ -159,4 +163,3 @@ workflow {
     saveParams()
 
 }
-

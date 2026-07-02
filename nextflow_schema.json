@@ -80,6 +80,12 @@
             "help_text": "When true, uses TESSELLATE_FEATURIZE_BATCH for combined tessellation and feature extraction. When false, uses separate TESSELLATE and FEATURIZE_BATCH processes.",
             "default": false
         },
+        "tessellate_only": {
+            "type": ["boolean", "string"],
+            "description": "Run tessellation only and skip feature extraction",
+            "help_text": "When true, emits tile H5 outputs and manifests without running feature extraction, linear probe, CLIP, or WDS steps.",
+            "default": false
+        },
         "tiling": {
             "title": "Tessellation options",
             "type": "object",
@@ -206,6 +212,12 @@
                     "type": ["boolean", "string"],
                     "default": false,
                     "description": "generate stitched tiles"
+                },
+                "workflow_batch_size": {
+                    "type": "integer",
+                    "default": 4,
+                    "minimum": 1,
+                    "description": "tiling.workflow_batch_size: number of slides grouped into one TESSELLATE task. Conservative batching reduces scheduler overhead."
                 }
             }
         },
@@ -274,8 +286,8 @@
                 },
                 "workflow_batch_size": {
                     "type": "integer",
-                    "default": 8,
-                    "description": "Number of slides grouped into a single Nextflow task. Reduces scheduler overhead."
+                    "default": 12,
+                    "description": "featurize.workflow_batch_size: number of slides grouped into a single feature-extraction task. Reduces scheduler overhead."
                 },
                 "slide_batch_size": {
                     "type": "integer",
@@ -347,7 +359,11 @@
                 },
                 "model_precision_overrides": {
                     "type": "object",
-                    "description": "Per-model embedding precision overrides. Takes precedence over embedding_precision. Keys are model type names (e.g. 'optimus'), values are 'float32', 'float16', or 'bfloat16'."
+                    "description": "Per-model embedding precision overrides. Takes precedence over embedding_precision. Keys are model type names (e.g. 'optimus'), values are 'float32', 'float16', or 'bfloat16'.",
+                    "additionalProperties": {
+                        "type": "string",
+                        "enum": ["float32", "float16", "bfloat16"]
+                    }
                 },
                 "benchmark_precisions": {
                     "type": "array",

@@ -13,8 +13,8 @@ process FEATURIZE_BATCH {
 
     // Publish slide encoder features (always created)
     publishDir path: { def prefix = post_filter ? '' : 'prefilter_'; "${params.outdir}/features/${prefix}${model_type_input}" }, mode: "${params.publish_mode}", pattern: "*.features.{pt,h5}"
-    // Publish patch encoder features (only created when using slide-level model)
-    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; def prefix = post_filter ? '' : 'prefilter_'; "${params.outdir}/features/${prefix}${mt}" }, mode: "${params.publish_mode}", pattern: "*.patch_features.{pt,h5}"
+    // Two-step slide-level extraction writes intermediate patch features only as HDF5.
+    publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; def prefix = post_filter ? '' : 'prefilter_'; "${params.outdir}/features/${prefix}${mt}" }, mode: "${params.publish_mode}", pattern: "*.patch_features.h5"
 
     input:
     tuple val(slide_batch), path(slides), path(patch_h5s)
@@ -27,8 +27,7 @@ process FEATURIZE_BATCH {
     output:
     tuple val(batch_metadata), val(model_type_input), path("*.features.pt"), emit: pt
     tuple val(batch_metadata), val(model_type_input), path("*.features.h5"), emit: h5
-    // Patch-level features are only produced when using slide-level encoders (optional)
-    tuple val(batch_metadata), val(model_type), path("*.patch_features.pt"), optional: true, emit: patch_pt
+    // Patch-level H5 features are produced when using slide-level encoders.
     tuple val(batch_metadata), val(model_type), path("*.patch_features.h5"), optional: true, emit: patch_h5
 
     script:
@@ -75,6 +74,12 @@ process FEATURIZE_BATCH {
     // This is the batch size passed to the slide encoder model.
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
+    // For slide-level models, let Mussel apply its built-in patch cap before
+    // aggregation rather than rewriting .patch.h5 files in the work dir.
+    slide_max_patches_str = (slide_model_type && params.featurize.slide_max_patches != null)
+        ? "max_slide_patches=${params.featurize.slide_max_patches}"
+        : ""
+
     // Resolve per-model batch size override, falling back to global default
     batch_size = (params.featurize.model_batch_sizes && params.featurize.model_batch_sizes[mtype.toUpperCase()])
         ? params.featurize.model_batch_sizes[mtype.toUpperCase()]
@@ -95,6 +100,7 @@ process FEATURIZE_BATCH {
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
         batch_size=${batch_size} \
         slide_batch_size=${slide_batch_size} \
+        ${slide_max_patches_str} \
         ${slide_model_str} \
         ${aggregation_str} \
         ${embedding_precision_str}

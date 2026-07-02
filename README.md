@@ -111,7 +111,7 @@ See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
   ```
 * Pre-download models before launching at scale — parallel jobs all hitting HuggingFace simultaneously
   causes race conditions. Run a single-slide dry-run first.
-* `params.featurize.workflow_batch_size` (default: 8) controls how many slides are grouped into a
+* `params.featurize.workflow_batch_size` (default: 12) controls how many slides are grouped into a
   single Nextflow task, reducing scheduler overhead.
 
 ## Workflows

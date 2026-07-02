@@ -1,20 +1,8 @@
 """
 Test that featurize.nf Groovy GString script blocks generate valid bash.
 
-Motivation
-----------
-NF stub tests bypass the `script:` block entirely — Groovy GString
-template bugs are invisible to stub-mode CI. This test simulates Groovy's
-GString evaluation and checks the result with `bash -n` (syntax check only,
-no execution).
-
-The specific regression caught: `$(cat .sub_patch_h5_paths)` in a Groovy
-GString was parsed as a Groovy expression instead of bash command substitution,
-corrupting all subsequent variable interpolations and producing bash syntax
-errors (exit:2) in every FEATURIZE_BATCH task.
-
-The fix was `\\$(cat ...)` (escaped `$`), which passes through to bash as
-the literal `$(cat ...)` command substitution.
+NF stub tests bypass the `script:` block entirely, so this test simulates
+Groovy's GString evaluation and checks the rendered bash with `bash -n`.
 """
 import re
 import subprocess
@@ -39,8 +27,9 @@ TEST_VARS = {
     "slide_model_str":           "slide_model_type=TITAN_SLIDE",
     "aggregation_str":           "aggregation_method=model",
     "embedding_precision_str":   "",
+    "slide_max_patches_str":     "max_slide_patches=4096",
     "params.featurize.use_gpu ? \"true\" : \"false\"": "true",
-    "params.featurize.slide_max_patches ?: 0":         "4096",
+    "params.featurize.slide_max_patches":              "4096",
     # task meta
     "task.cpus":                 "8",
 }
@@ -115,38 +104,32 @@ class TestFeaturizeNfScriptGeneration:
     def test_patch_encoder_script_is_valid_bash(self):
         """hoptimus1 / optimus path: slide_model_str is empty, subsampling block skipped."""
         script_template = self._get_script()
-        vars_ = {**TEST_VARS, "slide_model_str": "", "mtype.toUpperCase()": "HOPTIMUS1",
-                 "aggregation_str": "aggregation_method=identity"}
+        vars_ = {
+            **TEST_VARS,
+            "slide_model_str": "",
+            "slide_max_patches_str": "",
+            "mtype.toUpperCase()": "HOPTIMUS1",
+            "aggregation_str": "aggregation_method=identity",
+        }
         script = _simulate_groovy_gstring(script_template, vars_)
         ok, stderr = self._bash_syntax_ok(script)
         assert ok, f"bash -n failed for patch encoder (hoptimus1) script:\n{stderr}\n\nGenerated script:\n{script[:500]}"
 
     def test_slide_encoder_titan_script_is_valid_bash(self):
-        """titan_slide path: slide_model_str is set, H5 subsampling block is entered."""
+        """titan_slide path: built-in max_slide_patches is forwarded to Mussel."""
         script_template = self._get_script()
-        vars_ = {**TEST_VARS, "slide_model_str": "slide_model_type=TITAN_SLIDE",
-                 "mtype.toUpperCase()": "CONCH1_5", "aggregation_str": "aggregation_method=model"}
+        vars_ = {
+            **TEST_VARS,
+            "slide_model_str": "slide_model_type=TITAN_SLIDE",
+            "slide_max_patches_str": "max_slide_patches=4096",
+            "mtype.toUpperCase()": "CONCH1_5",
+            "aggregation_str": "aggregation_method=model",
+        }
         script = _simulate_groovy_gstring(script_template, vars_)
         ok, stderr = self._bash_syntax_ok(script)
         assert ok, (
-            f"bash -n failed for titan_slide (CONCH1_5) script — likely Groovy GString "
-            f"corruption (e.g. unescaped $(cmd) in template):\n{stderr}\n\n"
+            f"bash -n failed for titan_slide (CONCH1_5) script:\n{stderr}\n\n"
             f"Generated script:\n{script[:800]}"
         )
-
-    def test_no_unescaped_dollar_paren_in_script_block(self):
-        """Ensure the script: block has no bare $(cmd) patterns that Groovy would corrupt.
-
-        Any bash command substitution inside a Groovy GString MUST be written as
-        \\$(cmd) to escape the $ from Groovy's GString parser.
-        """
-        nf_text = FEATURIZE_NF.read_text()
-        block = _extract_script_block(nf_text)
-        assert block is not None, "Could not find script: block in featurize.nf"
-        # Find any $(  that is NOT preceded by a backslash
-        unescaped = re.findall(r'(?<!\\)\$\(', block)
-        assert not unescaped, (
-            f"Found {len(unescaped)} unescaped '$(' in featurize.nf script: block. "
-            "Groovy GStrings interpret $(cmd) as a Groovy expression, corrupting "
-            "all subsequent variable interpolations. Use \\\\$(cmd) instead."
-        )
+        assert "max_slide_patches=4096" in script
+        assert ".sub.patch.h5" not in script

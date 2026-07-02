@@ -74,6 +74,12 @@ process FEATURIZE_BATCH {
     // This is the batch size passed to the slide encoder model.
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
+    // For slide-level models, let Mussel apply its built-in patch cap before
+    // aggregation rather than rewriting .patch.h5 files in the work dir.
+    slide_max_patches_str = (slide_model_type && params.featurize.slide_max_patches != null)
+        ? "max_slide_patches=${params.featurize.slide_max_patches}"
+        : ""
+
     // Resolve per-model batch size override, falling back to global default
     batch_size = (params.featurize.model_batch_sizes && params.featurize.model_batch_sizes[mtype.toUpperCase()])
         ? params.featurize.model_batch_sizes[mtype.toUpperCase()]
@@ -84,49 +90,8 @@ process FEATURIZE_BATCH {
     embedding_precision_str = (precision != 'float32') ? "embedding_precision=${precision}" : ""
 
     """
-    # For slide-level models (e.g. titan_slide), TITAN runs attention over ALL patch embeddings
-    # simultaneously, making memory O(N²) in patch count. Subsample H5 coords to
-    # slide_max_patches before feature extraction so large slides don't OOM.
-    # Patch encoders (hoptimus1, optimus) are O(N) and use the full H5 — skip this block.
-    PATCH_H5_PATHS="${patch_h5_paths_str}"
-    if [ -n "${slide_model_str}" ]; then
-        python3 - <<'PYEOF'
-import h5py, numpy as np, os, sys
-
-max_p = ${params.featurize.slide_max_patches ?: 0}
-if max_p <= 0:
-    sys.exit(0)
-
-out_paths = []
-for h5_path in [p.strip() for p in "${patch_h5_paths_str}".split(",")]:
-    with h5py.File(h5_path, "r") as f:
-        coords = f["coords"][:]
-        attrs  = dict(f["coords"].attrs)
-    n = len(coords)
-    if n <= max_p:
-        out_paths.append(h5_path)
-        continue
-    rng = np.random.default_rng(abs(hash(h5_path)) % (2**31))
-    idx = np.sort(rng.choice(n, max_p, replace=False))
-    sub_path = h5_path.replace(".patch.h5", ".sub.patch.h5")
-    with h5py.File(sub_path, "w") as f:
-        ds = f.create_dataset("coords", data=coords[idx])
-        for k, v in attrs.items():
-            ds.attrs[k] = v
-    out_paths.append(sub_path)
-    print(f"[subsample_patches] {h5_path}: {n} -> {max_p} patches (wrote {sub_path})",
-          flush=True)
-
-with open(".sub_patch_h5_paths", "w") as fh:
-    fh.write(",".join(out_paths))
-PYEOF
-        if [ -f .sub_patch_h5_paths ]; then
-            PATCH_H5_PATHS=\$(cat .sub_patch_h5_paths)
-        fi
-    fi
-
     extract_features \
-        patch_h5_paths="[\${PATCH_H5_PATHS}]" \
+        patch_h5_paths='[${patch_h5_paths_str}]' \
         slide_paths='[${slide_paths_str}]' \
         slide_ids='[${slide_ids_str}]' \
         output_dir=. \
@@ -135,6 +100,7 @@ PYEOF
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \
         batch_size=${batch_size} \
         slide_batch_size=${slide_batch_size} \
+        ${slide_max_patches_str} \
         ${slide_model_str} \
         ${aggregation_str} \
         ${embedding_precision_str}

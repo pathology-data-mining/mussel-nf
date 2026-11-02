@@ -1,0 +1,18 @@
+nextflow_pipeline {
+    name   "FEATURIZE_PATCH_MULTI real script execution"
+    script "../tests/featurize_patch_multi_script.nf"
+    profile "test_real_featurize_multi"
+
+    test("runs both patch models in one task and publishes per-model outputs") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            for (model in ['hoptimus1', 'optimus']) {
+                assert path("${outputDir}/features/${model}/1001234.features.pt").exists()
+                assert path("${outputDir}/features/${model}/1001234.features.h5").exists()
+            }
+        }
+    }
+}

@@ -1,0 +1,177 @@
+"""Failure classification and preflight checks for post-batch hooks.
+
+Hooks run on two intentionally different execution profiles.  This module
+keeps the safety checks independent of the executor so local and Slurm hooks
+report the same categories to the dispatcher.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Sequence
+
+
+_PREFLIGHT_IMPORT_CACHE: set[tuple[str, str, str, str, str]] = set()
+_PREFLIGHT_IMPORT_LOCK = threading.Lock()
+
+
+class HookFailureCategory:
+    COVERAGE_MISSING = "COVERAGE_MISSING"
+    NODE_INFRA = "NODE_INFRA"
+    TRANSIENT_SERVICE = "TRANSIENT_SERVICE"
+    RELEASE_OR_CONFIG = "RELEASE_OR_CONFIG"
+    HOOK_BUG = "HOOK_BUG"
+
+
+@dataclass(frozen=True)
+class HookOutcome:
+    category: str
+    detail: str
+
+
+def classify_hook_failure(
+    returncode: int | None,
+    output: str = "",
+    *,
+    hook_command: str = "",
+    slurm_state: str = "",
+) -> HookOutcome:
+    """Map an executor result to a bounded recovery policy."""
+    text = (output or "").lower()
+    state = (slurm_state or "").upper()
+    marker = re.search(r"\[mussel-hook-preflight\]\s+category=([A-Z_]+)", output or "", re.IGNORECASE)
+    if marker:
+        category = marker.group(1).upper()
+        if category in {
+            HookFailureCategory.COVERAGE_MISSING,
+            HookFailureCategory.NODE_INFRA,
+            HookFailureCategory.TRANSIENT_SERVICE,
+            HookFailureCategory.RELEASE_OR_CONFIG,
+            HookFailureCategory.HOOK_BUG,
+        }:
+            detail_match = re.search(
+                r"\[mussel-hook-preflight\].*?detail=(.*)", output or "", re.IGNORECASE
+            )
+            return HookOutcome(category, (detail_match.group(1).strip() if detail_match else category))
+    if state in {
+        "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "OUT_OF_MEMORY", "PREEMPTED",
+        "CANCELLED", "TIMEOUT", "NF", "REVOKED",
+    }:
+        return HookOutcome(HookFailureCategory.NODE_INFRA, f"Slurm state={state}")
+    if any(marker in text for marker in (
+        "missing weka", "node_fail", "connection reset", "broken pipe",
+        "no space left on device", "input/output error", "stale file handle",
+        "out_of_memory", "slurm hook state=timeout", "slurm hook state=cancelled",
+    )):
+        return HookOutcome(HookFailureCategory.NODE_INFRA, "node or filesystem failure")
+    if returncode == 2 and "mussel_dispatcher.wds" in hook_command:
+        return HookOutcome(HookFailureCategory.COVERAGE_MISSING, "WDS coverage is incomplete")
+    if returncode == 78:
+        if "hook batch csv is unreadable" in text or "dispatcher package is missing" in text:
+            return HookOutcome(HookFailureCategory.NODE_INFRA, "compute-node hook preflight path is unavailable")
+        if "dispatcher import preflight failed" in text:
+            return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "compute-node hook import preflight failed")
+        return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "hook preflight failed")
+    # Before the release/config markers: a timeout's traceback names files and
+    # paths too, and must stay retryable.
+    if any(marker in text for marker in (
+        "timed out", "timeout", "connection refused", "temporarily unavailable",
+        "too many requests", "deadlock", "lock timeout", "database is locked",
+        "wds append lock lost",
+    )):
+        return HookOutcome(HookFailureCategory.TRANSIENT_SERVICE, "transient service failure")
+    if any(marker in text for marker in (
+        "modulenotfounderror", "no module named", "source release drift",
+        "release manifest drift", "execution profile drift", "schema-v",
+        "permission denied", "cannot import", "unsupported work-order",
+        "path mapping",
+    )):
+        return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "runtime or configuration mismatch")
+    return HookOutcome(HookFailureCategory.HOOK_BUG, "hook returned a non-success result")
+
+
+def preflight_hook(
+    *,
+    command: Sequence[str],
+    cwd: str,
+    env: Mapping[str, str],
+    paths: Sequence[str] = (),
+    active_revision: str = "",
+) -> HookOutcome | None:
+    """Validate the runtime before submitting/executing hook application code.
+
+    The returned outcome is suitable for persistence as a failed hook.  A
+    ``None`` result means the runtime passed preflight.
+    """
+    root = Path(cwd)
+    has_package = (root / "dispatcher" / "mussel_dispatcher").is_dir()
+    # Arbitrary user hooks may intentionally run outside the dispatcher source
+    # tree.  Their executor result is still classified, but dispatcher-specific
+    # import/path checks apply only to a dispatcher runtime.
+    if not has_package:
+        return None
+    if active_revision:
+        revision = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        actual_revision = revision.stdout.strip()
+        if revision.returncode or actual_revision != active_revision:
+            return HookOutcome(
+                HookFailureCategory.RELEASE_OR_CONFIG,
+                f"active release mismatch: expected {active_revision}, got {actual_revision or '<unknown>'}",
+            )
+    if active_revision and not active_revision.strip():
+        return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "active release revision is empty")
+    for raw_path in paths:
+        path = Path(raw_path)
+        if not path.exists():
+            return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, f"required hook path is missing: {path}")
+        required_access = os.R_OK | (os.X_OK if path.is_dir() else 0)
+        if not os.access(path, required_access):
+            return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, f"hook path is not readable: {path}")
+    python = str(command[0]) if command else "python"
+    if os.path.basename(python).startswith("python"):
+        check_env = dict(env)
+        package_root = str(root / "dispatcher")
+        old_path = check_env.get("PYTHONPATH", "")
+        check_env["PYTHONPATH"] = package_root + ((os.pathsep + old_path) if old_path else "")
+        module_name = ""
+        for index, part in enumerate(command[:-1]):
+            if str(part) == "-m":
+                module_name = str(command[index + 1])
+                break
+        import_check = (
+            f"import importlib; importlib.import_module({module_name!r})"
+            if module_name else "import mussel_dispatcher"
+        )
+        cache_key = (
+            python,
+            str(root.resolve()),
+            module_name or "mussel_dispatcher",
+            active_revision,
+            check_env.get("PYTHONPATH", ""),
+        )
+        # A conda-backed import can be expensive on a shared filesystem. The
+        # remote finalizer runs several hooks concurrently, so serialize the
+        # first check and reuse a successful result for this immutable release.
+        # Failed checks are intentionally not cached: a transient import issue
+        # must still be visible to the circuit breaker.
+        with _PREFLIGHT_IMPORT_LOCK:
+            if cache_key in _PREFLIGHT_IMPORT_CACHE:
+                return None
+            result = subprocess.run(
+                [python, "-c", import_check],
+                cwd=str(root), env=check_env, capture_output=True, text=True,
+                timeout=30, check=False,
+            )
+        if result.returncode:
+            detail = (result.stderr or result.stdout or "dispatcher import preflight failed")[-1000:]
+            return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, detail)
+        with _PREFLIGHT_IMPORT_LOCK:
+            _PREFLIGHT_IMPORT_CACHE.add(cache_key)
+    return None

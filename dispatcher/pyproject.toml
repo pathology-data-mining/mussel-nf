@@ -9,6 +9,7 @@ description = "Streaming slide dispatcher for mussel-nf"
 requires-python = ">=3.10"
 dependencies = [
     "nextflow-turret>=0.1.0",
+    "psycopg[binary]",
     "pyyaml",
     "boto3",
     "pandas",
@@ -27,6 +28,9 @@ mussel-update-status   = "mussel_dispatcher.tcga.update_status:main"
 mussel-prepare-samples = "mussel_dispatcher.tcga.prepare_samples:main"
 mussel-sync-inventory  = "mussel_dispatcher.tcga.sync_inventory:main"
 mussel-sync-databricks = "mussel_dispatcher.tcga.sync_databricks:main"
+mussel-remote-agent    = "mussel_dispatcher.remote:agent_main"
+mussel-release         = "mussel_dispatcher.release:main"
+mussel-release-agent   = "mussel_dispatcher.release_agent:main"
 
 
 [tool.setuptools.packages.find]
@@ -35,3 +39,7 @@ include = ["mussel_dispatcher*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: exercises several dispatcher components together",
+    "e2e: end-to-end runs of the dispatcher against stub pipelines",
+]

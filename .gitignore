@@ -62,3 +62,4 @@ tcga_inventory.csv
 tcga_status*.csv
 tcga-slides/
 tcga-slides.txt
+__pycache__/

@@ -119,6 +119,7 @@ class S3Watcher(threading.Thread):
         if self._s3 is None:
             try:
                 import boto3
+                from botocore.config import Config as BotoConfig
             except ImportError:
                 raise RuntimeError("boto3 required for S3 watching: pip install boto3")
             kwargs: dict = {}
@@ -128,6 +129,7 @@ class S3Watcher(threading.Thread):
             client_kwargs: dict = {}
             if self.cfg.endpoint_url:
                 client_kwargs["endpoint_url"] = self.cfg.endpoint_url
+                client_kwargs["config"] = BotoConfig(s3={"addressing_style": "path"})
             self._s3 = session.client("s3", **client_kwargs)
         return self._s3
 
@@ -188,6 +190,7 @@ class DatabricksWatcher(threading.Thread):
         slide_id      — unique identifier for the slide
         slide_path    — file path or S3/cloud URI (e.g. s3://bucket/slides/1234.svs)
         oncotree_code — cancer type code (may be empty string if not applicable)
+    and may return an optional integer ``priority`` column.
 
     Supply the SQL via one of:
         query_file  Path to a .sql file (resolved relative to the config file).
@@ -267,98 +270,109 @@ class DatabricksWatcher(threading.Thread):
             "watcher config. The query must return columns: slide_id, slide_path, oncotree_code."
         )
 
+    @staticmethod
+    def _parse_priority(row: dict) -> int | None:
+        raw = row.get("priority")
+        if raw in (None, ""):
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _iter_query_rows(self, query: str):
+        from databricks.sdk.service.sql import Disposition, StatementState
+
+        client = self._get_client()
+        resp = client.statement_execution.execute_statement(
+            warehouse_id=self.cfg.warehouse_id,
+            statement=query,
+            wait_timeout="50s",
+            disposition=Disposition.EXTERNAL_LINKS,
+        )
+
+        while resp.status.state not in (
+            StatementState.SUCCEEDED,
+            StatementState.FAILED,
+            StatementState.CANCELED,
+            StatementState.CLOSED,
+        ):
+            time.sleep(2)
+            resp = client.statement_execution.get_statement(resp.statement_id)
+
+        if resp.status.state != StatementState.SUCCEEDED:
+            raise RuntimeError(
+                f"DatabricksWatcher: query failed (state={resp.status.state}): {resp.status.error}"
+            )
+
+        cols = [c.name for c in resp.manifest.schema.columns]
+        chunk = resp.result
+        while chunk is not None:
+            if chunk.external_links:
+                import requests as _req
+                for link in chunk.external_links:
+                    r = _req.get(link.external_link, headers=link.http_headers or {})
+                    r.raise_for_status()
+                    for row_arr in r.json():
+                        yield dict(zip(cols, row_arr))
+                next_chunk_index = getattr(chunk.external_links[-1], "next_chunk_index", None)
+            else:
+                for row_arr in (chunk.data_array or []):
+                    yield dict(zip(cols, row_arr))
+                next_chunk_index = getattr(chunk, "next_chunk_index", None)
+
+            if next_chunk_index is None:
+                break
+            chunk = client.statement_execution.get_statement_result_chunk_n(
+                resp.statement_id, next_chunk_index
+            )
+
     def _poll(self):
         log.info("DatabricksWatcher: querying Databricks warehouse %s…", self.cfg.warehouse_id)
         try:
-            from databricks.sdk.service.sql import Disposition, StatementState
-            client = self._get_client()
             query = self._build_query()
             log.debug("DatabricksWatcher SQL:\n%s", query)
-
-            resp = client.statement_execution.execute_statement(
-                warehouse_id=self.cfg.warehouse_id,
-                statement=query,
-                wait_timeout="50s",
-                disposition=Disposition.EXTERNAL_LINKS,
-            )
-
-            # Poll until terminal state if not already done
-            while resp.status.state not in (
-                StatementState.SUCCEEDED,
-                StatementState.FAILED,
-                StatementState.CANCELED,
-                StatementState.CLOSED,
-            ):
-                time.sleep(2)
-                resp = client.statement_execution.get_statement(resp.statement_id)
-
-            if resp.status.state != StatementState.SUCCEEDED:
-                log.error(
-                    "DatabricksWatcher: query failed (state=%s): %s",
-                    resp.status.state,
-                    resp.status.error,
-                )
-                return
-
-            cols = [c.name for c in resp.manifest.schema.columns]
             n_new = 0
-
-            # Iterate over all result chunks.
-            # With EXTERNAL_LINKS disposition, rows are downloaded from presigned
-            # URLs in chunk.external_links; with INLINE they're in chunk.data_array.
-            chunk = resp.result
-            while chunk is not None:
-                if chunk.external_links:
-                    import requests as _req
-                    for link in chunk.external_links:
-                        r = _req.get(link.external_link, headers=link.http_headers or {})
-                        r.raise_for_status()
-                        row_arrays = r.json()
-                        for row_arr in row_arrays:
-                            row = dict(zip(cols, row_arr))
-                            slide_path = row.get("slide_path") or ""
-                            slide_id = row.get("slide_id") or ""
-                            oncotree_code = row.get("oncotree_code") or ""
-                            if not slide_path or not slide_id:
-                                continue
-                            if self.state.is_known(slide_path):
-                                continue
-                            log.info("DatabricksWatcher: new slide %s → %s", slide_id, slide_path)
-                            self.state.add_slide(slide_path, slide_id, oncotree_code=oncotree_code)
-                            self.pending.append({
-                                "slide_id": slide_id,
-                                "slide_path": slide_path,
-                                "oncotree_code": oncotree_code,
-                            })
-                            n_new += 1
-                    next_chunk_index = getattr(chunk.external_links[-1], "next_chunk_index", None)
-                else:
-                    for row_arr in (chunk.data_array or []):
-                        row = dict(zip(cols, row_arr))
-                        slide_path = row.get("slide_path") or ""
-                        slide_id = row.get("slide_id") or ""
-                        oncotree_code = row.get("oncotree_code") or ""
-                        if not slide_path or not slide_id:
-                            continue
-                        if self.state.is_known(slide_path):
-                            continue
-                        log.info("DatabricksWatcher: new slide %s → %s", slide_id, slide_path)
-                        self.state.add_slide(slide_path, slide_id, oncotree_code=oncotree_code)
-                        self.pending.append({
-                            "slide_id": slide_id,
-                            "slide_path": slide_path,
-                            "oncotree_code": oncotree_code,
-                        })
-                        n_new += 1
-                    next_chunk_index = getattr(chunk, "next_chunk_index", None)
-
-                if next_chunk_index is None:
-                    break
-                chunk = client.statement_execution.get_statement_result_chunk_n(
-                    resp.statement_id, next_chunk_index
+            priority_updates: list[tuple[str, int]] = []
+            for row in self._iter_query_rows(query):
+                slide_path = row.get("slide_path") or ""
+                slide_id = row.get("slide_id") or ""
+                oncotree_code = row.get("oncotree_code") or ""
+                priority_override = self._parse_priority(row)
+                if not slide_path or not slide_id:
+                    continue
+                if self.state.is_known(slide_path):
+                    if priority_override is not None:
+                        priority_updates.append(
+                            (slide_path, self.state.resolve_priority(slide_id, priority_override))
+                        )
+                    continue
+                log.info(
+                    "DatabricksWatcher: new slide %s → %s (priority=%s)",
+                    slide_id,
+                    slide_path,
+                    self.state.resolve_priority(slide_id, priority_override),
                 )
+                self.state.add_slide(
+                    slide_path,
+                    slide_id,
+                    oncotree_code=oncotree_code,
+                    priority_override=priority_override,
+                )
+                self.pending.append({
+                    "slide_id": slide_id,
+                    "slide_path": slide_path,
+                    "oncotree_code": oncotree_code,
+                })
+                n_new += 1
 
-            log.info("DatabricksWatcher: poll complete — %d new slide(s) enqueued", n_new)
+            n_priority_updated = self.state.update_slide_priorities(priority_updates)
+
+            log.info(
+                "DatabricksWatcher: poll complete — %d new slide(s) enqueued, %d pending priority update(s) applied",
+                n_new,
+                n_priority_updated,
+            )
 
         except Exception as exc:
             log.error("DatabricksWatcher: poll error: %s", exc, exc_info=True)
@@ -409,11 +423,19 @@ class TcgaWatcher(threading.Thread):
             "TcgaWatcher started (poll_interval=%ds)",
             self.cfg.poll_interval_seconds,
         )
-        self._poll()  # poll immediately on startup
+        self._safe_poll()  # poll immediately on startup
         while not self.stop_event.is_set():
             self.stop_event.wait(self.cfg.poll_interval_seconds)
             if not self.stop_event.is_set():
-                self._poll()
+                self._safe_poll()
+
+    def _safe_poll(self) -> None:
+        # One bad poll must not kill the watcher thread for the rest of the
+        # dispatcher's lifetime; log it and try again next interval.
+        try:
+            self._poll()
+        except Exception:
+            log.exception("TcgaWatcher: poll failed; retrying next interval")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -433,7 +455,7 @@ class TcgaWatcher(threading.Thread):
         if result.returncode not in (0, 2):
             log.error(
                 "TcgaWatcher: %s failed (exit %d):\n%s",
-                script, result.returncode, result.stderr[-500:],
+                module, result.returncode, result.stderr[-500:],
             )
         return result.returncode
 
@@ -470,27 +492,22 @@ class TcgaWatcher(threading.Thread):
                 f"{model}={dest}" for model, dest in self.cfg.wds_destinations.items()
             )
             status_args += ["--wds-base", wds_base_parts]
-        # Export FAILED slides from dispatcher DB to a CSV the status script can read.
-        # (Direct sqlite3 import may fail in some conda environments due to libstdc++ version.)
+        # Export FAILED slides from dispatcher state to a CSV the status script can read.
         failed_csv = os.path.join(os.path.dirname(__file__), "tcga_failed_slides.csv")
-        dispatcher_db = os.path.join(os.path.dirname(__file__), "state", "dispatcher.db")
-        if os.path.exists(dispatcher_db):
-            try:
-                import sqlite3 as _sqlite3
-                conn = _sqlite3.connect(f"file:{dispatcher_db}?mode=ro", uri=True)
-                rows = conn.execute(
-                    "SELECT slide_id, error_msg FROM slides WHERE status='FAILED'"
-                ).fetchall()
-                conn.close()
-                import csv as _csv
-                with open(failed_csv, "w", newline="") as fh:
-                    w = _csv.writer(fh)
-                    w.writerow(["slide_id", "failure_reason"])
-                    for sid, msg in rows:
-                        w.writerow([sid, msg or "Failed after max retries"])
-                log.info("TcgaWatcher: exported %d FAILED slides to %s", len(rows), failed_csv)
-            except Exception as exc:
-                log.warning("TcgaWatcher: could not export failed slides from DB: %s", exc)
+        try:
+            rows = [
+                row for row in self.state.get_all_slides()
+                if row.get("status") == "FAILED" and row.get("slide_id")
+            ]
+            import csv as _csv
+            with open(failed_csv, "w", newline="") as fh:
+                w = _csv.writer(fh)
+                w.writerow(["slide_id", "failure_reason"])
+                for row in rows:
+                    w.writerow([row["slide_id"], row.get("error_msg") or "Failed after max retries"])
+            log.info("TcgaWatcher: exported %d FAILED slides to %s", len(rows), failed_csv)
+        except Exception as exc:
+            log.warning("TcgaWatcher: could not export failed slides from DB: %s", exc)
         if os.path.exists(failed_csv):
             status_args += ["--dispatcher-db", failed_csv]
         slide_mpp_csv = os.path.join(os.path.dirname(__file__), "tcga_slide_mpp.csv")
@@ -690,5 +707,3 @@ class TcgaWatcher(threading.Thread):
 # ---------------------------------------------------------------------------
 
 MANIFEST_HEADER = ["slide_id", "sample_id", "workflow_id", "key", "value"]
-
-

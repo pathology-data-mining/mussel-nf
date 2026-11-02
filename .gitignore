@@ -31,7 +31,6 @@ class_mapping.yaml
 filter_workflow.yaml
 *_params.yaml
 dispatcher/tcga_dispatcher.yaml
-dispatcher/reef_v2_dispatcher.yaml
 dispatcher/cohort_dispatcher.yaml
 
 # Dispatcher runtime state / outputs
@@ -39,7 +38,6 @@ dispatcher/*.db
 dispatcher/batches/
 dispatcher/state/
 dispatcher/logs/
-dispatcher/reef-v2-results/
 dispatcher/results/
 dispatcher/tcga-results/
 dispatcher/tcga-downloads/

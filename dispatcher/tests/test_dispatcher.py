@@ -2553,13 +2553,11 @@ class TestDatabricksWatcher:
             w.run()
         assert len(pending) == 0
 
-    def test_no_query_uses_builtin_template(self, tmp_path):
-        """_build_query falls back to the built-in Databricks query template."""
+    def test_no_query_raises_runtime_error(self, tmp_path):
+        """_build_query raises RuntimeError when neither query nor query_file is set."""
         w, pending, state = self._watcher(tmp_path, {"query": "", "query_file": ""})
-        query = w._build_query()
-        assert "FROM" in query
-        assert "JOIN" in query
-        assert "i.size >= 10000000" in query
+        with pytest.raises(RuntimeError, match="no query configured"):
+            w._build_query()
 
     def test_inline_query_used(self, tmp_path):
         """_build_query returns inline SQL from cfg.query."""

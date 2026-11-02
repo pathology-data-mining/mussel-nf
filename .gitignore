@@ -24,6 +24,7 @@ tests/testdata/*_b.svs
 dispatcher/__pycache__
 dispatcher/mussel_dispatcher/**/__pycache__
 dispatcher/tests/__pycache__
+tests/__pycache__/
 lib/mussel_benchmark/__pycache__/
 
 # Local run config / override files — not for version control
@@ -42,6 +43,7 @@ dispatcher/results/
 dispatcher/tcga-results/
 dispatcher/tcga-downloads/
 dispatcher/tcga_failed_slides.csv
+dispatcher/mussel_dispatcher/tcga_failed_slides.csv
 dispatcher/tcga_inventory.csv
 dispatcher/tcga_status*.csv
 

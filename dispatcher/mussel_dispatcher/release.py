@@ -12,12 +12,14 @@ import logging
 import os
 import socket
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
 from .config import Config
 from .contract import build_contract, git_revision
+from .release_pin import on_release_branch
 from .state import StateStore
 
 
@@ -55,6 +57,26 @@ class ReleaseController:
             timeout=15,
         )
         return result.stdout.strip()
+
+    # A revision refused by the release-branch pin is not re-fetched on every sync
+    # cycle (e.g. every 15 s): the refusal is reused for this long, or until HEAD moves.
+    _PIN_RECHECK_SECONDS = 300
+
+    def _pin_refusal(self, revision: str) -> str:
+        """Why ``revision`` may not be published under ``release_branch`` ('' if it may)."""
+        cached = getattr(self, "_pin_block", None)
+        if cached and cached[0] == revision and time.monotonic() < cached[1]:
+            return cached[2]
+        pinned, why = on_release_branch(
+            self.cfg.repo_dir, revision,
+            self.cfg.release_origin_remote or "origin", self.cfg.release_branch,
+        )
+        if pinned:
+            self._pin_block = None
+            return ""
+        message = f"Not publishing: {why}"
+        self._pin_block = (revision, time.monotonic() + self._PIN_RECHECK_SECONDS, message)
+        return message
 
     def _available_from_origin(self, revision: str) -> bool:
         remote = self.cfg.release_origin_remote or "origin"
@@ -145,7 +167,12 @@ class ReleaseController:
 
             release = self.state.get_deployment_release(self.deployment_id)
             if not release or str(release.get("desired_revision") or "") != revision:
-                if self.cfg.release_require_origin and not self._available_from_origin(revision):
+                if self.cfg.release_branch:
+                    message = self._pin_refusal(revision)
+                    if message:
+                        self._report("BLOCKED_LOCAL", message, revision)
+                        return {"status": "BLOCKED_LOCAL", "message": message, "revision": revision}
+                elif self.cfg.release_require_origin and not self._available_from_origin(revision):
                     message = f"Revision {revision[:12]} is not available from {self.cfg.release_origin_remote}"
                     self._report("BLOCKED_LOCAL", message, revision)
                     return {"status": "BLOCKED_LOCAL", "message": message, "revision": revision}

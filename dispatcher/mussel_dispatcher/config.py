@@ -253,6 +253,10 @@ class Config:
     release_sync_interval_seconds: int = 30
     release_origin_remote: str = "origin"
     release_require_origin: bool = True
+    # When set (e.g. "release/cohort-v1"), only commits on <release_origin_remote>/<release_branch>
+    # may run here or be published to remote targets: main can move on without
+    # reaching this deployment.
+    release_branch: str = ""
     release_activation_timeout_seconds: int = 600
     release_auto_rollback: bool = True
     hook_executor_reconcile_interval_seconds: int = 60

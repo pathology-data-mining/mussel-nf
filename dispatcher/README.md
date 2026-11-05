@@ -203,6 +203,11 @@ instead of allowing release drift to look like repeated batch failures.
 `release_restart_units` lists user-systemd units that a target must reload
 after switching its active release symlink.
 
+`release_branch` (e.g. `release/cohort-v1`) pins a deployment to one branch: the
+dispatcher refuses to start on a checkout whose HEAD is not on
+`<release_origin_remote>/<release_branch>`, and the release controller publishes
+nothing else to remote targets. Deploy by updating that branch.
+
 Before the first rollout containing release-controller schema changes, run the
 idempotent migration with the deployment's environment loaded:
 

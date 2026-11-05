@@ -2336,6 +2336,16 @@ def main():
             log.error("Pinned container image mismatch: %s", problem)
         sys.exit(1)
 
+    # Refuse to run a revision that is not on the deployment's release branch: a
+    # checkout moved to main would otherwise run unvetted pipeline code here.
+    from .release_pin import verify_release_pin
+    pin_problem, pin_note = verify_release_pin(cfg)
+    if pin_problem:
+        log.error("Refusing to start: %s", pin_problem)
+        sys.exit(1)
+    if pin_note:
+        log.info("Release pin: %s", pin_note)
+
     # Auto-derive tower_endpoint from tower_proxy_port if not explicitly set.
     if not cfg.tower_endpoint and cfg.tower_proxy_port:
         cfg.tower_endpoint = f"http://localhost:{cfg.tower_proxy_port}"

@@ -399,6 +399,12 @@ class Config:
 
         watcher_cfgs = []
         for w in raw.pop("watchers", []):
+            retired = {key: w.pop(key) for key in ("source_filter", "additional_where") if key in w}
+            if retired:
+                log.warning(
+                    "Ignoring retired watcher settings for %s watcher: %s (put the filter in query or query_file)",
+                    w.get("type", ""), ", ".join(sorted(retired)),
+                )
             for f in _WATCHER_PATH_FIELDS:
                 if f in w:
                     w[f] = _resolve_watcher_path(w[f])

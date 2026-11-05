@@ -4082,6 +4082,26 @@ class TestNfModelTypes:
             str(tmp_path), nextflow_params_file=str(params_file)
         ) == ["hoptimus1", "optimus", "titan_slide"]
 
+    def test_watcher_ignores_retired_query_settings(self, tmp_path, caplog):
+        """Configs written for the removed source_filter / additional_where still load."""
+        import logging
+        import yaml as _yaml
+        (tmp_path / "nextflow.config").write_text("featurize {\n    model_types = ['hoptimus1']\n}\n")
+        cfg_path = tmp_path / "test.yaml"
+        cfg_path.write_text(_yaml.dump({
+            "nextflow_profiles": "standard",
+            "outdir": str(tmp_path / "results"),
+            "repo_dir": str(tmp_path),
+            "watchers": [{
+                "type": "databricks", "query": "SELECT 1",
+                "source_filter": "x", "additional_where": "y = 1",
+            }],
+        }))
+        with caplog.at_level(logging.WARNING):
+            cfg = Config.load(str(cfg_path))
+        assert cfg.watchers[0].query == "SELECT 1"
+        assert "additional_where, source_filter" in caplog.text
+
     def test_watcher_models_auto_filled(self, tmp_path):
         import yaml as _yaml
         (tmp_path / "nextflow.config").write_text(

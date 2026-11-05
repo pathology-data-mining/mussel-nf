@@ -160,11 +160,9 @@ source_df.createOrReplaceTempView("_metadata_source")
 # ---------------------------------------------------------------------------
 
 source_col_set = set(source_df.columns)
-target_col_set = {
-    row["col_name"]
-    for row in spark.sql(f"DESCRIBE TABLE {target_table}").collect()  # noqa: F821
-    if not row["col_name"].startswith("#")
-}
+# The table's own columns. DESCRIBE TABLE also emits a blank separator row and
+# "# Partition Information" rows for partitioned or clustered tables.
+target_col_set = set(spark.table(target_table).columns)  # noqa: F821
 common_cols  = sorted(source_col_set & target_col_set)
 extra_target = sorted(target_col_set - source_col_set)
 

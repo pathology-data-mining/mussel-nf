@@ -54,13 +54,15 @@ _TOWER_LIVE_REMOTE_STATUSES = frozenset({"RUNNING", "CANCEL_REQUESTED"})
 # share this predicate so the global slot count and the per-pool breakdown
 # agree.  A remote row whose remote_status is still NULL/'' (registered, order
 # not yet queued, or stuck there) occupies a slot and is therefore listed too.
+# HOOKS_BLOCKED is a quarantine that lasts until an operator retries or waives the
+# batch's hooks: it runs nothing, and counting it would hold a run slot indefinitely.
 _SCHEDULING_ACTIVE_BATCH_PREDICATE = """
     status IN ('RUNNING','RECOVERING')
     AND (
         backend!='remote_agent'
         OR COALESCE(remote_status, '') NOT IN (
             'SUCCEEDED', 'FAILED', 'CANCELLED', 'STALE',
-            'FINALIZATION_QUEUED', 'HOOKS_RUNNING', 'HOOKS_RETRY'
+            'FINALIZATION_QUEUED', 'HOOKS_RUNNING', 'HOOKS_RETRY', 'HOOKS_BLOCKED'
         )
     )
 """
@@ -1364,8 +1366,19 @@ class StateStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    # When a slide_id has several paths (rows), the one that speaks for it: work in
+    # flight first, then done, then failed. SKIPPED marks a twin path processed
+    # through another row, so it represents the slide only if nothing else does.
+    _SLIDE_STATUS_PRECEDENCE = {"DISPATCHED": 0, "PENDING": 1, "SUCCEEDED": 2, "FAILED": 3, "SKIPPED": 5}
+
     def get_slide_statuses(self, slide_ids: list[str]) -> dict[str, dict[str, str | None]]:
-        """Return status and current batch ownership for requested slides."""
+        """Return status and current batch ownership for requested slides.
+
+        One entry per slide_id. With several rows (paths) for a slide_id, the row
+        with the highest-precedence status is reported (``_SLIDE_STATUS_PRECEDENCE``;
+        ties go to the row with a batch, then the lowest batch_id), never an
+        arbitrary one: a SKIPPED twin must not hide a FAILED or DISPATCHED row.
+        """
         if not slide_ids:
             return {}
         ordered_ids = sorted(set(slide_ids))
@@ -1377,13 +1390,18 @@ class StateStore:
             ),
             ordered_ids,
         ).fetchall()
-        return {
-            str(self._row_get(row, "slide_id", 0)): {
-                "status": self._row_get(row, "status", 1),
-                "batch_id": self._row_get(row, "batch_id", 2),
-            }
-            for row in rows
-        }
+
+        def rank(entry: dict[str, str | None]) -> tuple[int, int, str]:
+            status, batch = str(entry["status"] or ""), entry["batch_id"]
+            return (self._SLIDE_STATUS_PRECEDENCE.get(status, 4), 0 if batch else 1, str(batch or ""))
+
+        out: dict[str, dict[str, str | None]] = {}
+        for row in rows:
+            slide_id = str(self._row_get(row, "slide_id", 0))
+            entry = {"status": self._row_get(row, "status", 1), "batch_id": self._row_get(row, "batch_id", 2)}
+            if slide_id not in out or rank(entry) < rank(out[slide_id]):
+                out[slide_id] = entry
+        return out
 
     def remove_slide(self, slide_path: str):
         def _remove(conn) -> None:

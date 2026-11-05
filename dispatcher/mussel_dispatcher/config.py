@@ -111,6 +111,11 @@ class RemoteTargetConfig:
     driver_time: str = "7-00:00:00"
     driver_cpus: int = 2
     driver_mem: str = "8G"
+    # Nextflow framework directory (NXF_DIST) for remote drivers. Each driver has its own
+    # NXF_HOME (secrets are per batch), which would otherwise make every driver download
+    # the Nextflow runtime into it. Empty: the remote user's own cache,
+    # $HOME/.nextflow/framework (the launcher downloads into it atomically, once per version).
+    nextflow_framework_dir: str = ""
     driver_account: str = ""
     driver_qos: str = ""
     hook_partition: str = "cpu"

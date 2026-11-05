@@ -397,10 +397,58 @@ class TestConfig:
         assert "verifying runtime and params fingerprints" in script
         assert "modules/tessellation.nf" in script
         assert script.count("sha256sum --check --strict -") == 2
+        # By default the runtime comes from the remote user's own Nextflow cache, not the
+        # per-batch NXF_HOME, so drivers don't each download it.
+        assert 'export NXF_DIST="${NXF_DIST:-$HOME/.nextflow/framework}"' in script
         syntax = subprocess.run(
             ["bash", "-n"], input=script, text=True, capture_output=True
         )
         assert syntax.returncode == 0, syntax.stderr
+
+        # An explicit framework dir overrides the default; NXF_HOME (and so the secrets)
+        # stays per batch either way.
+        shared = dataclasses.replace(target, nextflow_framework_dir="/remote/nxf framework")
+        script = render_driver_script(order, shared)
+        assert "export NXF_DIST='/remote/nxf framework'" in script
+        assert f"export NXF_HOME={tmp_path / 'run' / '.nextflow'}" in script
+        assert script.index("export NXF_DIST") < script.index("secrets set")
+        syntax = subprocess.run(
+            ["bash", "-n"], input=script, text=True, capture_output=True
+        )
+        assert syntax.returncode == 0, syntax.stderr
+
+    def test_remote_slurm_hook_keeps_node_checks_for_launched_hooks(self, tmp_path, monkeypatch):
+        # The launcher checks the module's origin itself, inside the job.
+        from mussel_dispatcher.hook_launcher import LAUNCHER
+
+        state = MagicMock()
+        state.get_batch_hooks.return_value = {"batch-001": []}
+        agent = RemoteAgent.__new__(RemoteAgent)
+        agent.target = RemoteTargetConfig(name="hpc", hook_partition="cpu",
+                                          finalization_poll_interval_seconds=1)
+        agent.state = state
+        submitted = {}
+
+        def fake_run(args, **kwargs):
+            if args[0] == "sbatch":
+                submitted["text"] = Path(args[-1]).read_text()
+                return subprocess.CompletedProcess(args, 0, "12345\n", "")
+            if args[0] == "squeue":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[0] == "sacct":
+                return subprocess.CompletedProcess(args, 0, "COMPLETED|0:0\n", "")
+            raise AssertionError(f"unexpected command: {args}")
+
+        monkeypatch.setattr("mussel_dispatcher.remote.subprocess.run", fake_run)
+        cmd = ["python", LAUNCHER, "--release", "/remote/repo/dispatcher", "mussel_dispatcher.wds"]
+        result = agent._run_hook_slurm({"batch_id": "batch-001", "remote_run_dir": str(tmp_path / "run")},
+                                       cmd, cwd="/remote/repo", env={}, hook_index=0)
+        assert result.returncode == 0
+        # Node checks stay; only the import probe is left to the launcher.
+        assert "detail=batch-csv-unreadable" in submitted["text"]
+        assert "detail=dispatcher-package-missing" in submitted["text"]
+        assert "dispatcher-import-failed" not in submitted["text"]
+        assert f"exec python {LAUNCHER} --release /remote/repo/dispatcher mussel_dispatcher.wds" in submitted["text"]
 
     def test_remote_slurm_hook_contract_sets_pythonpath_and_polls_job(self, tmp_path, monkeypatch):
         state = MagicMock()

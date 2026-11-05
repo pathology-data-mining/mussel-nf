@@ -24,6 +24,7 @@ from .hook_hardening import (
     classify_hook_failure,
     preflight_hook,
 )
+from .hook_launcher import launch_command
 from .state import DB_SYNC_LEASE_NAME, StateStore
 
 log = logging.getLogger("mussel-dispatcher")
@@ -777,6 +778,7 @@ class PostBatchHooks:
             )
             if cmd and cmd[0] == "python":
                 cmd[0] = sys.executable
+            cmd = launch_command(cmd, execution_repo_dir)
             if "mussel_dispatcher.wds" in command:
                 for key in (
                     "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",

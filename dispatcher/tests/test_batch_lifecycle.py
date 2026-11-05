@@ -685,3 +685,32 @@ def test_finalize_and_publish_keeps_wds_staging_unless_succeeded(
     agent._finalize_and_publish({"batch_id": "batch-1", "remote_run_dir": str(run_dir)}, "123")
 
     assert (run_dir / "wds-staging").exists()
+
+
+def test_dispatcher_hooks_run_through_the_launcher(tmp_path):
+    # Hooks run from the repository root, where `python -m mussel_dispatcher.wds` used
+    # to import an editable install of another, stale checkout. Dispatcher modules now
+    # run through the launcher, pinned to this release.
+    from mussel_dispatcher.hook_launcher import LAUNCHER
+
+    package = tmp_path / "repo" / "dispatcher" / "mussel_dispatcher"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("\n")
+    (package / "wds.py").write_text("\n")
+    cfg = make_config(tmp_path, post_batch_hooks=[{
+        "command": "python -m mussel_dispatcher.wds --slide-ids-csv={batch_csv}",
+        "_phase": "wds",
+    }])
+    state = StateStore(str(tmp_path / "state.db"))
+    add_running_batch(state, tmp_path)
+    batch_csv = tmp_path / "batch.csv"
+    batch_csv.write_text("slide_id\na\n")
+    calls = []
+
+    def executor(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    assert PostBatchHooks(cfg, "batch-1", state).run(str(batch_csv), phase="wds", executor=executor)
+    assert calls[0][1:] == [LAUNCHER, "--release", str(package.parent), "mussel_dispatcher.wds",
+                            f"--slide-ids-csv={batch_csv}"]

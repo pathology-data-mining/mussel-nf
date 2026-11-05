@@ -442,6 +442,8 @@ def test_finalization_only_batches_do_not_consume_dispatch_capacity(tmp_path):
         ("hpc-queued", "RUNNING", "remote_agent", "hpc", "FINALIZATION_QUEUED"),
         ("hpc-hooks", "RUNNING", "remote_agent", "hpc", "HOOKS_RUNNING"),
         ("hpc-retry", "RUNNING", "remote_agent", "hpc", "HOOKS_RETRY"),
+        # A HOOKS_BLOCKED (quarantined) batch must not hold a run slot.
+        ("hpc-blocked", "RECOVERING", "remote_agent", "hpc", "HOOKS_BLOCKED"),
         ("hpc-running", "RUNNING", "remote_agent", "hpc", "RUNNING"),
     ]
     store._conn().executemany(
@@ -618,3 +620,48 @@ def test_completed_remote_driver_is_queued_while_another_finalizer_runs(tmp_path
     assert payload["status"] == "FINALIZATION_QUEUED"
     assert payload["nextflow_exit"] == 0
     state.claim_remote_finalization.assert_not_called()
+
+
+def test_blocked_dispatch_is_logged_once_per_change(caplog):
+    from unittest.mock import MagicMock
+    from mussel_dispatcher.scheduler import RunManager
+
+    def pool(name, active, limit):
+        blockers = [] if active < limit else [
+            {"code": "CONCURRENCY_LIMIT", "message": f"{active} active batch(es) at limit {limit}"}]
+        return {"name": name, "available": not blockers, "blockers": blockers,
+                "active_batches": active, "max_batches": limit, "_order": 0}
+
+    rm = RunManager.__new__(RunManager)
+    rm.state = MagicMock()
+    rm.cfg = MagicMock()
+    states = iter([[pool("hpc", 2, 2)], [pool("hpc", 2, 2)], [pool("hpc", 1, 2)]])
+    rm._evaluate_execution_pools = lambda: next(states)
+    caplog.set_level("INFO", logger="mussel-dispatcher")
+
+    assert rm.choose_execution_pool(queued=320) is None
+    assert rm.choose_execution_pool(queued=640) is None  # only the count changed: no second line
+    rm.choose_execution_pool(queued=640)                 # a slot frees up
+    lines = [r.getMessage() for r in caplog.records if "Fresh dispatch" in r.getMessage()]
+    assert lines == ["Fresh dispatch blocked (320 slide(s) queued): hpc: CONCURRENCY_LIMIT "
+                     "(2 active batch(es) at limit 2)",
+                     "Fresh dispatch unblocked: hpc 1/2"]
+
+
+def test_global_dispatch_limit_is_logged_once_per_change(caplog):
+    from unittest.mock import MagicMock
+    from mussel_dispatcher.scheduler import RunManager
+
+    rm = RunManager.__new__(RunManager)
+    rm.cfg = MagicMock()
+    rm.cfg.effective_max_concurrent_runs.return_value = 5
+    rm.has_capacity = lambda: True
+    caplog.set_level("INFO", logger="mussel-dispatcher")
+
+    assert rm.has_fresh_dispatch_capacity(5) is False
+    assert rm.has_fresh_dispatch_capacity(6) is False   # still blocked: no second line
+    assert rm.has_fresh_dispatch_capacity(4) is True
+    assert rm.has_fresh_dispatch_capacity(3) is True    # still open: no line
+    lines = [r.getMessage() for r in caplog.records if "Fresh dispatch" in r.getMessage()]
+    assert lines == ["Fresh dispatch blocked: 5 active batch(es) in DB >= effective max 5",
+                     "Fresh dispatch no longer at the global limit: 4 active batch(es) < 5"]

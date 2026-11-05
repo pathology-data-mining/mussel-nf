@@ -37,6 +37,7 @@ from .contract import (
     tracked_source_manifest,
     validate_semantic_params,
 )
+from .hook_launcher import is_launched
 from .state import REMOTE_FINALIZATION_LEASE_NAME, StateStore
 from .storage import (
     CapacityGuard,
@@ -473,6 +474,7 @@ set -euo pipefail
 mkdir -p {shlex.quote(remote_work_dir)} {shlex.quote(remote_outdir)} {shlex.quote(os.path.join(remote_run_dir, target.task_scratch_subdir))}
 cd {shlex.quote(remote_run_dir)}
 export NXF_HOME={shlex.quote(os.path.join(remote_run_dir, ".nextflow"))}
+{f"export NXF_DIST={shlex.quote(target.nextflow_framework_dir)}" if target.nextflow_framework_dir else "export NXF_DIST=\"${NXF_DIST:-$HOME/.nextflow/framework}\""}
 export NXF_WORK={shlex.quote(remote_work_dir)}
 export XDG_CACHE_HOME={shlex.quote(os.path.join(remote_run_dir, ".cache"))}
 {"".join(line + chr(10) for line in env_lines)}
@@ -796,6 +798,14 @@ class RemoteAgent:
                 thread.join(timeout=5)
 
     def run(self) -> int:
+        # Same pinned-image check as the dispatcher, for this site's images.
+        from .image_pins import verify_pinned_images
+        image_problems = verify_pinned_images(
+            [self.target.nextflow_config, self.cfg.nextflow_config])
+        if image_problems:
+            for problem in image_problems:
+                log.error("Pinned container image mismatch: %s", problem)
+            return 1
         self._start_agent_heartbeat()
         self._mark_main_loop_progress()
         # Advertise the loaded release before startup cleanup or recovery can
@@ -2468,13 +2478,16 @@ class RemoteAgent:
                 "echo '[mussel-hook] preflight node='$(hostname)\n"
                 "test -r %s || { echo '[mussel-hook-preflight] category=NODE_INFRA detail=batch-csv-unreadable'; exit 78; }\n"
                 "test -d %s || { echo '[mussel-hook-preflight] category=NODE_INFRA detail=dispatcher-package-missing'; exit 78; }\n"
-                "if ! %s -c %s; then echo '[mussel-hook-preflight] category=RELEASE_OR_CONFIG detail=dispatcher-import-failed'; exit 78; fi\n"
             ) % (
                 shlex.quote(str(order.get("remote_batch_csv") or run_dir / "batch.csv")),
                 shlex.quote(str(Path(cwd) / "dispatcher" / "mussel_dispatcher")),
-                shlex.quote(hook_python),
-                shlex.quote(import_check),
             )
+            # A launched hook checks where its module comes from in the process that runs it.
+            if not is_launched(cmd):
+                preflight += (
+                    "if ! %s -c %s; then echo '[mussel-hook-preflight] category=RELEASE_OR_CONFIG "
+                    "detail=dispatcher-import-failed'; exit 78; fi\n"
+                ) % (shlex.quote(hook_python), shlex.quote(import_check))
         script = (
             "#!/bin/bash\nset -euo pipefail\n"
             "export PYTHONPATH=%s${PYTHONPATH:+:$PYTHONPATH}\n"

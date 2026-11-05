@@ -745,7 +745,7 @@ class BatchScheduler:
         """Scheduler loop — call in the main thread."""
         log.info("BatchScheduler started (batch_size=%d, max_wait=%ds)",
                  self.cfg.batch_size, self.cfg.max_wait_seconds)
-        self.run_manager.choose_execution_pool()
+        self.run_manager.choose_execution_pool(queued=len(self._pending))
         _last_pool_status = time.monotonic()
         _last_db_sweep = time.monotonic()
         _last_retry_failed = time.monotonic()
@@ -759,7 +759,7 @@ class BatchScheduler:
             now = time.monotonic()
             if now - _last_pool_status >= 60:
                 _last_pool_status = now
-                self.run_manager.choose_execution_pool()
+                self.run_manager.choose_execution_pool(queued=len(self._pending))
             if now - _last_db_sweep >= self._db_sweep_interval:
                 _last_db_sweep = now
                 self._requeue_db_pending()
@@ -1041,7 +1041,7 @@ class BatchScheduler:
         active_batches = self.run_manager.count_active_batches()
         if not self.run_manager.has_fresh_dispatch_capacity(active_batches):
             return
-        execution_pool = self.run_manager.choose_execution_pool()
+        execution_pool = self.run_manager.choose_execution_pool(queued=len(self._pending))
         if execution_pool is None:
             log.debug("Fresh dispatch blocked: no execution pool has available capacity")
             return
@@ -1325,7 +1325,7 @@ class RunManager:
     def execution_pool_status(self) -> list[dict]:
         return [{k: v for k, v in item.items() if k != "_order"} for item in self._evaluate_execution_pools()]
 
-    def choose_execution_pool(self):
+    def choose_execution_pool(self, queued: int | None = None):
         evaluations = self._evaluate_execution_pools()
         self._last_pool_status = [{k: v for k, v in item.items() if k != "_order"} for item in evaluations]
         available = [item for item in evaluations if item["available"]]
@@ -1342,6 +1342,18 @@ class RunManager:
                 "blockers": blockers,
             },
         )
+        # Say so (once per change) when queued work cannot go anywhere: a pool
+        # held at its limit used to be visible only at debug level.
+        block_key = None if available else tuple(sorted((b["pool"], b["code"]) for b in blockers))
+        if block_key != getattr(self, "_last_dispatch_block", None):
+            self._last_dispatch_block = block_key
+            if block_key:
+                log.info("Fresh dispatch blocked%s: %s",
+                         "" if queued is None else f" ({queued} slide(s) queued)",
+                         "; ".join(f"{b['pool']}: {b['code']} ({b['message']})" for b in blockers))
+            else:
+                log.info("Fresh dispatch unblocked: %s",
+                         ", ".join(f"{item['name']} {item['active_batches']}/{item['max_batches']}" for item in available))
         if not available:
             return None
         available.sort(key=lambda item: (item["active_batches"] / item["max_batches"] if item["max_batches"] else 1.0, item["active_batches"], item["_order"]))
@@ -1358,12 +1370,17 @@ class RunManager:
         existing RUNNING rows.
         """
         running = known_active_batches if known_active_batches is not None else self.count_active_batches()
-        if running >= self.cfg.effective_max_concurrent_runs():
-            log.debug(
-                "Fresh dispatch blocked: %d active batch(es) in DB >= max_concurrent_runs=%d",
-                running,
-                self.cfg.max_concurrent_runs,
-            )
+        limit = self.cfg.effective_max_concurrent_runs()
+        blocked = running >= limit
+        # INFO once per change, like choose_execution_pool: a silent stall here is
+        # as invisible as a silent pool limit.
+        if blocked != getattr(self, "_global_dispatch_blocked", False):
+            self._global_dispatch_blocked = blocked
+            if blocked:
+                log.info("Fresh dispatch blocked: %d active batch(es) in DB >= effective max %d", running, limit)
+            else:
+                log.info("Fresh dispatch no longer at the global limit: %d active batch(es) < %d", running, limit)
+        if blocked:
             return False
         return self.has_capacity()
 
@@ -2309,6 +2326,15 @@ def main():
     config_path = os.path.realpath(config_arg)
     cfg = Config.load(config_arg)
     log.info("Configuration loaded from %s", config_arg)
+
+    # Refuse to run on a pinned (content-addressed) container image that isn't the file
+    # its name promises: it would silently change every embedding.
+    from .image_pins import verify_pinned_images
+    image_problems = verify_pinned_images([cfg.nextflow_config])
+    if image_problems:
+        for problem in image_problems:
+            log.error("Pinned container image mismatch: %s", problem)
+        sys.exit(1)
 
     # Auto-derive tower_endpoint from tower_proxy_port if not explicitly set.
     if not cfg.tower_endpoint and cfg.tower_proxy_port:

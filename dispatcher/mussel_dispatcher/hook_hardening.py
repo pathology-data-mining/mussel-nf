@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from .hook_launcher import is_launched
+
 
 _PREFLIGHT_IMPORT_CACHE: set[tuple[str, str, str, str, str]] = set()
 _PREFLIGHT_IMPORT_LOCK = threading.Lock()
@@ -135,7 +137,8 @@ def preflight_hook(
         if not os.access(path, required_access):
             return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, f"hook path is not readable: {path}")
     python = str(command[0]) if command else "python"
-    if os.path.basename(python).startswith("python"):
+    # A launched hook checks where its module comes from in the process that runs it.
+    if os.path.basename(python).startswith("python") and not is_launched(list(command)):
         check_env = dict(env)
         package_root = str(root / "dispatcher")
         old_path = check_env.get("PYTHONPATH", "")

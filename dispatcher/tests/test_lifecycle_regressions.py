@@ -596,3 +596,43 @@ def test_startup_resume_cap_matches_execution_slots(tmp_path):
     specs = [(f"b{i}", "c.csv", "w") for i in range(7)]
     capped, excess = sched._split_startup_resumes(_pooled_config(tmp_path), specs)
     assert len(capped) == 5 and len(excess) == 2
+
+
+# ---------------------------------------------------------------------------
+# A SKIPPED twin path must not stand for its slide_id.
+# ---------------------------------------------------------------------------
+
+def _set_rows(state: StateStore, slide_id: str, rows: list[tuple[str, str, str | None]]) -> None:
+    """Rows (slide_path, status, batch_id) for one slide_id, inserted in this order."""
+    for path, status, batch in rows:
+        state.add_slide(path, slide_id)
+        state._conn().execute(
+            "UPDATE slides SET status=?, batch_id=?, fail_count=5 WHERE slide_path=?", (status, batch, path)
+        )
+    state._conn().commit()
+
+
+@pytest.mark.parametrize("rows,want", [
+    # A slide with two FAILED paths and a SKIPPED twin: reporting the twin meant
+    # its old batch could never pass WDS coverage.
+    ([("s3://x/1", "FAILED", None), ("s3://x/2", "FAILED", None), ("s3://x/3", "SKIPPED", None)],
+     {"status": "FAILED", "batch_id": None}),
+    ([("s3://x/1", "FAILED", None), ("s3://x/2", "DISPATCHED", "batch-9"), ("s3://x/3", "SKIPPED", None)],
+     {"status": "DISPATCHED", "batch_id": "batch-9"}),
+    ([("s3://x/1", "SKIPPED", None)], {"status": "SKIPPED", "batch_id": None}),
+])
+def test_slide_status_is_the_row_that_speaks_for_the_slide(tmp_path, rows, want):
+    state = StateStore(str(tmp_path / "state.db"))
+    _set_rows(state, "x", rows)
+    assert state.get_slide_statuses(["x"]) == {"x": want}
+
+
+def test_wds_coverage_resolves_a_failed_slide_with_a_skipped_twin(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    finalizer, csv_path, cfg = _wds_finalizer(tmp_path, state, max_slide_retries=1)
+    # Slide "a" failed for good; a twin path was SKIPPED. Neither is in the WDS manifest.
+    state._conn().execute("UPDATE slides SET status='FAILED', batch_id=NULL, fail_count=5")
+    state._conn().commit()
+    _set_rows(state, "a", [("s3://slides/a-twin.svs", "SKIPPED", None)])
+
+    assert finalizer._verify_wds_coverage(str(csv_path), cfg.outdir) is True

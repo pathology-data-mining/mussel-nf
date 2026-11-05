@@ -36,8 +36,14 @@ python dispatcher/mussel-dispatcher.py dispatcher/tcga_dispatcher.yaml
 python dispatcher/mussel-dispatcher.py collect-manifests dispatcher/tcga_dispatcher.yaml
 
 # Launch the monitoring dashboard (default port 8050)
-python dispatcher/dashboard.py dispatcher/tcga_dispatcher.yaml --port 8050
+python -m mussel_dispatcher.dashboard dispatcher/tcga_dispatcher.yaml --port 8050
 ```
+
+When the dispatcher launches the dashboard and Tower proxy as sidecars, their
+output is written to `log_dir/dashboard.log` and `log_dir/tower_proxy.log`.
+The main dispatcher process also writes a persistent `log_dir/dispatcher.log`.
+These are the first places to check when the dashboard is down, the proxy is
+accepting traffic but not forwarding it, or the dispatcher itself exited.
 
 ## How It Works
 
@@ -139,6 +145,83 @@ All slides and batches are tracked in a SQLite database (`state_dir/state.db`). 
 
 This means the dispatcher is safe to kill/restart at any time without losing progress or duplicating work.
 
+On startup, recovery is conservative:
+- Intact in-flight batches are resumed with `-resume` when their work dir and batch CSV still exist.
+- Batches whose Nextflow debug log already shows successful completion are finalized without re-running the workflow.
+- Recovery is capped at `max_concurrent_runs`; any excess recovered batches are reset to `PENDING` and re-dispatched later.
+
+The dispatcher logs a startup recovery summary so you can see how many batches were resumed, finalized, or reset before new work is dispatched.
+
+### PostgreSQL state backend
+
+`state_backend: postgres` keeps dispatcher state in PostgreSQL instead of the
+local SQLite file, so several hosts (e.g. the dispatcher and remote agents) can
+share it. Connection settings come from the `postgres` block; the password is
+read from the environment variable named by `password_env`:
+
+```yaml
+state_backend: postgres
+postgres:
+  host: db.example.org
+  port: 5432
+  database: mussel_dispatcher
+  user: mussel_dispatcher
+  password_env: POSTGRES_APP_PASSWORD
+  sslmode: prefer
+```
+
+`scripts/provision_postgres.py` creates the role, database and schema, and
+`scripts/import_sqlite_to_postgres.py` migrates an existing SQLite state file.
+
+### Remote Slurm targets
+
+`dispatch_targets` lists remote Slurm clusters that do not share a filesystem
+with the dispatcher. The dispatcher writes run orders to PostgreSQL, and a
+remote agent on the cluster (`python -m mussel_dispatcher.remote <config>
+--target <name>`, or `mussel-remote-agent`) claims them, stages the batch,
+submits a Slurm driver job that runs Nextflow, and runs the post-batch hooks.
+Each target sets its own login host, scratch root, Nextflow profiles and
+optional `-c` config, Slurm partitions/accounts for the driver and hook jobs,
+environment variables and `secrets_env_file`. A site-specific Nextflow config
+for a target can be kept as `dispatcher/remote_nextflow.config`, which is staged
+with each release.
+
+## Automatic remote release sync
+
+`auto_sync_release: true` makes the tracked-clean local checkout authoritative
+for remote targets.  The controller requires the commit to be reachable from
+`release_origin_remote`, publishes it through PostgreSQL, waits for each release
+agent (`python -m mussel_dispatcher.release_agent <config> --target <name>
+--deployment-id <id>`) to stage it, requests atomic activation, and waits for
+the restarted remote worker to report the same loaded revision.  Local dispatch
+and existing remote Slurm drivers continue while fresh remote dispatch is paused.
+Tracked modifications in the dispatcher's checkout pause fresh remote dispatch;
+untracked operational artifacts do not.
+
+The dashboard exposes this as `ACTIVE`, `SYNCING`, `BLOCKED_LOCAL`, or `ERROR`
+instead of allowing release drift to look like repeated batch failures.
+`release_restart_units` lists user-systemd units that a target must reload
+after switching its active release symlink.
+
+`release_branch` (e.g. `release/cohort-v1`) pins a deployment to one branch: the
+dispatcher refuses to start on a checkout whose HEAD is not on
+`<release_origin_remote>/<release_branch>`, and the release controller publishes
+nothing else to remote targets. Deploy by updating that branch.
+
+Before the first rollout containing release-controller schema changes, run the
+idempotent migration with the deployment's environment loaded:
+
+```bash
+python -m mussel_dispatcher.release \
+  --config cohort_dispatcher.yaml \
+  --deployment-id <deployment-id> migrate
+```
+
+After a restart, inspect:
+- `dispatcher.log` for the authoritative dispatcher lifecycle, recovery summary, and exceptions
+- `dashboard.log` for dashboard startup or bind failures
+- `tower_proxy.log` for proxy startup and forwarding issues
+
 ## Configuration
 
 The config is a YAML file. See [`tcga_dispatcher.yaml`](tcga_dispatcher.yaml) for a fully annotated TCGA example and [`dispatcher.yaml`](dispatcher.yaml) for a local/S3 example.
@@ -158,9 +241,10 @@ The config is a YAML file. See [`tcga_dispatcher.yaml`](tcga_dispatcher.yaml) fo
 | `min_batch_size` | `1` | Minimum to dispatch (at shutdown, any size is flushed) |
 | `max_wait_seconds` | `300` | Time trigger for dispatching a partial batch |
 | `max_concurrent_runs` | `2` | Parallel Nextflow jobs |
+| `max_concurrent_finalizations` | `1` | Parallel post-batch finalizers per local or remote backend |
 | `retry_failed` | `true` | Re-enqueue slides from crashed batches on restart |
 | `cleanup_work_dir` | `false` | Delete NF work dir after successful run |
-| `post_batch_hooks` | `[]` | Commands to run after each successful batch |
+| `post_batch_hooks` | `[]` | Commands to run after each successful batch; hooks run serially within a batch and batches are finalized through a bounded shared worker pool |
 | `watchers` | required | List of watcher configs (see below) |
 
 ### TcgaWatcher fields (`type: tcga`)

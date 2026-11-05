@@ -3,5 +3,5 @@ dependencies:
   - python=3.11.*
   - pip
   - pip:
-    - mussel-pathology[torch-gpu]
+    - mussel-pathology[torch-gpu]==1.6.0
     - pytest

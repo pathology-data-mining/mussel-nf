@@ -484,7 +484,7 @@ def upload_and_trigger(
     ``--volume-path`` (legacy single-file path).
 
     ``filename_prefix`` sets the file name stem, e.g. ``"tcga_inventory_"`` or
-    ``"impact_inventory_"``.
+    ``"cohort_inventory_"``.
     """
     tmp_path: Path | None = None
     try:

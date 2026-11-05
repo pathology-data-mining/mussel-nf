@@ -1,0 +1,32 @@
+nextflow_pipeline {
+    name   "Per-model recommended tile sizes (two-step) — stub mode"
+    script "../main.nf"
+    profile "test_stub_tile_sizes"
+    options "-stub"
+
+    // hoptimus1 (224 px) and titan_slide (512 px) need different tilings. Each
+    // size is tessellated separately: the primary set (first model) keeps the
+    // tiles/ layout, the other goes to tiles_512px/.
+    test("two-step: each model gets its own tile set") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            // Tile size recorded in a patch.h5 (the stubs write it like real tessellation does).
+            def tileSize = { String h5 ->
+                def proc = ["python3", "-c", "import h5py,sys; print(int(h5py.File(sys.argv[1], 'r')['coords'].attrs['patch_size_to_resize_to_for_desired_mpp']))", h5].execute()
+                proc.waitFor()
+                assert proc.exitValue() == 0 : "reading ${h5} failed:\n${proc.err.text}"
+                proc.text.trim() as Integer
+            }
+            assert path("${outputDir}/tiles/9481/948176.patch.h5").exists()
+            assert path("${outputDir}/tiles_512px/9481/948176.patch.h5").exists()
+            assert path("${outputDir}/features/hoptimus1/948176.features.pt").exists()
+            assert path("${outputDir}/features/titan_slide/948176.features.pt").exists()
+            assert path("${outputDir}/features/conch1_5/948176.patch_features.h5").exists()
+            assert tileSize("${outputDir}/tiles/9481/948176.patch.h5") == 224
+            assert tileSize("${outputDir}/tiles_512px/9481/948176.patch.h5") == 512
+        }
+    }
+}

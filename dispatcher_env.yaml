@@ -15,6 +15,7 @@ dependencies:
       - numpy
       - boto3
       - databricks-sdk
+      - psycopg[binary]
       - pyarrow
       - pytest
       - torch --index-url https://download.pytorch.org/whl/cpu

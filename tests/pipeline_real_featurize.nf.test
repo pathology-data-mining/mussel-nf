@@ -1,0 +1,35 @@
+nextflow_pipeline {
+    name   "FEATURIZE_BATCH real script execution — list argument regression"
+    script "../tests/featurize_batch_script.nf"
+    profile "test_real_featurize"
+
+    test("executes the non-stub script with flat Hydra lists") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            assert path("${outputDir}/features/optimus/1001234.features.pt").exists()
+            assert path("${outputDir}/features/optimus/1001234.features.h5").exists()
+        }
+    }
+
+    test("profiling collects Mussel's stage timings with the task profile") {
+        when {
+            params {
+                outdir      = "${outputDir}"
+                profile_dir = "${outputDir}/profiles"
+            }
+        }
+        then {
+            assert workflow.success
+            def dirs = file("${outputDir}/profiles").listFiles().findAll { it.isDirectory() }
+            assert dirs.size() == 1
+            def task = dirs[0]
+            for (f in ['task.json', '.task_profile_start', '.task_profile_end', '.task_timings.jsonl']) {
+                assert new File(task, f).exists() : f
+            }
+            assert new File(task, '.task_timings.jsonl').text.contains('"stage": "patch_features"')
+        }
+    }
+}

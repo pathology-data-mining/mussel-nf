@@ -25,6 +25,8 @@ process FEATURIZE_BATCH {
     tuple val(batch_metadata), val(model_type_input), path("*.features.pt"), emit: pt
     tuple val(batch_metadata), val(model_type_input), path("*.features.h5"), emit: h5
     tuple val(batch_metadata), val(model_type), path("*.patch_features.h5"), optional: true, emit: patch_h5
+    // Slides of the batch without outputs (bin/mussel_batch.py finish); not published.
+    tuple val(batch_metadata), val(model_type_input), path("failed_slides.tsv"), optional: true, emit: failed
 
     script:
     // Determine if this is a slide-level model and infer the patch encoder
@@ -64,6 +66,7 @@ process FEATURIZE_BATCH {
     patch_h5_paths_arg = patch_h5s.collect { "\"${it.name}\"" }.join(',')
     slide_paths_arg = slides.collect { "\"${it.name}\"" }.join(',')
     slide_ids_arg = slide_batch.collect { meta, slide, patch_h5 -> "\"${meta.slide_id}\"" }.join(',')
+    slide_ids_csv = slide_batch.collect { meta, slide, patch_h5 -> meta.slide_id }.join(',')
     slide_batch_size = params.featurize.slide_batch_size ?: 8
 
     // Resolve per-model batch size override, falling back to global default
@@ -85,9 +88,13 @@ process FEATURIZE_BATCH {
     slide_max_patches = params.featurize.slide_max_patches ?: 0
     max_slide_patches_str = (slide_model_type && slide_max_patches > 0) ? "max_slide_patches=${slide_max_patches}" : ""
 
+    // Mussel >= 1.6.0 writes the other slides' outputs when some fail, then exits
+    // non-zero: bin/mussel_batch.py keeps those (the failed slides go to
+    // failed_slides.tsv) and moves empty outputs of slides without tiles aside.
     """
     ${TaskProfile.script(params.profile_dir, task)}
-    extract_features \
+    rc=0
+    mussel_batch.py run --log mussel.log -- extract_features \
         'patch_h5_paths=[${patch_h5_paths_arg}]' \
         'slide_paths=[${slide_paths_arg}]' \
         'slide_ids=[${slide_ids_arg}]' \
@@ -104,7 +111,9 @@ process FEATURIZE_BATCH {
         ${embedding_precision_str} \
         ${tile_size_check_str} \
         ${max_slide_patches_str} \
-        ${TaskProfile.timingsArg(params.profile_dir)}
+        ${TaskProfile.timingsArg(params.profile_dir)} || rc=\$?
+    mussel_batch.py finish --rc \$rc --log mussel.log --slide-ids '${slide_ids_csv}' \
+        --expect '${model_type_input}={sid}.features.pt' --scan . --report failed_slides.tsv
     """
 
     stub:
@@ -150,6 +159,7 @@ process FEATURIZE_PATCH_MULTI {
     output:
     tuple val(batch_metadata), path("*/*.features.pt"), emit: pt
     tuple val(batch_metadata), path("*/*.features.h5"), emit: h5
+    tuple val(batch_metadata), path("failed_slides.tsv"), optional: true, emit: failed
 
     script:
     batch_metadata = slide_batch.collect { meta, slide, patch_h5 -> meta }
@@ -166,9 +176,14 @@ process FEATURIZE_PATCH_MULTI {
     slide_paths_arg = slides.collect { "\"${it.name}\"" }.join(',')
     slide_ids_arg = slide_batch.collect { meta, slide, patch_h5 -> "\"${meta.slide_id}\"" }.join(',')
     tile_size_check_str = tile_size_check ? "tile_size_check=${tile_size_check}" : ""
+    // Outputs land in <model>/ (lower-case code, as perModel in modules/mussel.nf expects).
+    slide_ids_csv = slide_batch.collect { meta, slide, patch_h5 -> meta.slide_id }.join(',')
+    expect_args = model_types.collect { m -> "--expect '${m}=${m}/{sid}.features.pt' --scan '${m}'" }.join(' ')
+    // Partial failures and slides without tiles: see FEATURIZE_BATCH.
     """
     ${TaskProfile.script(params.profile_dir, task)}
-    extract_features \\
+    rc=0
+    mussel_batch.py run --log mussel.log -- extract_features \\
         'patch_h5_paths=[${patch_h5_paths_arg}]' \\
         'slide_paths=[${slide_paths_arg}]' \\
         'slide_ids=[${slide_ids_arg}]' \\
@@ -181,7 +196,9 @@ process FEATURIZE_PATCH_MULTI {
         use_gpu=${params.featurize.use_gpu ? "true" : "false"} \\
         batch_size=${batch_size} \\
         ${tile_size_check_str} \\
-        ${TaskProfile.timingsArg(params.profile_dir)}
+        ${TaskProfile.timingsArg(params.profile_dir)} || rc=\$?
+    mussel_batch.py finish --rc \$rc --log mussel.log --slide-ids '${slide_ids_csv}' \\
+        ${expect_args} --report failed_slides.tsv
     """
 
     stub:

@@ -77,15 +77,40 @@ def perModel(ch) {
     }
 }
 
-// Split FEATURIZE_BATCH outputs (one task per batch x model) back into per-slide tuples.
+// Slide ID in a Mussel output file name: <slide_id>.features.{pt,h5},
+// <slide_id>.patch_features.{pt,h5} or <slide_id>.patch.h5; null for any other name.
+def slideIdOf(String name) {
+    def m = (name =~ /^(.+)\.(features\.pt|features\.h5|patch_features\.pt|patch_features\.h5|patch\.h5)$/)
+    return m ? m[0][1] : null
+}
+
+// Pair a batch task's output files with their slides' metas by the slide ID in each
+// file name, never by position: a batch task writes nothing for a slide that failed
+// or had no tiles (Mussel >= 1.6.0 goes on with the others). A file naming no slide
+// of the batch is dropped with a warning. Returns [[meta, file], ...].
+def bySlide(batch_meta, files, String what) {
+    def files_list = files instanceof List ? files : [files]
+    def meta_by_slide = batch_meta.collectEntries { meta -> [meta.slide_id.toString(), meta] }
+    def pairs = []
+    files_list.each { f ->
+        def meta = meta_by_slide[slideIdOf(f.name.toString())]
+        if (meta == null) {
+            log.warn "${what}: ${f.name} is not an output of a slide in its batch (${meta_by_slide.keySet().join(', ')}); dropped"
+        } else {
+            pairs << [meta, f]
+        }
+    }
+    def missing = meta_by_slide.keySet() - pairs.collect { meta, f -> meta.slide_id.toString() }
+    if (missing) {
+        log.info "${what}: no output for ${missing.join(', ')} (failed or without tiles; see the task's failed_slides.tsv)"
+    }
+    return pairs
+}
+
+// Split batch task outputs (one task per batch x model) back into per-slide tuples.
 def perSlide(ch) {
     return ch.flatMap { batch_meta, model_type, files ->
-        def files_list = files instanceof List ? files : [files]
-        // Sort both lists by slide_id so positional pairing is correct
-        // regardless of channel arrival order (which is nondeterministic).
-        def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-        def sorted_files = files_list.toSorted { it.name }
-        [sorted_meta, sorted_files].transpose().collect { meta, f -> tuple(meta, model_type, f) }
+        bySlide(batch_meta, files, model_type.toString()).collect { meta, f -> tuple(meta, model_type, f) }
     }
 }
 
@@ -303,6 +328,13 @@ workflow EXTRACT_FEATURES_ONE_STEP {
             error "featurize.grid_from_primary needs the two-step workflow (use_one_step_workflow = false): " +
                   "the one-step workflow tessellates each model separately."
         }
+        def one_step_conflicts = TileSizes.oneStepConflicts(model_specs, (params.featurize.slide_to_patch_mapping ?: [:]).keySet(), projectDir)
+        if (one_step_conflicts) {
+            error "The one-step workflow can't tile ${one_step_conflicts.join('; ')}: each slide encoder runs in " +
+                  "Mussel's multi-model tessellate_extract_features, which would silently use other tiles. " +
+                  "Use the two-step workflow (use_one_step_workflow = false) for this override, or remove it " +
+                  "(featurize.model_patch_sizes / model_mpps, tiling.patch_size / mpp)."
+        }
         ch_model_types = Channel.fromList(params.featurize.model_types.collect { m ->
             tuple(m, TileSizes.tileSetFor(tile_sets, model_specs[m]))
         })
@@ -317,50 +349,18 @@ workflow EXTRACT_FEATURES_ONE_STEP {
 
         TESSELLATE_FEATURIZE_BATCH(ch_slide_batches.combine(ch_model_types))
 
-        // Flatten batch results back to individual slides
-        // Use indexed matching since output files may use staged names
-        ch_pt_out = TESSELLATE_FEATURIZE_BATCH.out.pt
-            .flatMap { batch_meta, model_type, pt_files ->
-                def files_list = pt_files instanceof List ? pt_files : [pt_files]
-                def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                def sorted_files = files_list.toSorted { it.name }
-                [sorted_meta, sorted_files].transpose().collect { meta, pt_file ->
-                    tuple(meta, model_type, pt_file)
-                }
-            }
-
-        ch_h5_out = TESSELLATE_FEATURIZE_BATCH.out.h5
-            .flatMap { batch_meta, model_type, h5_files ->
-                def files_list = h5_files instanceof List ? h5_files : [h5_files]
-                def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                def sorted_files = files_list.toSorted { it.name }
-                [sorted_meta, sorted_files].transpose().collect { meta, h5_file ->
-                    tuple(meta, model_type, h5_file)
-                }
-            }
+        // Split batch results back into per-slide tuples, by the slide ID in each file name.
+        ch_pt_out = perSlide(TESSELLATE_FEATURIZE_BATCH.out.pt)
+        ch_h5_out = perSlide(TESSELLATE_FEATURIZE_BATCH.out.h5)
 
         // Every model task re-emits its tiles; keep the primary tile set only.
         ch_patches_out = TESSELLATE_FEATURIZE_BATCH.out.tile_h5
             .filter { batch_meta, tset, patch_h5_files -> tset.suffix == '' }
-            .map { batch_meta, tset, patch_h5_files -> tuple(batch_meta, patch_h5_files) }
-            .flatMap { batch_meta, patch_h5_files ->
-                def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
-                def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                def sorted_files = files_list.toSorted { it.name }
-                [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
-                    tuple(meta, patch_h5_file)
-                }
+            .flatMap { batch_meta, tset, patch_h5_files ->
+                bySlide(batch_meta, patch_h5_files, "tiles").collect { meta, patch_h5_file -> tuple(meta, patch_h5_file) }
             }
 
-        ch_patch_h5_out = TESSELLATE_FEATURIZE_BATCH.out.patch_h5
-            .flatMap { batch_meta, model_type, patch_h5_files ->
-                def files_list = patch_h5_files instanceof List ? patch_h5_files : [patch_h5_files]
-                def sorted_meta  = batch_meta.toSorted { it.slide_id.toString() }
-                def sorted_files = files_list.toSorted { it.name }
-                [sorted_meta, sorted_files].transpose().collect { meta, patch_h5_file ->
-                    tuple(meta, model_type, patch_h5_file)
-                }
-            }
+        ch_patch_h5_out = perSlide(TESSELLATE_FEATURIZE_BATCH.out.patch_h5)
 
         EMIT_MPP_META(ch_patches_out)
 

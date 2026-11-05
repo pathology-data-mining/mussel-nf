@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 FEATURIZE_NF = Path(__file__).parent.parent / "modules" / "featurize.nf"
+REPO_BIN = Path(__file__).parent.parent / "bin"
 
 # ---------------------------------------------------------------------------
 # Groovy GString simulation
@@ -22,6 +23,8 @@ TEST_VARS = {
     "patch_h5_paths_arg":        '"1001234.patch.h5","1001235.patch.h5"',
     "slide_paths_arg":           '"1001234.svs","1001235.svs"',
     "slide_ids_arg":             '"1001234","1001235"',
+    "slide_ids_csv":             "1001234,1001235",
+    "model_type_input":          "titan_slide",
     "max_slide_patches_str":     "max_slide_patches=2",
     "tile_size_check_str":       "",
     "slide_batch_size":          "4",
@@ -43,8 +46,8 @@ def _simulate_groovy_gstring(template: str, variables: dict[str, str]) -> str:
     """Simulate Groovy GString evaluation.
 
     Rules:
-    - ``\\${var}`` → literal ``${var}`` in bash  (escaped from Groovy)
-    - ``\\$(``     → literal ``$(``  in bash      (escaped bash command sub)
+    - ``\\$``      → literal ``$`` in bash (escaped from Groovy: ``\\${var}``,
+                    ``\\$(cmd)``, ``\\$?``, ...)
     - ``${expr}``  → replaced with variables[expr] or empty string
     """
     result = template
@@ -52,6 +55,7 @@ def _simulate_groovy_gstring(template: str, variables: dict[str, str]) -> str:
     # Step 1: protect escaped sequences by replacing them with placeholders
     result = result.replace(r"\${", "\x00ESCAPED_BRACE\x00")
     result = result.replace(r"\$(", "\x00ESCAPED_DOLLAR_PAREN\x00")
+    result = result.replace(r"\$", "\x00ESCAPED_DOLLAR\x00")
 
     # Step 2: replace ${expr} with test values (longest match first to avoid
     # partial substitution of nested expressions)
@@ -61,6 +65,7 @@ def _simulate_groovy_gstring(template: str, variables: dict[str, str]) -> str:
     # Step 3: restore escaped sequences as their bash equivalents
     result = result.replace("\x00ESCAPED_BRACE\x00", "${")
     result = result.replace("\x00ESCAPED_DOLLAR_PAREN\x00", "$(")
+    result = result.replace("\x00ESCAPED_DOLLAR\x00", "$")
 
     return result
 
@@ -132,26 +137,64 @@ class TestFeaturizeNfScriptGeneration:
             f"Generated script:\n{script[:800]}"
         )
 
-    def _run_with_stub_extract(self, tmp_path, vars_):
+    def _run_task(self, tmp_path, vars_, fake_body):
+        """Run the rendered script with a fake extract_features (bash `fake_body`)."""
         fake_bin = tmp_path / "bin"
         fake_bin.mkdir()
         extract_features = fake_bin / "extract_features"
-        extract_features.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf '%s\\n' \"$*\" > extract_args.txt\n"
-        )
+        extract_features.write_text("#!/usr/bin/env bash\n" + fake_body)
         extract_features.chmod(0o755)
         script_path = tmp_path / "task.sh"
         script_path.write_text(_simulate_groovy_gstring(self._get_script(), vars_))
-        result = subprocess.run(
-            ["bash", str(script_path)],
+        return subprocess.run(
+            ["bash", "-ue", str(script_path)],  # Nextflow's default task shell
             cwd=tmp_path,
-            env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            env={"PATH": f"{fake_bin}:{REPO_BIN}:{os.environ['PATH']}"},
             capture_output=True,
             text=True,
         )
+
+    def _run_with_stub_extract(self, tmp_path, vars_):
+        result = self._run_task(
+            tmp_path, vars_,
+            "printf '%s\\n' \"$*\" > extract_args.txt\n"
+            "touch 1001234.features.pt 1001235.features.pt\n",
+        )
         assert result.returncode == 0, result.stderr
         return (tmp_path / "extract_args.txt").read_text()
+
+    # Mussel >= 1.6.0: some slides fail, the others' outputs are written, exit 1.
+    PARTIAL = (
+        "touch 1001234.features.pt 1001234.features.h5\n"
+        "echo \"RuntimeError: 1 of 2 slide(s) failed (the others' outputs were written): "
+        "1001235: CUDA out of memory\" >&2\n"
+        "exit 1\n"
+    )
+
+    def test_partial_batch_failure_keeps_the_other_slides(self, tmp_path):
+        result = self._run_task(tmp_path, TEST_VARS, self.PARTIAL)
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "1001234.features.pt").exists()
+        assert (tmp_path / "failed_slides.tsv").read_text().splitlines() == [
+            "slide_id\tmodel\tstatus", "1001235\ttitan_slide\tfailed"]
+        assert "continuing with them" in result.stderr
+        # Mussel's own log still reaches the task's stderr.
+        assert "1001235: CUDA out of memory" in result.stderr
+
+    def test_failure_without_outputs_fails_the_task(self, tmp_path):
+        result = self._run_task(
+            tmp_path, TEST_VARS,
+            "echo \"RuntimeError: 2 of 2 slide(s) failed (the others' outputs were written): x\" >&2\nexit 1\n",
+        )
+        assert result.returncode == 1
+
+    @pytest.mark.parametrize("fake, rc", [
+        ("touch 1001234.features.pt\nexit 137\n", 137),  # e.g. OOM kill after one slide
+        ("echo 'RuntimeError: none of the 2 slide(s) had tiles, so no output files were written' >&2\n"
+         "exit 1\n", 1),
+    ])
+    def test_other_failures_keep_their_exit_status(self, tmp_path, fake, rc):
+        assert self._run_task(tmp_path, TEST_VARS, fake).returncode == rc
 
     def test_titan_cap_is_passed_to_mussel(self, tmp_path):
         """slide_max_patches reaches Mussel's extract_features as max_slide_patches."""

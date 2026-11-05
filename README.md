@@ -125,6 +125,18 @@ The standard workflow tessellates slides and extracts features for `params.featu
 * **Two-step** (`params.use_one_step_workflow = false`): separate `TESSELLATE` → `FEATURIZE_BATCH`
   tasks. Useful when reusing pre-tessellated tiles.
 
+### Failed slides and slides without tiles
+
+A batch task goes on past a slide that fails (Mussel >= 1.6.0): Mussel writes the
+other slides' outputs, then exits non-zero. The task keeps those outputs and lists
+the slides without outputs in `failed_slides.tsv` in its work dir (`slide_id`,
+`model`, `status`: `failed`, `no_tiles` or `missing`), which is not published. The
+task still fails when no slide of a model has outputs, or on any other error. A
+slide without tissue gets no tiles and no features. A slide without tiles gets no
+features either: Mussel's empty (0-row) feature files are renamed to
+`<name>.empty` in the work dir, so they're neither published nor passed on.
+Outputs are matched to their slides by the slide ID in each file name.
+
 ### Tile sizes and resolutions
 
 Each model is tiled at its recommended size and resolution from Mussel's
@@ -160,8 +172,15 @@ recommended size or resolution):
 |---|---|
 | `featurize.model_patch_sizes` | Per-model size, e.g. `[conch1_5: 448]` |
 | `tiling.patch_size` | One size for every model (default `null`: recommended sizes) |
-| `featurize.model_mpps` | Per-model resolution (µm/px), e.g. `[chief_slide: 0.5]` |
+| `featurize.model_mpps` | Per-model resolution (µm/px), e.g. `[gpfm: 0.5]` |
 | `tiling.mpp` | One resolution for every model (default `null`: each model's resolution) |
+
+A slide encoder's size or resolution override (e.g. `model_mpps: [chief_slide: 0.5]`)
+needs the two-step workflow (`use_one_step_workflow = false`). The one-step workflow
+stops with an error instead: there Mussel's multi-model `tessellate_extract_features`
+tiles a slide encoder at its recommended size whatever `seg_config.patch_size` says,
+and takes `seg_config.mpp = 0.5` as unset (`chief_slide` and `madeleine_slide` would
+get 1.0 µm/px).
 
 The first model in `model_types` sets the primary tile set, published under `tiles/`
 (manifest key `tiles_h5_path`). Another size at the primary set's resolution goes to

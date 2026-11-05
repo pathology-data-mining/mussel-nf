@@ -173,6 +173,38 @@ class TileSizes {
         return tileSets.find { it.size == spec.size && sameMpp(it.mpp, spec.mpp) }
     }
 
+    /**
+     * Slide encoders the one-step workflow can't tile as `specs` (resolve()) asks,
+     * one message each. There a slide encoder runs in Mussel's multi-model
+     * tessellate_extract_features (model_type and slide_model_type both set), which
+     * tiles it at its recommended size whatever seg_config.patch_size says, and takes
+     * seg_config.mpp = 0.5 as unset, using the encoder's own resolution instead
+     * (e.g. 1.0 µm/px for chief_slide). The two-step workflow tiles as asked.
+     */
+    static List<String> oneStepConflicts(Map<String, Map> specs, Collection slideEncoders, projectDir) {
+        def rec = recommended(projectDir)
+        def target = targetMpp(projectDir)
+        def encoders = slideEncoders.collect { it.toString() }
+        def out = []
+        specs.each { m, spec ->
+            if (!(m in encoders)) {
+                return
+            }
+            def problems = []
+            if (rec[m] != null && rec[m] != spec.size) {
+                problems << "${spec.size} px (Mussel ignores seg_config.patch_size here and uses ${rec[m]} px)"
+            }
+            def own = target[m] != null ? target[m] : DEFAULT_MPP
+            if (sameMpp(spec.mpp, DEFAULT_MPP) && !sameMpp(own, DEFAULT_MPP)) {
+                problems << "${mppTag(spec.mpp)} µm/px (Mussel takes seg_config.mpp=0.5 as unset here and uses ${mppTag(own)} µm/px)"
+            }
+            if (problems) {
+                out << "${m} at ${problems.join(' and ')}".toString()
+            }
+        }
+        return out
+    }
+
     /** True when the tile sets need more than one resolution (Mussel seg_config.patch_mpps). */
     static boolean multiMpp(List<Map> tileSets) {
         return tileSets.any { !sameMpp(it.mpp, tileSets[0].mpp) }

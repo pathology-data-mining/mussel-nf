@@ -187,10 +187,19 @@ jobs:
             tests/pipeline_stub_multi_slide.nf.test \
             tests/pipeline_stub_multi_model.nf.test \
             tests/pipeline_stub_grid_from_primary.nf.test \
-            tests/pipeline_stub_grid_from_primary_batched.nf.test
+            tests/pipeline_stub_grid_from_primary_batched.nf.test \
+            tests/pipeline_stub_one_step_partial.nf.test \
+            tests/pipeline_stub_one_step_slide_encoders.nf.test \
+            tests/pipeline_stub_one_step_slide_override.nf.test
 
       - name: Run non-stub FEATURIZE script regression test
-        run: nf-test test tests/pipeline_real_featurize.nf.test tests/pipeline_real_featurize_multi.nf.test
+        run: |
+          nf-test test \
+            tests/pipeline_real_featurize.nf.test \
+            tests/pipeline_real_featurize_multi.nf.test \
+            tests/pipeline_real_featurize_partial.nf.test \
+            tests/pipeline_real_featurize_partial_slide.nf.test \
+            tests/abmil_features_suffix.nf.test
 
   # ── TCGA scripts integration: stub pipeline output → append_wds ────────
   nf-test-stub-tcga:

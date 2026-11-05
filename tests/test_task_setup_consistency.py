@@ -65,7 +65,8 @@ def test_mussel_model_tasks_are_profiled():
     for nf in sorted(MODULES.glob("*.nf")):
         for name, body in _processes(nf.read_text()):
             script = body.split("\n    stub:")[0]
-            if re.search(r"^\s+(tessellate|extract_features|tessellate_extract_features) \\", script, re.M):
+            # The CLI runs directly or under bin/mussel_batch.py (Mussel >= 1.6.0 partial batches).
+            if re.search(r"^\s+(?:mussel_batch\.py run --log \S+ -- )?(tessellate|extract_features|tessellate_extract_features) \\", script, re.M):
                 found[f"{nf.name}:{name}"] = (
                     "${TaskProfile.script(params.profile_dir, task)}" in script,
                     "${TaskProfile.timingsArg(params.profile_dir)}" in script,

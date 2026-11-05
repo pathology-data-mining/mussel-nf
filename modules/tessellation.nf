@@ -124,10 +124,14 @@ process TESSELLATE {
     if (params.tiling.slide_mpp_override != null) seg_params << "seg_config.slide_mpp_override=${params.tiling.slide_mpp_override}"
     seg_params_str = seg_params.join(' \\\n        ')
 
+    // Mussel >= 1.6.0 raises NoTilesError ("no tissue found by segmentation", exit 1)
+    // for a slide without tissue: skip it (no patch H5, so no validation; the h5
+    // output is optional).
     """
     ${TaskProfile.script(params.profile_dir, task)}
     export MUSSEL_NEURAL_SEG_MAX_TILES=${neural_seg_max_tiles}
-    tessellate \
+    rc=0
+    mussel_batch.py run --log tessellate.log -- tessellate \
         ${seg_config_str} \
         ${seg_params_str} \
         num_workers=${task.cpus} \
@@ -136,7 +140,14 @@ process TESSELLATE {
         ${save_thumbnail_param} \
         ${save_tile_param} \
         ${stitch_tile_param} \
-        ${TaskProfile.timingsArg(params.profile_dir)}
+        ${TaskProfile.timingsArg(params.profile_dir)} || rc=\$?
+    if [ "\$rc" -ne 0 ]; then
+        if grep -q "no tissue found by segmentation" tessellate.log; then
+            echo "WARNING: ${meta.slide_id}: no tissue found by segmentation; skipped (no patch H5 written)" >&2
+            exit 0
+        fi
+        exit "\$rc"
+    fi
     if [ -n "${expected_seg_model}" ]; then
         validate_tessellation_h5.py \
             --expected-seg-model=${expected_seg_model} \

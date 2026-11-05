@@ -26,6 +26,8 @@ process TESSELLATE_FEATURIZE_BATCH {
     tuple val(batch_metadata), val(model_type), path("pt/*.patch_features.pt"), optional: true, emit: patch_pt
     tuple val(batch_metadata), val(model_type), path("h5/*.patch_features.h5"), optional: true, emit: patch_h5
     tuple val(batch_metadata), val(tset), path("tile_h5/*.patch.h5"), optional: true, emit: tile_h5
+    // Slides of the batch without outputs (bin/mussel_batch.py finish); not published.
+    tuple val(batch_metadata), val(model_type_input), path("failed_slides.tsv"), optional: true, emit: failed
 
     script:
     // Determine if this is a slide-level model and infer the patch encoder
@@ -45,6 +47,7 @@ process TESSELLATE_FEATURIZE_BATCH {
 
     model_type_name = slide_model_type ?: model_type
     patch_encoder_name = model_type
+    is_slide_model = slide_model_type ? "true" : "false"
 
     mpath_str = ""
     if (model_path)
@@ -136,10 +139,15 @@ process TESSELLATE_FEATURIZE_BATCH {
         : 4096
     expected_seg_model = params.tiling.seg_model?.toString()?.trim()?.toLowerCase()
 
+    // Mussel >= 1.6.0 writes the other slides' outputs when some fail, then exits
+    // non-zero: bin/mussel_batch.py keeps those (the failed slides go to
+    // failed_slides.tsv) and moves empty outputs of slides without tiles aside.
+    // Slides without tissue are skipped by Mussel and have no outputs.
     """
     ${TaskProfile.script(params.profile_dir, task)}
     export MUSSEL_NEURAL_SEG_MAX_TILES=${neural_seg_max_tiles}
-    tessellate_extract_features \
+    rc=0
+    mussel_batch.py run --log mussel.log -- tessellate_extract_features \
         ${seg_config_str} \
         ${seg_params_str} \
         num_workers=${task.cpus} \
@@ -165,7 +173,7 @@ process TESSELLATE_FEATURIZE_BATCH {
         ${output_png_dir_suffix_str} \
         ${save_h5_param} \
         ${embedding_precision_str} \
-        ${TaskProfile.timingsArg(params.profile_dir)}
+        ${TaskProfile.timingsArg(params.profile_dir)} || rc=\$?
 
     # When a slide encoder is used, the Mussel CLI writes outputs into model-named
     # subdirs (e.g. TITAN_SLIDE/pt/, CONCH1_5/pt/) instead of flat pt/.
@@ -175,21 +183,34 @@ process TESSELLATE_FEATURIZE_BATCH {
         # Slide-level features → flat pt/ and h5/
         [[ -d "${model_type_name.toUpperCase()}/pt" ]] && mv ${model_type_name.toUpperCase()}/pt/*.features.pt pt/ 2>/dev/null || true
         [[ -d "${model_type_name.toUpperCase()}/h5" ]] && mv ${model_type_name.toUpperCase()}/h5/*.features.h5 h5/ 2>/dev/null || true
+        # The slide encoder's patch features: <PATCH_ENCODER>/, or (Mussel >= 1.6.0)
+        # <PATCH_ENCODER>_<size>px_<mpp>mpp/ when the slide encoder's tiles differ from
+        # the patch encoder's own (e.g. CTRANSPATH_256px_1mpp/ for CHIEF_SLIDE); <PATCH_ENCODER>/
+        # then holds Mussel's standalone patch encoder run, at the patch encoder's tiles.
+        pe_dir="${patch_encoder_name.toUpperCase()}"
+        if [[ "${is_slide_model}" == "true" ]]; then
+            for d in "${patch_encoder_name.toUpperCase()}"_*px_*mpp; do
+                if [[ -d "\$d" ]]; then pe_dir="\$d"; break; fi
+            done
+        fi
         # Patch encoder features → rename to *.patch_features.* so NF can tell them apart
-        if [[ -d "${patch_encoder_name.toUpperCase()}/pt" ]]; then
-            for f in ${patch_encoder_name.toUpperCase()}/pt/*.features.pt; do
+        if [[ -d "\$pe_dir/pt" ]]; then
+            for f in "\$pe_dir"/pt/*.features.pt; do
                 [[ -f "\$f" ]] && mv "\$f" pt/\$(basename "\${f%.features.pt}").patch_features.pt
             done
         fi
-        if [[ -d "${patch_encoder_name.toUpperCase()}/h5" ]]; then
-            for f in ${patch_encoder_name.toUpperCase()}/h5/*.features.h5; do
+        if [[ -d "\$pe_dir/h5" ]]; then
+            for f in "\$pe_dir"/h5/*.features.h5; do
                 [[ -f "\$f" ]] && mv "\$f" h5/\$(basename "\${f%.features.h5}").patch_features.h5
             done
         fi
         # Tile coordinates live under patch encoder subdir
-        [[ -d "${patch_encoder_name.toUpperCase()}/tile_h5" ]] && mv ${patch_encoder_name.toUpperCase()}/tile_h5/* tile_h5/ 2>/dev/null || true
+        [[ -d "\$pe_dir/tile_h5" ]] && mv "\$pe_dir"/tile_h5/* tile_h5/ 2>/dev/null || true
     fi
-    if [ -n "${expected_seg_model}" ]; then
+    mussel_batch.py finish --rc \$rc --log mussel.log --slide-ids '${slide_ids_str}' \
+        --expect '${model_type_input}=pt/{sid}.features.pt' --scan pt --scan h5 --report failed_slides.tsv
+    # Only slides with tiles have a tile H5 (none for a slide without tissue).
+    if [ -n "${expected_seg_model}" ] && compgen -G "tile_h5/*.patch.h5" > /dev/null; then
         validate_tessellation_h5.py \
             --expected-seg-model=${expected_seg_model} \
             tile_h5/*.patch.h5
@@ -212,6 +233,8 @@ process TESSELLATE_FEATURIZE_BATCH {
     n_feat = 8
     is_slide_model = ${is_slide_model ? "True" : "False"}
     for sid in "${stub_slide_ids}".split(","):
+        if sid.startswith("FAIL"):
+            continue  # a slide Mussel failed (or skipped): no outputs, as in TESSELLATE_BATCH's stub
         torch.save(torch.zeros(1, n_feat), f"pt/{sid}.features.pt")
         with h5py.File(f"h5/{sid}.features.h5", "w") as f:
             f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))

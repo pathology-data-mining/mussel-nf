@@ -4,6 +4,13 @@
 It validates the Hydra list arguments before creating the output files. The
 historical regression passed patch_h5_paths as a nested list, which this test
 must reject.
+
+Like Mussel >= 1.6.0, it goes on past failed slides: a slide ID starting with
+FAIL gets no outputs, and the run then exits 1 with Mussel's partial-failure
+message; one starting with EMPTY has no tiles (identity: an empty (0, D)
+.features.h5 and an empty .pt; with a slide encoder only an empty
+.patch_features.h5). When every slide is EMPTY it fails as Mussel does
+("none of the N slide(s) had tiles").
 """
 from __future__ import annotations
 
@@ -63,6 +70,42 @@ def _quoted(value: str) -> str:
     return value[1:-1]
 
 
+failures = {}
+n_empty = 0
+
+
+def _write_features(stem: str, suffix: str, rows: int) -> None:
+    """A features .h5 (and its .pt for .features) with `rows` rows; touch if h5py/torch are missing."""
+    try:
+        import h5py
+        import numpy as np
+        import torch
+    except ImportError:
+        Path(f"{stem}.{suffix}.h5").touch()
+        if suffix == "features":
+            Path(f"{stem}.{suffix}.pt").touch()
+        return
+    with h5py.File(f"{stem}.{suffix}.h5", "w") as f:
+        f.create_dataset("features", data=np.zeros((rows, 8), dtype="float32"))
+        f.create_dataset("coords", data=np.zeros((rows, 2), dtype="int64"))
+    if suffix == "features":
+        torch.save(torch.zeros(rows, 8), f"{stem}.{suffix}.pt")
+
+
+def _write_slide(stem: str, slide_id: str, slide_model: bool, what: str) -> None:
+    global n_empty
+    if slide_id.startswith("FAIL"):
+        failures[what] = "CUDA out of memory (test double)"
+        return
+    if slide_id.startswith("EMPTY"):
+        n_empty += 1
+        _write_features(stem, "patch_features" if slide_model else "features", 0)
+        return
+    _write_features(stem, "features", 1)
+    if slide_model:
+        _write_features(stem, "patch_features", 3)
+
+
 if arguments.get("tile_size_check", "error") not in ("error", "warn", "off"):
     raise AssertionError(f"invalid tile_size_check: {arguments['tile_size_check']!r}")
 
@@ -90,12 +133,10 @@ if "model_types" in arguments:
     for code in model_codes:
         Path(code).mkdir(exist_ok=True)
         for slide_id in slide_ids:
-            Path(f"{code}/{slide_id}.features.pt").touch()
-            Path(f"{code}/{slide_id}.features.h5").touch()
+            _write_slide(f"{code}/{slide_id}", slide_id, slide_model=False, what=f"{slide_id} ({code.upper()})")
 else:
     for slide_id in slide_ids:
-        Path(f"{slide_id}.features.pt").touch()
-        Path(f"{slide_id}.features.h5").touch()
+        _write_slide(slide_id, slide_id, slide_model="slide_model_type" in arguments, what=slide_id)
 
 if "timings_path" in arguments:
     raise AssertionError("timings_path must be passed as ++timings_path (older Mussel lacks the key)")
@@ -106,3 +147,14 @@ if "++timings_path" in arguments:
         for slide_id in slide_ids:
             fh.write(json.dumps({"stage": "patch_features", "slide": slide_id, "start": time.time(),
                                  "end": time.time(), "seconds": 0.0}) + "\n")
+
+if failures:
+    listed = "; ".join(f"{name}: {reason}" for name, reason in failures.items())
+    total = len(slide_ids) * (len(model_codes) if "model_types" in arguments else 1)
+    print(f"RuntimeError: {len(failures)} of {total} slide(s) failed (the others' outputs were written): {listed}",
+          file=sys.stderr)
+    sys.exit(1)
+if n_empty and n_empty == len(slide_ids) * (len(model_codes) if "model_types" in arguments else 1):
+    print(f"RuntimeError: none of the {len(slide_ids)} slide(s) had tiles, so no output files were written",
+          file=sys.stderr)
+    sys.exit(1)

@@ -929,6 +929,10 @@ class NextflowRunner:
                     FINALIZATION_QUEUED_STATUS,
                     "HOOKS_RUNNING",
                     "HOOKS_RETRY",
+                    # Quarantined until an operator acts; the agent no longer
+                    # refreshes its heartbeat, so holding the slot would block
+                    # this pool until the stale timeout (or forever).
+                    "HOOKS_BLOCKED",
                 }:
                     # The remote agent owns post-success finalization from this
                     # point onward. Release this dispatcher execution slot so
@@ -947,6 +951,10 @@ class NextflowRunner:
                     exit_code = int(raw_exit_code) if raw_exit_code is not None else (
                         0 if remote_status == "SUCCEEDED" else -1
                     )
+                    if remote_status != "SUCCEEDED" and exit_code == 0:
+                        # Only SUCCEEDED may clean up as a success, whatever exit
+                        # code the agent published (sacct reports 0:0 for jobs Slurm ended).
+                        exit_code = -1
                     break
                 heartbeat = status.get("heartbeat_at")
                 # QUEUED is a normal pre-claim state.  Its heartbeat is the

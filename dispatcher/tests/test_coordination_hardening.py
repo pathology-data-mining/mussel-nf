@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import pytest
 import time
 from threading import Event
 from unittest.mock import MagicMock, patch
@@ -545,7 +546,10 @@ def test_live_success_finalization_does_not_hold_nextflow_slot(tmp_path):
         manager.shutdown(wait=True)
 
 
-def test_remote_waiter_releases_slot_when_agent_starts_finalization(tmp_path):
+@pytest.mark.parametrize("remote_status", ["HOOKS_RUNNING", "HOOKS_BLOCKED"])
+def test_remote_waiter_releases_slot_when_agent_starts_finalization(tmp_path, remote_status):
+    # HOOKS_BLOCKED too: the agent stops heartbeating a quarantined batch, so a held
+    # slot would block the pool until the stale timeout, or forever.
     cfg = Config(
         nextflow_profiles="standard",
         outdir=str(tmp_path),
@@ -555,7 +559,7 @@ def test_remote_waiter_releases_slot_when_agent_starts_finalization(tmp_path):
         cleanup_work_dir=False,
     )
     client = MagicMock()
-    client.read_status.return_value = {"status": "HOOKS_RUNNING"}
+    client.read_status.return_value = {"status": remote_status}
     runner = NextflowRunner(
         cfg,
         "remote-batch",
@@ -665,3 +669,31 @@ def test_global_dispatch_limit_is_logged_once_per_change(caplog):
     lines = [r.getMessage() for r in caplog.records if "Fresh dispatch" in r.getMessage()]
     assert lines == ["Fresh dispatch blocked: 5 active batch(es) in DB >= effective max 5",
                      "Fresh dispatch no longer at the global limit: 4 active batch(es) < 5"]
+
+
+
+@pytest.mark.parametrize("remote_status", ["FAILED", "CANCELLED"])
+def test_remote_waiter_never_treats_a_failed_batch_as_success(tmp_path, remote_status):
+    # sacct's 0:0 for a job Slurm ended used to reach the waiter as nextflow_exit=0,
+    # and the failed batch was cleaned up as a success.
+    cfg = Config(
+        nextflow_profiles="standard",
+        outdir=str(tmp_path),
+        execution_backend="remote_agent",
+        default_dispatch_target="hpc",
+        dispatch_targets=[RemoteTargetConfig(name="hpc")],
+        cleanup_work_dir=False,
+    )
+    client = MagicMock()
+    client.read_status.return_value = {"status": remote_status, "nextflow_exit": 0}
+    runner = NextflowRunner(
+        cfg, "remote-batch", [], MagicMock(), resume=True,
+        existing_csv_path=str(tmp_path / "batch.csv"),
+        existing_work_dir=str(tmp_path / "work"),
+    )
+    runner._cleanup = MagicMock()
+
+    with patch("mussel_dispatcher.runner.RemoteDispatchClient", return_value=client):
+        assert runner._run_remote_agent() != 0
+
+    assert runner._cleanup.call_args.kwargs["succeeded"] is False

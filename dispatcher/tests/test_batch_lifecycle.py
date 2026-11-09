@@ -714,3 +714,77 @@ def test_dispatcher_hooks_run_through_the_launcher(tmp_path):
     assert PostBatchHooks(cfg, "batch-1", state).run(str(batch_csv), phase="wds", executor=executor)
     assert calls[0][1:] == [LAUNCHER, "--release", str(package.parent), "mussel_dispatcher.wds",
                             f"--slide-ids-csv={batch_csv}"]
+
+
+@pytest.mark.parametrize("slurm_state,exit_code,recorded,infra", [
+    ("DEADLINE", 1, 1, True), ("OOM", 137, 137, True), ("REVOKED", 1, 1, True),
+    ("CANCELLED+", 15, 15, True),
+    # sacct reports 0:0 for jobs Slurm ended: the batch must still fail, uncharged.
+    ("DEADLINE", 0, -1, True), ("CANCELLED", 0, -1, True), ("FAILED", 0, -1, False),
+])
+def test_every_terminal_driver_state_ends_the_batch(tmp_path, slurm_state, exit_code, recorded, infra):
+    # DEADLINE/OOM/REVOKED used to fall through to RUNNING and leave the batch running forever.
+    agent, state = make_remote_agent(tmp_path)
+    order = {"batch_id": "batch-1", "remote_run_dir": str(tmp_path / "remote" / "batch-1")}
+    state.read_remote_agent.return_value = {}
+    state.get_remote_batches_for_target.return_value = [order]
+    state.read_remote_status.return_value = {"status": "RUNNING", "driver_job_id": "123"}
+    agent._driver_slurm_state = MagicMock(return_value={"state": slurm_state, "exit_code": exit_code})
+    agent._cleanup_remote_work_dir = MagicMock()
+    agent._batch_still_owns_dispatched_slides = lambda order: True
+
+    agent._refresh_claimed_orders()
+
+    state.complete_batch.assert_called_once_with("batch-1", recorded)
+    published = [c.args[1] for c in state.write_remote_status.call_args_list
+                 if c.args[1].get("status") in {"FAILED", "CANCELLED"}]
+    assert published and all(p["nextflow_exit"] == recorded for p in published)
+    # Infrastructure failures release the slides without charging them a retry.
+    assert state.mark_slides_complete.call_args.kwargs["charge_fail_count"] is (not infra)
+
+
+def _completed(cmd, rc=0, out="", err=""):
+    return subprocess.CompletedProcess(cmd, rc, out, err)
+
+
+@pytest.mark.parametrize("squeue,sacct,want", [
+    # Controller unreachable: says nothing about the job.
+    ((1, "", "slurm_load_jobs error: Unable to contact slurm controller"), (0, "", ""), "UNKNOWN"),
+    # Finished job: squeue says invalid id; slurmdbd down: still nothing known.
+    ((1, "", "slurm_load_jobs error: Invalid job id specified"), (1, "", "Connection refused"), "UNKNOWN"),
+    # Both answered and neither knows the job: it is really gone.
+    ((1, "", "slurm_load_jobs error: Invalid job id specified"), (0, "", ""), "MISSING"),
+    ((0, "", ""), (0, "COMPLETED|0:0|node1\n", ""), "COMPLETED"),
+])
+def test_hook_slurm_state_tells_query_failures_from_missing_jobs(tmp_path, monkeypatch, squeue, sacct, want):
+    agent, _state = make_remote_agent(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        rc, out, err = squeue if cmd[0] == "squeue" else sacct
+        return _completed(cmd, rc, out, err)
+
+    monkeypatch.setattr("mussel_dispatcher.remote.subprocess.run", fake_run)
+    assert agent._hook_slurm_state("123")["state"] == want
+
+
+def test_missing_hook_job_waits_for_both_grace_and_polls(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    agent, state = make_remote_agent(tmp_path)
+    agent._hook_executor_missing_polls = {}
+    agent._agent_revision = "rev"
+    agent._hook_slurm_state = lambda job_id: {"state": "MISSING", "source": "sacct"}
+    row = {"batch_id": "batch-1", "hook_index": 0, "executor_job_id": "123", "active_attempt_number": 1}
+    state.get_active_hook_executors.return_value = [row]
+
+    def poll(missing_for_seconds):
+        row["executor_missing_since"] = (datetime.now(timezone.utc)
+                                         - timedelta(seconds=missing_for_seconds)).isoformat()
+        agent._last_hook_reconcile_at = 0
+        agent._reconcile_hook_executors()
+
+    for _ in range(5):            # past the poll limit (3) but well inside the 900 s grace
+        poll(60)
+    state.complete_batch_hook.assert_not_called()
+    poll(1000)                    # grace and polls both exceeded
+    assert state.complete_batch_hook.call_count == 1

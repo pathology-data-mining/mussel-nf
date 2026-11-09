@@ -74,6 +74,12 @@ _SLURM_TERMINAL_STATES = frozenset({
     "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
     "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OOM", "REVOKED",
 })
+# Terminal states that say nothing against the slides themselves: their slides are
+# released without being charged a retry. One set for every place that classifies.
+_SLURM_INFRASTRUCTURE_FAILURES = frozenset({
+    "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL",
+    "DEADLINE", "OOM", "REVOKED",
+})
 log = logging.getLogger("mussel-dispatcher")
 
 
@@ -1018,6 +1024,10 @@ class RemoteAgent:
             states = [line.strip() for line in sq.stdout.splitlines() if line.strip()]
             if states:
                 return {"state": states[0].split()[0].rstrip("+"), "source": "squeue"}
+            # A finished job makes squeue exit non-zero with "Invalid job id"; any
+            # other failure (controller down, timeout) says nothing about the job.
+            if sq.returncode and "invalid job id" not in (sq.stderr or "").lower():
+                return {"state": "UNKNOWN", "source": "squeue", "error": (sq.stderr or "").strip()[-300:]}
         except FileNotFoundError as exc:
             return {"state": "UNKNOWN", "source": "squeue", "error": str(exc)}
         except Exception as exc:
@@ -1028,6 +1038,9 @@ class RemoteAgent:
                  "--format=State,ExitCode,NodeList", "--parsable2"],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
             )
+            if sa.returncode:
+                # slurmdbd unavailable: no rows is not evidence the job is gone.
+                return {"state": "UNKNOWN", "source": "sacct", "error": (sa.stderr or "").strip()[-300:]}
             for line in sa.stdout.splitlines():
                 fields = [part.strip() for part in line.split("|")]
                 if not fields or not fields[0]:
@@ -1074,7 +1087,7 @@ class RemoteAgent:
         active_states = {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED", "REQUEUED"}
         terminal_states = {
             "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
-            "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OOM",
+            "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OOM", "REVOKED",
         }
         missing_grace = max(30, int(getattr(self.cfg, "hook_executor_missing_grace_seconds", 900) or 900))
         missing_polls_limit = max(1, int(getattr(self.cfg, "hook_executor_missing_polls", 3) or 3))
@@ -1118,7 +1131,10 @@ class RemoteAgent:
                     missing_age = max(0.0, (now - missing_at).total_seconds())
                 except ValueError:
                     missing_age = 0.0
-                if missing_age < missing_grace and polls < missing_polls_limit:
+                # Fail the hook only after BOTH the grace period and the poll count:
+                # a job that briefly drops out of squeue/sacct must not be re-run
+                # while it may still be appending.
+                if missing_age < missing_grace or polls < missing_polls_limit:
                     continue
                 completed = self.state.complete_batch_hook(
                     batch_id, hook_index, exit_code=1,
@@ -1723,7 +1739,8 @@ class RemoteAgent:
             "slurm": slurm_state,
         }
         self._attach_remote_log_tail(order, status, update)
-        state = slurm_state.get("state")
+        raw_state = str(slurm_state.get("state") or "").split()
+        state = raw_state[0].rstrip("+") if raw_state else None   # "CANCELLED by 123", "CANCELLED+"
         if state in {"COMPLETED"}:
             self.state.mark_driver_terminal(batch_id, 0)
             self._cleanup_remote_work_dir(order)
@@ -1781,14 +1798,17 @@ class RemoteAgent:
             if not hasattr(self, "_finalization_lease_names"):
                 self._finalization_lease_names = {}
             self._finalization_lease_names[batch_id] = lease_name
-        elif state in {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL"}:
+        elif state in _SLURM_TERMINAL_STATES - {"COMPLETED"}:
+            # Every terminal state, as for hook jobs: DEADLINE, OOM or REVOKED used
+            # to fall through to RUNNING and leave the batch running forever.
             update["status"] = "CANCELLED" if state == "CANCELLED" else "FAILED"
-            update["nextflow_exit"] = slurm_state.get("exit_code", -1)
+            # sacct often reports 0:0 for a job Slurm ended (CANCELLED, TIMEOUT,
+            # DEADLINE, REVOKED). A failed batch must never publish exit 0: the
+            # dispatcher's waiter would clean it up as a success.
+            update["nextflow_exit"] = slurm_state.get("exit_code") or -1
             update["failure_class"] = (
-                "SLURM_INFRASTRUCTURE" if state in {
-                    "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
-                    "PREEMPTED", "BOOT_FAIL",
-                } else "SLURM_EXECUTION"
+                "SLURM_INFRASTRUCTURE" if state in _SLURM_INFRASTRUCTURE_FAILURES
+                else "SLURM_EXECUTION"
             )
             update["error"] = f"driver job ended with Slurm state {state}"
         elif status.get("cancel_requested_at"):
@@ -1818,10 +1838,7 @@ class RemoteAgent:
                 reason=f"driver ended before hooks: Slurm state {state}",
             )
             slurm_failure = str(state or "").upper()
-            infrastructure_failure = slurm_failure in {
-                "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
-                "PREEMPTED", "BOOT_FAIL",
-            }
+            infrastructure_failure = slurm_failure in _SLURM_INFRASTRUCTURE_FAILURES
             # mark_slides_complete charges fail_count on every call, so a
             # replay after a crash must not run it for already-released
             # slides.

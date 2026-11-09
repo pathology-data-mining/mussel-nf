@@ -368,6 +368,28 @@ def _start_release_controller(
     return thread
 
 
+def _startup_guards(cfg: Config) -> bool:
+    """Checks that must pass before this dispatcher runs anything; logs why not."""
+    # A pinned (content-addressed) container image must be the file its name
+    # promises: a rebuilt one would silently change every embedding.
+    from .image_pins import verify_pinned_images
+    image_problems = verify_pinned_images([cfg.nextflow_config])
+    for problem in image_problems:
+        log.error("Pinned container image mismatch: %s", problem)
+    if image_problems:
+        return False
+    # The checkout must be on the deployment's release branch: one moved to main
+    # would otherwise run unvetted pipeline code here.
+    from .release_pin import verify_release_pin
+    pin_problem, pin_note = verify_release_pin(cfg)
+    if pin_problem:
+        log.error("Refusing to start: %s", pin_problem)
+        return False
+    if pin_note:
+        log.info("Release pin: %s", pin_note)
+    return True
+
+
 def _enable_persistent_dispatcher_logging(cfg: Config) -> str:
     """Attach a persistent file handler for the main dispatcher process."""
     log_path = _dispatcher_log_path(cfg)
@@ -2327,25 +2349,6 @@ def main():
     cfg = Config.load(config_arg)
     log.info("Configuration loaded from %s", config_arg)
 
-    # Refuse to run on a pinned (content-addressed) container image that isn't the file
-    # its name promises: it would silently change every embedding.
-    from .image_pins import verify_pinned_images
-    image_problems = verify_pinned_images([cfg.nextflow_config])
-    if image_problems:
-        for problem in image_problems:
-            log.error("Pinned container image mismatch: %s", problem)
-        sys.exit(1)
-
-    # Refuse to run a revision that is not on the deployment's release branch: a
-    # checkout moved to main would otherwise run unvetted pipeline code here.
-    from .release_pin import verify_release_pin
-    pin_problem, pin_note = verify_release_pin(cfg)
-    if pin_problem:
-        log.error("Refusing to start: %s", pin_problem)
-        sys.exit(1)
-    if pin_note:
-        log.info("Release pin: %s", pin_note)
-
     # Auto-derive tower_endpoint from tower_proxy_port if not explicitly set.
     if not cfg.tower_endpoint and cfg.tower_proxy_port:
         cfg.tower_endpoint = f"http://localhost:{cfg.tower_proxy_port}"
@@ -2357,6 +2360,10 @@ def main():
     os.makedirs(cfg.log_dir, exist_ok=True)
     dispatcher_log_path = _enable_persistent_dispatcher_logging(cfg)
     log.info("Persistent dispatcher log: %s", dispatcher_log_path)
+    # After the log file is attached, so a refusal is in dispatcher.log and not
+    # only in the service journal; before the PID lock or any dispatch state.
+    if not _startup_guards(cfg):
+        sys.exit(1)
 
     # PID lockfile — prevent two dispatcher instances from running simultaneously.
     # Use O_CREAT|O_EXCL for the initial write to atomically detect races.

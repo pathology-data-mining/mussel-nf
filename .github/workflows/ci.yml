@@ -29,6 +29,50 @@ jobs:
       - name: Run pytest
         run: pytest tests/ -v --ignore=tests/testdata
 
+  # ── Dispatcher unit tests (production runs Python 3.12) ───────────────────
+  dispatcher-tests:
+    name: Dispatcher unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dispatcher and test dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy pandas pytest webdataset h5py requests boto3 pyarrow databricks-sdk
+          # Production runs nextflow-turret from this commit (agent/tower-compatibility);
+          # PyPI 0.1.0 predates its 16-character Tower workflow IDs.
+          pip install "nextflow-turret @ git+https://github.com/msk-mind/nextflow-turret@7df7717"
+          pip install -e dispatcher/
+
+      - name: Run dispatcher tests
+        working-directory: dispatcher
+        run: pytest tests/ -q
+
+  # ── Dispatcher syntax on the oldest supported Pythons (requires-python >=3.10) ─
+  dispatcher-syntax:
+    name: Dispatcher syntax (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Compile every dispatcher module
+        run: python -m compileall -q dispatcher/mussel_dispatcher dispatcher/scripts
+
   # ── Linear probe integration test (no GPU, no real slides) ────────────────
   nf-test-linear-probe:
     name: nf-test — linear probe

@@ -62,4 +62,6 @@ tcga_inventory.csv
 tcga_status*.csv
 tcga-slides/
 tcga-slides.txt
+# Python bytecode anywhere (e.g. from compileall in CI or locally)
 __pycache__/
+*.pyc

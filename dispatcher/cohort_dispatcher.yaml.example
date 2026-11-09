@@ -105,7 +105,7 @@ watchers:
   # Requires: pip install databricks-sdk
   #
   - type: databricks
-    warehouse_id: 0b49b7d78734ad5c
+    warehouse_id: your-warehouse-id
     poll_interval_seconds: 86400
     # Provide a SQL query via query_file or inline query string.
     # The query must return: slide_id, slide_path, oncotree_code

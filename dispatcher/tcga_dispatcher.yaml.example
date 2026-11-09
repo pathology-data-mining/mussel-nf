@@ -91,7 +91,7 @@ watchers:
     # See databricks/README.md for setup instructions (create volume, import notebook, create job).
     databricks_volume_folder: /Volumes/your_catalog/your_schema/tcga_dispatcher
     databricks_table: your_catalog.your_schema.tcga_slide_embeddings
-    # databricks_job_id: "12345"   # set to the job ID from: databricks jobs create --json @databricks/jobs/tcga_metadata_sync_job.json
+    # databricks_job_id: "12345"   # set to the job ID from: databricks jobs create --json @databricks/jobs/metadata_sync_job.json
     # databricks_job_id: "12345"
 
 # Any explicit post_batch_hooks run after the auto-generated ones above.

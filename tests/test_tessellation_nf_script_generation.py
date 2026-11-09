@@ -177,3 +177,42 @@ def test_tessellate_validates_written_tiles(tmp_path):
     result = _run_single(tmp_path, fake.format(model="classic"))
     assert result.returncode == 1
     assert "seg_model=classic, expected neural" in result.stderr
+
+
+def _run_batch(tmp_path, fake_body):
+    """TESSELLATE_BATCH's rendered script under bash -ue with a fake tessellate."""
+    import os
+
+    # The Groovy template writes line continuations as "\\" and dollars as "\$".
+    rendered = _extract_batch_script().replace("\\\\\n", "\\\n").replace("\\$", "\x00")
+    rendered = _render(rendered)
+    rendered = re.sub(r"\$\{[^}]*\}", "", rendered).replace("\x00", "$")
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    (fake_bin / "tessellate").write_text("#!/usr/bin/env bash\n" + fake_body)
+    (fake_bin / "tessellate").chmod(0o755)
+    script = tmp_path / ".command.sh"
+    script.write_text(rendered)
+    repo_bin = TESSELLATION_NF.parents[1] / "bin"
+    return subprocess.run(
+        ["bash", "-ue", str(script)], cwd=tmp_path, capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{repo_bin}:{os.environ['PATH']}"},
+    )
+
+
+def test_tessellate_batch_without_patch_h5_does_not_run_the_validator(tmp_path):
+    """No patch H5 written (and tessellate exited 0): don't hand the validator a literal glob."""
+    result = _run_batch(tmp_path, "exit 0\n")
+    assert result.returncode == 0, result.stderr
+    assert "unreadable" not in result.stderr
+
+
+def test_tessellate_batch_still_validates_written_tiles(tmp_path):
+    fake = (
+        "python3 - <<'PY'\nimport h5py, numpy as np\n"
+        "with h5py.File('1001234.patch.h5', 'w') as f:\n"
+        "    f.create_dataset('coords', data=np.zeros((1, 2), dtype='int64')).attrs['seg_model'] = 'classic'\nPY\n"
+    )
+    result = _run_batch(tmp_path, fake)
+    assert result.returncode == 1
+    assert "seg_model=classic, expected neural" in result.stderr

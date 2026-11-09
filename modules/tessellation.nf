@@ -228,7 +228,8 @@ process TESSELLATE_BATCH {
         continue_on_error=true \\
         failures_tsv_path=tessellate_batch_failures.tsv \\
         ${TaskProfile.timingsArg(params.profile_dir)}
-    if [ -n "${expected_seg_model}" ]; then
+    # Validate only what was written: with no patch H5 the glob would stay literal.
+    if [ -n "${expected_seg_model}" ] && compgen -G './*.patch.h5' > /dev/null; then
         validate_tessellation_h5.py \\
             --expected-seg-model=${expected_seg_model} \\
             ./*.patch.h5

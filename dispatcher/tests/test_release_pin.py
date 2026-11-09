@@ -101,3 +101,20 @@ def test_release_controller_reuses_a_pin_refusal_until_head_moves(tmp_path, monk
     controller._pin_block = ("c" * 40, 0.0, "old")                   # window expired
     controller._pin_refusal("c" * 40)
     assert calls == ["b" * 40, "c" * 40, "c" * 40]
+
+
+def test_manual_publish_is_held_to_the_pin(tmp_path, monkeypatch):
+    import pytest
+    from mussel_dispatcher import release
+    work, a, b = _repos(tmp_path)
+    _git(work, "checkout", "-q", "main")                          # HEAD = B, not on release/x
+    cfg = SimpleNamespace(repo_dir=str(work), release_branch="release/x", release_origin_remote="origin")
+    monkeypatch.setattr(release, "_ensure_clean_release", lambda c: None)
+    monkeypatch.setattr(release, "build_contract", lambda c: {
+        "source_revision": b, "release_manifest_sha256": "m", "semantic_contract_sha256": "s"})
+    store = MagicMock()
+    monkeypatch.setattr(release.StateStore, "from_config", staticmethod(lambda c: store))
+
+    with pytest.raises(RuntimeError, match="is not on origin/release/x"):
+        release.publish(cfg, "d")
+    store.publish_deployment_release.assert_not_called()

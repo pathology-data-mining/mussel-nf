@@ -465,6 +465,12 @@ def render_driver_script(order: dict[str, Any], target: RemoteTargetConfig) -> s
     quoted_cmd = " ".join(shlex.quote(str(part)) for part in cmd)
     runtime_checks = _render_runtime_checks(order)
     release_check = _render_release_check(order)
+    # Computed here: a backslash inside an f-string expression is a SyntaxError before 3.12.
+    nxf_dist_line = (
+        f"export NXF_DIST={shlex.quote(target.nextflow_framework_dir)}"
+        if target.nextflow_framework_dir
+        else 'export NXF_DIST="${NXF_DIST:-$HOME/.nextflow/framework}"'
+    )
     return f"""#!/usr/bin/env bash
 #SBATCH --job-name=mussel-driver-{batch_id}
 #SBATCH --partition={target.driver_partition}
@@ -480,7 +486,7 @@ set -euo pipefail
 mkdir -p {shlex.quote(remote_work_dir)} {shlex.quote(remote_outdir)} {shlex.quote(os.path.join(remote_run_dir, target.task_scratch_subdir))}
 cd {shlex.quote(remote_run_dir)}
 export NXF_HOME={shlex.quote(os.path.join(remote_run_dir, ".nextflow"))}
-{f"export NXF_DIST={shlex.quote(target.nextflow_framework_dir)}" if target.nextflow_framework_dir else "export NXF_DIST=\"${NXF_DIST:-$HOME/.nextflow/framework}\""}
+{nxf_dist_line}
 export NXF_WORK={shlex.quote(remote_work_dir)}
 export XDG_CACHE_HOME={shlex.quote(os.path.join(remote_run_dir, ".cache"))}
 {"".join(line + chr(10) for line in env_lines)}
@@ -850,7 +856,22 @@ class RemoteAgent:
                         int(self.target.idle_poll_max_interval_seconds or 300),
                     ),
                 )
-            time.sleep(max(1, self._next_poll_delay))
+            self._idle_sleep(max(1, self._next_poll_delay))
+
+    def _idle_sleep(self, seconds: float, chunk: float = 30.0) -> None:
+        """Sleep between polls, marking main-loop progress as it goes.
+
+        The idle backoff (idle_poll_max_interval_seconds, 300 s by default) reaches the
+        watchdog's stall limit (max(300, agent_heartbeat_timeout_seconds)), so one
+        uninterrupted sleep made an idle agent kill itself. Waiting is not a stall.
+        """
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(chunk, remaining))
+            self._mark_main_loop_progress()
 
     def _release_finalization_lease_safely(
         self, batch_id: str, lease_name: str
@@ -1085,10 +1106,7 @@ class RemoteAgent:
         health["active"] = len(candidates)
         health["active_jobs"] = len(candidates)
         active_states = {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED", "REQUEUED"}
-        terminal_states = {
-            "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
-            "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OOM", "REVOKED",
-        }
+        terminal_states = _SLURM_TERMINAL_STATES
         missing_grace = max(30, int(getattr(self.cfg, "hook_executor_missing_grace_seconds", 900) or 900))
         missing_polls_limit = max(1, int(getattr(self.cfg, "hook_executor_missing_polls", 3) or 3))
         for row in candidates:
@@ -1163,10 +1181,8 @@ class RemoteAgent:
             else:
                 exit_code = int(exit_code or 1)
                 error_msg = f"Slurm hook job {job_id} ended in {state}"
-                category = "SLURM_INFRASTRUCTURE" if state in {
-                    "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
-                    "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OOM",
-                } else "SLURM_EXECUTION"
+                category = ("SLURM_INFRASTRUCTURE" if state in _SLURM_INFRASTRUCTURE_FAILURES
+                            else "SLURM_EXECUTION")
             completed = self.state.complete_batch_hook(
                 batch_id, hook_index, exit_code=exit_code, error_msg=error_msg,
                 failure_category=category, failure_detail=error_msg,

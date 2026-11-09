@@ -70,6 +70,10 @@ def classify_hook_failure(
         "out_of_memory", "slurm hook state=timeout", "slurm hook state=cancelled",
     )):
         return HookOutcome(HookFailureCategory.NODE_INFRA, "node or filesystem failure")
+    if returncode == 2 and "usage:" in text and ": error:" in text:
+        # argparse exits 2 as well (e.g. a release without a newly added flag). That is
+        # a release problem for the circuit breaker, not missing slides to retry.
+        return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "hook command-line usage error")
     if returncode == 2 and "mussel_dispatcher.wds" in hook_command:
         return HookOutcome(HookFailureCategory.COVERAGE_MISSING, "WDS coverage is incomplete")
     if returncode == 78:

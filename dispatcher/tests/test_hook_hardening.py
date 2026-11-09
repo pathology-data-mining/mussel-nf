@@ -435,3 +435,14 @@ def test_hook_config_release_selects_matching_runtime(tmp_path, monkeypatch):
     )
     assert Path(repo_dir) == new_repo
     assert revision == "new-revision"
+
+
+def test_argparse_usage_error_is_a_release_problem_not_missing_coverage():
+    usage = ("usage: wds.py [-h] [--pt-dir PT_DIR]\n"
+             "wds.py: error: unrecognized arguments: --new-flag\n")
+    outcome = classify_hook_failure(2, usage, hook_command="python -m mussel_dispatcher.wds --new-flag")
+    assert outcome.category == HookFailureCategory.RELEASE_OR_CONFIG
+    # A real coverage failure is still coverage.
+    coverage = "ERROR WDS validation failed for optimus: 35 requested slide(s) have no index entry"
+    assert classify_hook_failure(2, coverage, hook_command="python -m mussel_dispatcher.wds").category \
+        == HookFailureCategory.COVERAGE_MISSING

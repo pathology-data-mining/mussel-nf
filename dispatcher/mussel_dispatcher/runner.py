@@ -35,6 +35,13 @@ from .remote import (
 from .state import StateStore
 from .storage import ExecutionArtifactCleaner, ExecutionCleanupSpec
 
+try:
+    import psycopg as _psycopg
+    _TRANSIENT_READ_ERRORS: tuple = (_psycopg.OperationalError, _psycopg.InterfaceError,
+                                     ConnectionError, TimeoutError, OSError)
+except ImportError:  # sqlite-only installs
+    _TRANSIENT_READ_ERRORS = (ConnectionError, TimeoutError, OSError)
+
 # Nextflow run name must match this pattern (validated before launch to catch
 # regressions in name generation before NF rejects them at invocation time).
 _NF_RUN_NAME_RE = re.compile(r'^[a-z](?:[a-z\d]|[-_](?=[a-z\d])){0,79}$')
@@ -209,6 +216,14 @@ class NextflowRunner:
         self._existing_csv_path = existing_csv_path
         self._existing_work_dir = existing_work_dir
         self._shutdown_event = shutdown_event
+        # Whether this batch's work may be running right now: a local Nextflow
+        # process between Popen and its exit, or a remote order the agent owns. A
+        # failed runner's slides are requeued only when this is False (nothing can
+        # still be computing them); a remote batch is re-attached instead.
+        self.work_may_be_running = False
+        # Nextflow exited 0: the outputs exist. A failure after this point must
+        # finish the batch (FINALIZING), never requeue it for a full recompute.
+        self.driver_succeeded = False
         # RunManager supplies this for live runs so the execution worker can
         # return as soon as Nextflow exits. Direct callers retain synchronous
         # finalization for backwards compatibility and recovery tests.
@@ -454,9 +469,11 @@ class NextflowRunner:
                 )
             # Store PID immediately so recover_in_flight() can kill this process
             # if the dispatcher crashes and restarts before this batch completes.
+            self.work_may_be_running = True
             self.state.set_batch_nf_pid(self.batch_id, proc.pid)
             log.debug("Batch %s: NF process PID=%d", self.batch_id, proc.pid)
             exit_code = proc.wait()
+            self.work_may_be_running = False
         except Exception as e:
             log.error("Batch %s failed to launch: %s", self.batch_id, e)
 
@@ -543,9 +560,11 @@ class NextflowRunner:
                             resume_cmd, stdout=lf, stderr=subprocess.STDOUT,
                             cwd=self.cfg.repo_dir, env=run_env, start_new_session=True,
                         )
+                    self.work_may_be_running = True
                     self.state.set_batch_nf_pid(self.batch_id, resume_proc.pid)
                     resume_started_at = time.time()
                     resume_exit = resume_proc.wait()
+                    self.work_may_be_running = False
                     self.state.set_batch_nf_pid(self.batch_id, None)
                     # stop_for_restart_recovery() may have marked the batch
                     # RECOVERING/FINALIZING and SIGTERMed this resume run;
@@ -600,6 +619,7 @@ class NextflowRunner:
                 self.batch_id, batch_duration,
             )
         if exit_code == 0:
+            self.driver_succeeded = True
             log.info("Batch %s completed successfully.", self.batch_id)
             self.state.mark_driver_terminal(self.batch_id, exit_code)
             self._cleanup_execution_artifacts(work_dir)
@@ -904,16 +924,22 @@ class NextflowRunner:
                 nf_run_name=nf_run_name,
                 contract=contract,
             )
+            # From here the agent owns the order, even if writing the log below fails.
+            self.work_may_be_running = True
             with open(log_path, "w") as lf:
                 lf.write(f"Remote batch {self.batch_id} queued for target {target.name}\n")
                 lf.write(f"Work order: {order.get('remote_run_dir')}\n")
 
+        # The order exists (just submitted, or this is a status-driven resume):
+        # the remote agent owns the batch from here on.
+        self.work_may_be_running = True
         target = self.cfg.get_dispatch_target()
         if not target:
             raise RuntimeError("remote batch has no configured dispatch target")
         client = RemoteDispatchClient(self.cfg, target)
         poll_interval = max(1, target.poll_interval_seconds)
         exit_code = -1
+        read_failures = 0
         while True:
             if self._shutdown_event and self._shutdown_event.is_set():
                 log.info(
@@ -922,7 +948,18 @@ class NextflowRunner:
                     self.batch_id,
                 )
                 return 0
-            status = client.read_status(self.batch_id)
+            try:
+                status = client.read_status(self.batch_id)
+                read_failures = 0
+            except _TRANSIENT_READ_ERRORS as exc:
+                # A DB or network blip must not end this waiter. Anything else (a bug,
+                # a schema mismatch) raises; the scheduler re-attaches a fresh waiter.
+                read_failures += 1
+                if read_failures == 1 or read_failures % 30 == 0:
+                    log.warning("Batch %s: reading remote status failed (%d in a row): %s",
+                                self.batch_id, read_failures, exc)
+                time.sleep(poll_interval)
+                continue
             if status:
                 remote_status = status.get("status") or "UNKNOWN"
                 if remote_status in {

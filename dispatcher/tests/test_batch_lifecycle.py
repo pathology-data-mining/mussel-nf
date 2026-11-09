@@ -788,3 +788,32 @@ def test_missing_hook_job_waits_for_both_grace_and_polls(tmp_path):
     state.complete_batch_hook.assert_not_called()
     poll(1000)                    # grace and polls both exceeded
     assert state.complete_batch_hook.call_count == 1
+
+
+def test_idle_sleep_counts_as_main_loop_progress(tmp_path, monkeypatch):
+    # The idle backoff (300 s) reached the watchdog's stall limit (300 s), so an idle
+    # agent used to kill itself.
+    agent, _state = make_remote_agent(tmp_path)
+    marks = []
+    agent._mark_main_loop_progress = lambda: marks.append(1)
+    clock = [0.0]
+    monkeypatch.setattr("mussel_dispatcher.remote.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mussel_dispatcher.remote.time.sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+
+    agent._idle_sleep(300)
+
+    assert clock[0] == 300 and len(marks) == 10          # a mark every 30 s, never a 300 s gap
+
+
+def test_revoked_hook_job_is_an_infrastructure_failure(tmp_path):
+    agent, state = make_remote_agent(tmp_path)
+    agent._hook_executor_missing_polls = {}
+    agent._agent_revision = "rev"
+    agent._last_hook_reconcile_at = 0
+    agent._hook_slurm_state = lambda job_id: {"state": "REVOKED", "exit_code": 0, "source": "sacct"}
+    state.get_active_hook_executors.return_value = [
+        {"batch_id": "batch-1", "hook_index": 0, "executor_job_id": "123", "active_attempt_number": 1}]
+
+    agent._reconcile_hook_executors()
+
+    assert state.complete_batch_hook.call_args.kwargs["failure_category"] == "SLURM_INFRASTRUCTURE"

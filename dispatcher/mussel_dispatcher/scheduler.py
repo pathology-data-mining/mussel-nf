@@ -36,10 +36,17 @@ from .storage import (
 log = logging.getLogger("mussel-dispatcher")
 
 _SLURM_JOB_ID_RE = re.compile(r"\bjobId:\s*(\d+)\b")
-_SLURM_PROCESSES = (
-    "MUSSEL:EXTRACT_FEATURES:TESSELLATE",
-    "MUSSEL:EXTRACT_FEATURES:FEATURIZE_BATCH",
-)
+_SLURM_SUBMITTED_RE = re.compile(r"\[SLURM\] submitted process (.+?) > jobId:")
+# Processes (the last component of a task name, without its index) that run on the
+# cluster. Only the trace fallback uses this: there native_id is a PID for local-executor
+# tasks, and scancel must never be given a PID. The Nextflow log's "[SLURM] submitted
+# process" lines are authoritative and need no list.
+_SLURM_PROCESSES = frozenset({
+    "TESSELLATE", "TESSELLATE_BATCH", "TESSELLATE_FEATURIZE_BATCH",
+    "FEATURIZE_BATCH", "FEATURIZE_BATCH_PATCH", "FEATURIZE_BATCH_SLIDE", "FILTER_FEATURIZE",
+    "FEATURIZE_PATCH_MULTI", "DERIVE_TILE_GRID",
+})
+
 _STARTUP_PRIORITY_SYNC_MAX_PENDING = 50000
 _DB_SWEEP_MAX_PENDING = 2000
 _STARTUP_REQUEUE_MAX_PENDING = 5000
@@ -539,35 +546,53 @@ def _batch_run_started_at(batch: dict) -> float:
         return 0.0
 
 
+def _process_of(task_name: str) -> str:
+    """'MUSSEL:EXTRACT_FEATURES:TESSELLATE_PATCHES:TESSELLATE_BATCH (3)' -> 'TESSELLATE_BATCH'."""
+    return task_name.split(" (", 1)[0].rsplit(":", 1)[-1].strip()
+
+
 def _collect_slurm_job_ids(trace_path: str | None = None, nf_log_path: str | None = None) -> list[str]:
-    """Collect SLURM job IDs submitted by a single Nextflow batch."""
+    """Collect SLURM job IDs submitted by a single Nextflow batch.
+
+    Every "[SLURM] submitted process" line in the batch's Nextflow log is one of its
+    cluster jobs, whatever the process. Trace rows count for tasks the log saw
+    submitted or for known cluster processes (_SLURM_PROCESSES), except when the log
+    was read and shows no Slurm submissions at all: that is a local executor, whose
+    native_ids are PIDs that scancel must never see.
+    """
     job_ids: set[str] = set()
+    slurm_tasks: set[str] = set()
+    log_read = False
+
+    if nf_log_path:
+        try:
+            with open(nf_log_path) as f:
+                log_read = True
+                for line in f:
+                    if "[SLURM] submitted process" not in line:
+                        continue
+                    match = _SLURM_JOB_ID_RE.search(line)
+                    if match:
+                        job_ids.add(match.group(1))
+                    task = _SLURM_SUBMITTED_RE.search(line)
+                    if task:
+                        slurm_tasks.add(task.group(1).strip())
+        except OSError:
+            pass
 
     if trace_path:
         try:
             with open(trace_path, newline="") as f:
                 reader = csv.DictReader(f, delimiter="\t")
                 for row in reader:
-                    name = row.get("name") or ""
-                    if not any(proc in name for proc in _SLURM_PROCESSES):
+                    name = (row.get("name") or "").strip()
+                    if log_read and not job_ids:
+                        continue                      # local executor: native_id is a PID
+                    if name not in slurm_tasks and _process_of(name) not in _SLURM_PROCESSES:
                         continue
                     native_id = (row.get("native_id") or "").strip()
                     if native_id.isdigit():
                         job_ids.add(native_id)
-        except OSError:
-            pass
-
-    if nf_log_path:
-        try:
-            with open(nf_log_path) as f:
-                for line in f:
-                    if "[SLURM] submitted process" not in line:
-                        continue
-                    if not any(proc in line for proc in _SLURM_PROCESSES):
-                        continue
-                    match = _SLURM_JOB_ID_RE.search(line)
-                    if match:
-                        job_ids.add(match.group(1))
         except OSError:
             pass
 
@@ -1171,6 +1196,7 @@ class RunManager:
         # the DB.  BatchScheduler._requeue_db_pending() excludes these IDs so that
         # the 60-second sweep never re-enqueues slides that are mid-submission.
         self._in_flight: dict[str, set] = {}
+        self._remote_reattach_attempts: dict[str, int] = {}
         self._lock = threading.Lock()
         # Semaphore that serialises concurrency decisions atomically.
         # Every submit() / submit_resume() acquires one permit; _on_done() releases
@@ -1312,7 +1338,7 @@ class RunManager:
                         except Exception:
                             age = None
                     if age is None or age > int(target_cfg.agent_heartbeat_timeout_seconds or 300):
-                        blockers.append({"code": "AGENT_HEARTBEAT_STALE", "message": f"remote agent heartbeat is {age if age is not None else "unknown"} seconds old"})
+                        blockers.append({"code": "AGENT_HEARTBEAT_STALE", "message": f"remote agent heartbeat is {age if age is not None else 'unknown'} seconds old"})
                     storage = agent.get("storage") if isinstance(agent.get("storage"), dict) else None
                     if storage and storage.get("paused"):
                         blockers.append({"code": "STORAGE_BELOW_THRESHOLD", "message": f"remote target {pool.target} capacity guard is paused", "details": storage.get("paths", [])})
@@ -1464,10 +1490,57 @@ class RunManager:
             self._in_flight[batch_id] = slide_ids
             future: Future = self._executor.submit(self._run_runner, runner)
             self._futures[batch_id] = future
-        future.add_done_callback(lambda f: self._on_done(batch_id, f))
+        future.add_done_callback(lambda f, r=runner: self._on_done(batch_id, f, r))
         return True
 
-    def submit_resume(self, batch_id: str, csv_path: str, work_dir: str) -> bool:
+    _REMOTE_REATTACH_LIMIT = 3
+    _REMOTE_REATTACH_DELAY_SECONDS = 60
+
+    def _reattach_remote_waiter(self, batch_id: str, batch: dict) -> None:
+        """Resume waiting on a remote batch whose waiter failed, a few times at most."""
+        attempts = self._remote_reattach_attempts.get(batch_id, 0) + 1
+        self._remote_reattach_attempts[batch_id] = attempts
+        if attempts > self._REMOTE_REATTACH_LIMIT:
+            log.error(
+                "Batch %s: remote waiter failed %d times; leaving the batch to the agent and "
+                "to restart recovery (its slot is free).", batch_id, attempts - 1)
+            return
+        log.warning("Batch %s: remote waiter failed; re-attaching in %ds (attempt %d of %d)",
+                    batch_id, self._REMOTE_REATTACH_DELAY_SECONDS, attempts, self._REMOTE_REATTACH_LIMIT)
+
+        def reattach() -> None:
+            if self._shutdown_event.is_set():
+                return
+            try:
+                current = self.state.get_batch(batch_id) or {}
+            except Exception:
+                current = {"status": "RUNNING"}         # unsure: keep trying
+            if current.get("status") not in ("RUNNING", "RECOVERING"):
+                self._remote_reattach_attempts.pop(batch_id, None)
+                return                                  # finished meanwhile: nothing to wait on
+            try:
+                resumed = self.submit_resume(batch_id, str(batch.get("csv_path") or ""),
+                                             str(batch.get("work_dir") or ""), allow_stale=True)
+            except RuntimeError as exc:
+                # The executor shut down between the check above and here.
+                log.info("Batch %s: not re-attaching its remote waiter (%s)", batch_id, exc)
+                return
+            if resumed:
+                return
+            # No free slot right now: try again later. Not an attempt; only waiter
+            # failures count toward the limit.
+            log.info("Batch %s: no free slot to re-attach its remote waiter; retrying in %ds",
+                     batch_id, self._REMOTE_REATTACH_DELAY_SECONDS)
+            schedule()
+
+        def schedule() -> None:
+            timer = threading.Timer(self._REMOTE_REATTACH_DELAY_SECONDS, reattach)
+            timer.daemon = True
+            timer.start()
+
+        schedule()
+
+    def submit_resume(self, batch_id: str, csv_path: str, work_dir: str, *, allow_stale: bool = False) -> bool:
         """Re-submit an interrupted batch using the existing work dir and -resume.
         Returns False if at the concurrency limit or if the batch is stale (>24h old)."""
         # Reject batches whose batch_id timestamp is older than 24 hours.
@@ -1477,7 +1550,7 @@ class RunManager:
             from datetime import timezone as _tz
             id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
             age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
-            if age_hours > 24:
+            if age_hours > 24 and not allow_stale:
                 log.warning("submit_resume: rejecting stale batch %s (created %.1fh ago) — "
                             "resetting slides to PENDING", batch_id, age_hours)
                 self.state.reset_dispatched_to_pending(batch_id)
@@ -1506,7 +1579,7 @@ class RunManager:
         with self._lock:
             future: Future = self._executor.submit(self._run_runner, runner)
             self._futures[batch_id] = future
-        future.add_done_callback(lambda f: self._on_done(batch_id, f))
+        future.add_done_callback(lambda f, r=runner: self._on_done(batch_id, f, r))
         return True
 
     def submit_finalize_recovered_success(
@@ -1620,7 +1693,7 @@ class RunManager:
                 self._finalization_pool.pop_outcome(batch_id)
                 self._close_worker_state_connection()
 
-    def _on_done(self, batch_id: str, future: Future):
+    def _on_done(self, batch_id: str, future: Future, runner: "NextflowRunner | None" = None):
         with self._lock:
             self._futures.pop(batch_id, None)
             self._in_flight.pop(batch_id, None)
@@ -1628,6 +1701,7 @@ class RunManager:
         self._invalidate_active_batch_count_cache()
         try:
             future.result()
+            self._remote_reattach_attempts.pop(batch_id, None)   # the cap is per incident
         except Exception as e:
             try:
                 active_rows = {
@@ -1638,9 +1712,25 @@ class RunManager:
                     self._shutdown_event.is_set()
                     and batch.get("status") in {"RECOVERING", "FINALIZING"}
                 )
-                if batch_id in active_rows and not shutdown_recovery and not self.state.get_batch_nf_pid(batch_id):
+                # Requeue only when nothing can still be computing these slides. nf_pid
+                # is not that signal: a remote batch never records one. A runner that
+                # predates the flag falls back to it.
+                running = getattr(runner, "work_may_be_running", None)
+                if running is None:
+                    running = bool(self.state.get_batch_nf_pid(batch_id))
+                if (batch_id in active_rows and not shutdown_recovery and not running
+                        and getattr(runner, "driver_succeeded", False)):
+                    # Nextflow finished: the outputs exist. Hand the batch to the
+                    # finalization retry instead of requeueing a full recompute.
                     log.warning(
-                        "Batch %s died before Nextflow startup completed; resetting slides to "
+                        "Batch %s: runner failed after Nextflow succeeded; marking it "
+                        "FINALIZING for the finalization retry.",
+                        batch_id,
+                    )
+                    self.state.set_batch_status(batch_id, "FINALIZING")
+                elif batch_id in active_rows and not shutdown_recovery and not running:
+                    log.warning(
+                        "Batch %s failed with no work running; resetting slides to "
                         "PENDING and marking batch FAILED.",
                         batch_id,
                     )
@@ -1649,6 +1739,16 @@ class RunManager:
                     self.state.skip_unstarted_batch_hooks(
                         batch_id,
                         reason="driver failed before hooks started",
+                    )
+                elif batch_id in active_rows and not shutdown_recovery and batch.get("backend") == "remote_agent":
+                    # The agent still runs it: attach a fresh waiter instead of
+                    # requeueing (a double run) or orphaning it until restart.
+                    self._reattach_remote_waiter(batch_id, batch)
+                elif batch_id in active_rows and not shutdown_recovery:
+                    log.warning(
+                        "Batch %s: runner failed while its Nextflow process may still be "
+                        "running; leaving it to the stuck-batch watchdog (nf_pid is set).",
+                        batch_id,
                     )
             except Exception as cleanup_exc:
                 log.error("Batch %s cleanup after startup failure also failed: %s", batch_id, cleanup_exc)

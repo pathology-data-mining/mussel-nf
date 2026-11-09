@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from concurrent.futures import Future
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -2222,6 +2223,113 @@ class TestBatchSchedulerConcurrencyGuard:
 
         run_manager.shutdown(wait=False)
 
+    @pytest.mark.parametrize("backend,running,succeeded,expect", [
+        ("local", False, False, "requeued"),         # never started, or Nextflow failed
+        ("local", False, True, "finalizing"),        # Nextflow succeeded: finish, never recompute
+        ("local", True, False, "left"),              # process alive: the nf_pid watchdog owns it
+        ("remote_agent", True, False, "reattached"), # the agent still runs it: a fresh waiter
+    ])
+    def test_on_done_requeues_only_when_no_work_can_be_running(self, tmp_path, monkeypatch,
+                                                               backend, running, succeeded, expect):
+        # A remote batch never records an nf_pid, so a waiter failure (e.g. a DB error
+        # while polling the agent) used to requeue slides the agent was still running.
+        cfg = make_config(max_concurrent_runs=2)
+        state = StateStore(str(tmp_path / "s.db"))
+        state.add_slide("/slides/a.svs", "a")
+        state.add_batch("b1", "/c1", "/w1", 1, "/l1")
+        state.mark_dispatched(["/slides/a.svs"], "b1")
+        state._conn().execute("UPDATE batches SET backend=? WHERE batch_id='b1'", (backend,))
+        state._conn().commit()
+        run_manager = RunManager(cfg, state)
+        reattached = []
+        monkeypatch.setattr(run_manager, "_reattach_remote_waiter", lambda b, row: reattached.append(b))
+        future = Future()
+        future.set_exception(RuntimeError("db blip"))
+        assert run_manager._slots.acquire(blocking=False)
+        run_manager._futures["b1"] = future
+
+        run_manager._on_done("b1", future, SimpleNamespace(work_may_be_running=running,
+                                                            driver_succeeded=succeeded))
+
+        slide = state._conn().execute("SELECT status FROM slides WHERE slide_path='/slides/a.svs'").fetchone()
+        batch = state._conn().execute("SELECT status FROM batches WHERE batch_id='b1'").fetchone()
+        if expect == "requeued":
+            assert slide["status"] == "PENDING" and batch["status"] == "FAILED" and not reattached
+        elif expect == "finalizing":
+            assert slide["status"] == "DISPATCHED" and batch["status"] == "FINALIZING" and not reattached
+        else:
+            assert slide["status"] == "DISPATCHED" and batch["status"] == "RUNNING"
+            assert reattached == (["b1"] if expect == "reattached" else [])
+        run_manager.shutdown(wait=False)
+
+    def test_remote_reattach_waits_for_a_free_slot_without_spending_attempts(self, tmp_path, monkeypatch):
+        cfg = make_config(max_concurrent_runs=2)
+        state = MagicMock()
+        state.get_batch.return_value = {"status": "RUNNING"}
+        run_manager = RunManager(cfg, state)
+        answers = iter([False, False, True])                 # busy, busy, then a slot frees up
+        calls = []
+        monkeypatch.setattr(run_manager, "submit_resume",
+                            lambda b, c, w, allow_stale=False: calls.append(b) or next(answers))
+        run_manager._REMOTE_REATTACH_DELAY_SECONDS = 0
+        run_manager._reattach_remote_waiter("b1", {"csv_path": "/c", "work_dir": "/w"})
+        deadline = time.time() + 5
+        while len(calls) < 3 and time.time() < deadline:
+            time.sleep(0.05)
+        assert calls == ["b1"] * 3 and run_manager._remote_reattach_attempts["b1"] == 1
+        run_manager.shutdown(wait=False)
+
+    def test_remote_reattach_stops_once_the_batch_is_done(self, tmp_path, monkeypatch):
+        cfg = make_config(max_concurrent_runs=2)
+        state = MagicMock()
+        state.get_batch.return_value = {"status": "SUCCEEDED"}
+        run_manager = RunManager(cfg, state)
+        calls = []
+        monkeypatch.setattr(run_manager, "submit_resume", lambda *a, **k: calls.append(1) or False)
+        run_manager._REMOTE_REATTACH_DELAY_SECONDS = 0
+        run_manager._reattach_remote_waiter("b1", {"csv_path": "/c", "work_dir": "/w"})
+        time.sleep(0.3)
+        assert calls == []
+        run_manager.shutdown(wait=False)
+
+    def test_remote_reattach_survives_shutdown_and_forgets_finished_batches(self, tmp_path, monkeypatch):
+        cfg = make_config(max_concurrent_runs=2)
+        state = MagicMock()
+        state.get_batch.return_value = {"status": "RUNNING"}
+        run_manager = RunManager(cfg, state)
+        errors = []
+        monkeypatch.setattr(threading, "excepthook", lambda args: errors.append(args.exc_value))
+        def shut_down(*a, **k):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+        monkeypatch.setattr(run_manager, "submit_resume", shut_down)
+        run_manager._REMOTE_REATTACH_DELAY_SECONDS = 0
+        run_manager._reattach_remote_waiter("b1", {"csv_path": "/c", "work_dir": "/w"})
+        time.sleep(0.3)
+        assert errors == []                                   # no traceback from the timer thread
+        state.get_batch.return_value = {"status": "SUCCEEDED"}
+        run_manager._reattach_remote_waiter("b2", {"csv_path": "/c", "work_dir": "/w"})
+        time.sleep(0.3)
+        assert "b2" not in run_manager._remote_reattach_attempts
+        run_manager.shutdown(wait=False)
+
+    def test_remote_reattach_is_capped(self, tmp_path, monkeypatch):
+        cfg = make_config(max_concurrent_runs=2)
+        state = MagicMock()
+        state.get_batch.return_value = {"status": "RUNNING"}
+        run_manager = RunManager(cfg, state)
+        resumes = []
+        monkeypatch.setattr(run_manager, "submit_resume",
+                            lambda b, c, w, allow_stale=False: resumes.append(allow_stale) or True)
+        run_manager._REMOTE_REATTACH_DELAY_SECONDS = 0
+        for _ in range(run_manager._REMOTE_REATTACH_LIMIT + 2):
+            run_manager._reattach_remote_waiter("b1", {"csv_path": "/c", "work_dir": "/w"})
+        deadline = time.time() + 5
+        while len(resumes) < run_manager._REMOTE_REATTACH_LIMIT and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)
+        assert resumes == [True] * run_manager._REMOTE_REATTACH_LIMIT   # capped, stale guard bypassed
+        run_manager.shutdown(wait=False)
+
     def test_count_active_batches_uses_short_cache(self):
         cfg = make_config(max_concurrent_runs=2)
         state = MagicMock()
@@ -2699,6 +2807,10 @@ class TestSlurmJobCancellation:
             "2\tcc/dd\t3546207\tMUSSEL:EXTRACT_FEATURES:TESSELLATE (48)\tCOMPLETED\n"
             "3\tee/ff\t3548007\tMUSSEL:EXTRACT_FEATURES:FEATURIZE_BATCH (48)\tRUNNING\n"
             "4\tgg/hh\tlocalpid\tMUSSEL:EXTRACT_FEATURES:FEATURIZE_BATCH (49)\tRUNNING\n"
+            # A run with DERIVE_TILE_GRID on the cluster; it used to be missed.
+            "5\tii/jj\t3549001\tMUSSEL:EXTRACT_FEATURES:TESSELLATE_PATCHES:DERIVE_TILE_GRID (2)\tRUNNING\n"
+            # A local-executor task: native_id is a PID and must never reach scancel.
+            "6\tkk/ll\t4321\tMUSSEL:EXTRACT_FEATURES:EMIT_MPP_META (7)\tCOMPLETED\n"
         )
         nf_log = tmp_path / "batch.nf.log"
         nf_log.write_text(
@@ -2708,11 +2820,36 @@ class TestSlurmJobCancellation:
             "OTHER_PROCESS > jobId: 9999; workDir: /work/b\n"
         )
 
+        # Every Slurm submission in the batch's own log counts, whatever the process.
         assert _collect_slurm_job_ids(str(trace), str(nf_log)) == [
+            "9999",
             "3546207",
             "3548007",
             "3548008",
+            "3549001",
         ]
+
+    def test_trace_rows_follow_the_log_and_names_only_without_one(self, tmp_path):
+        trace = tmp_path / "batch.trace.tsv"
+        trace.write_text(
+            "task_id\thash\tnative_id\tname\tstatus\n"
+            "1\taa/bb\t4321\tMUSSEL:EXTRACT_FEATURES:FEATURIZE_BATCH (1)\tRUNNING\n"
+        )
+        # Local executor: the log exists but submitted nothing to Slurm, so 4321 is a PID
+        # and must never reach scancel.
+        local_log = tmp_path / "local.nf.log"
+        local_log.write_text("DEBUG nextflow.processor.LocalTaskHandler - launched\n")
+        assert _collect_slurm_job_ids(str(trace), str(local_log)) == []
+        # No readable log at all: fall back to known cluster process names.
+        assert _collect_slurm_job_ids(str(trace), str(tmp_path / "missing.nf.log")) == ["4321"]
+        submitted = tmp_path / "slurm.nf.log"
+        submitted.write_text(
+            "DEBUG nextflow.executor.GridTaskHandler - [SLURM] submitted process "
+            "MUSSEL:EXTRACT_FEATURES:TESSELLATE (1) > jobId: 777; workDir: /w\n"
+        )
+        # A Slurm run (the log shows submissions): known cluster processes in the trace
+        # count even if this log missed their submission (e.g. an earlier attempt).
+        assert _collect_slurm_job_ids(str(trace), str(submitted)) == ["777", "4321"]
 
     def test_scancel_slurm_jobs_chunks_ids(self, monkeypatch):
         calls = []

@@ -266,6 +266,12 @@ def _ensure_clean_release(cfg: Config) -> None:
 def publish(cfg: Config, deployment_id: str, requested_by: str = "") -> dict:
     _ensure_clean_release(cfg)
     contract = build_contract(cfg)
+    # A manual publish is held to the same pin as the release controller.
+    if cfg.release_branch:
+        pinned, why = on_release_branch(cfg.repo_dir, contract["source_revision"],
+                                        cfg.release_origin_remote or "origin", cfg.release_branch)
+        if not pinned:
+            raise RuntimeError(f"Refusing to publish: {why}; deploy by updating {cfg.release_branch}")
     state = StateStore.from_config(cfg)
     state.publish_deployment_release(
         deployment_id,

@@ -697,3 +697,58 @@ def test_remote_waiter_never_treats_a_failed_batch_as_success(tmp_path, remote_s
         assert runner._run_remote_agent() != 0
 
     assert runner._cleanup.call_args.kwargs["succeeded"] is False
+
+
+
+def _remote_runner(tmp_path, *, resume=True):
+    cfg = Config(
+        nextflow_profiles="standard", outdir=str(tmp_path), execution_backend="remote_agent",
+        default_dispatch_target="hpc", dispatch_targets=[RemoteTargetConfig(name="hpc")],
+        cleanup_work_dir=False, log_dir=str(tmp_path / "logs"),
+    )
+    return NextflowRunner(cfg, "remote-batch", [], MagicMock(), resume=resume,
+                          existing_csv_path=str(tmp_path / "batch.csv"),
+                          existing_work_dir=str(tmp_path / "work"))
+
+
+def test_remote_waiter_survives_a_status_read_failure(tmp_path, monkeypatch):
+    # One DB blip while polling used to end the waiter, and the scheduler then
+    # requeued slides the agent was still running.
+    client = MagicMock()
+    client.read_status.side_effect = [ConnectionError("connection reset"), {"status": "SUCCEEDED", "nextflow_exit": 0}]
+    runner = _remote_runner(tmp_path)
+    runner._cleanup = MagicMock()
+    monkeypatch.setattr("mussel_dispatcher.runner.time.sleep", lambda s: None)
+
+    with patch("mussel_dispatcher.runner.RemoteDispatchClient", return_value=client):
+        assert runner._run_remote_agent() == 0
+
+    assert runner.work_may_be_running and client.read_status.call_count == 2
+
+
+def test_remote_waiter_raises_a_non_transient_error(tmp_path, monkeypatch):
+    # A bug or schema mismatch must not hold the slot forever: it raises, and the
+    # scheduler re-attaches a fresh waiter (a bounded number of times).
+    client = MagicMock()
+    client.read_status.side_effect = KeyError("status")
+    runner = _remote_runner(tmp_path)
+    monkeypatch.setattr("mussel_dispatcher.runner.time.sleep", lambda s: None)
+
+    with patch("mussel_dispatcher.runner.RemoteDispatchClient", return_value=client), pytest.raises(KeyError):
+        runner._run_remote_agent()
+    assert runner.work_may_be_running
+
+
+def test_remote_order_counts_as_running_even_if_the_log_write_fails(tmp_path, monkeypatch):
+    runner = _remote_runner(tmp_path, resume=False)
+    (tmp_path / "logs").write_text("not a directory")          # the log write after submit fails
+    monkeypatch.setattr(runner, "_write_csv", lambda: str(tmp_path / "batch.csv"))
+    monkeypatch.setattr(runner, "_register_new_batch", lambda *a, **k: True)
+    monkeypatch.setattr("mussel_dispatcher.runner.build_contract", lambda *a, **k: {})
+    client = MagicMock()
+    client.submit.return_value = {"remote_run_dir": "/r"}
+
+    with patch("mussel_dispatcher.runner.RemoteDispatchClient", return_value=client), pytest.raises(OSError):
+        runner._run_remote_agent()
+    client.submit.assert_called_once()
+    assert runner.work_may_be_running                          # the agent owns the order

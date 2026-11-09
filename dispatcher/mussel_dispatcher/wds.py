@@ -51,6 +51,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -728,17 +729,49 @@ def repair_wds_shards(
         "repaired_coords_from_h5": 0,
         "mismatched_coords": 0,
     }
-    if not root.exists():
+    if use_s3:
+        # Staging no longer mirrors S3 (sealed shards are deleted once indexed):
+        # repair the S3 objects, one temporary download at a time.
+        shard_files = _list_s3_shards(wds_dest, model)
+    elif root.exists():
+        shard_files = [str(p.relative_to(root)) for p in sorted(root.rglob("*.tar"))]
+    else:
         return totals
-    for tar_path in sorted(root.rglob("*.tar")):
+    for shard_file in shard_files:
+        tar_path = root / ("_repair" if use_s3 else "") / shard_file
+        if use_s3:
+            uri = f"{wds_dest.rstrip('/')}/{model}/{shard_file}"
+            members = _s3_tar_index(uri)
+            # Headers first: download only shards _repair_wds_tar would change (a
+            # model holds ~74k shards of ~2 GiB), and never for a dry run.
+            if members is None:
+                continue
+            if not _s3_shard_needs_repair(uri, members, None, require_coords=require_coords,
+                                          with_tiles=h5_lookup):
+                totals["shards"] += 1
+                continue
+            if dry_run:
+                totals["shards"] += 1
+                totals["would_repair"] = totals.get("would_repair", 0) + 1
+                continue
+            tar_path.parent.mkdir(parents=True, exist_ok=True)
+            if not _s3_download(uri, tar_path, s3_max_concurrency):
+                continue
         if not use_s3 and not dry_run:
             verify_lock()  # rewritten in place
-        stats = _repair_wds_tar(
-            tar_path,
-            h5_lookup=h5_lookup,
-            require_coords=require_coords,
-            dry_run=dry_run,
-        )
+        try:
+            stats = _repair_wds_tar(
+                tar_path,
+                h5_lookup=h5_lookup,
+                require_coords=require_coords,
+                dry_run=dry_run,
+            )
+            if stats["rewritten"] and use_s3 and not dry_run:
+                verify_lock()
+                _s3_upload(tar_path, f"{wds_dest.rstrip('/')}/{model}/{shard_file}", s3_max_concurrency)
+        finally:
+            if use_s3:
+                tar_path.unlink(missing_ok=True)
         totals["shards"] += 1
         for key in (
             "rewritten",
@@ -749,11 +782,102 @@ def repair_wds_shards(
             "mismatched_coords",
         ):
             totals[key] += stats[key]
-        if stats["rewritten"] and use_s3 and not dry_run:
-            verify_lock()
-            rel = tar_path.relative_to(staging_dir)
-            _s3_upload(tar_path, f"{wds_dest.rstrip('/')}/{rel}", s3_max_concurrency)
     return totals
+
+
+def _list_s3_shards(wds_dest: str, model: str) -> list[str]:
+    """``<project>/<NNNNNN>.tar`` for every shard of one model on S3."""
+    bucket, prefix = _s3_parts(f"{wds_dest.rstrip('/')}/{model}/")
+    names = []
+    for page in _s3_client().get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            rel = obj["Key"][len(prefix):]
+            if rel.endswith(".tar") and "/" in rel and not rel.startswith("_"):
+                names.append(rel)
+    return sorted(names)
+
+
+# (uri, etag) -> {member name: [(data offset, size), ...]}. Keyed by ETag, so a shard
+# rewritten in between is scanned again; bounded, since one append touches few shards.
+_S3_TAR_INDEX_CACHE: dict[tuple[str, str, int], dict[str, list[tuple[int, int]]]] = {}
+_S3_TAR_INDEX_CACHE_MAX = 256
+
+
+def _s3_tar_index(uri: str) -> dict[str, list[tuple[int, int]]] | None:
+    """Members of an uncompressed tar on S3 -> [(data offset, size)], from its headers alone.
+
+    None if the object does not exist. One 512-byte range read per member instead of
+    downloading a ~2 GiB shard; a name listed twice is a duplicate entry.
+    """
+    bucket, key = _s3_parts(uri)
+    client = _s3_client()
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+    size = head["ContentLength"]
+    etag = str(head.get("ETag") or "").strip('"')
+    cache_key = (uri, etag, size) if etag else None    # no ETag: nothing to key a cache on
+    if cache_key in _S3_TAR_INDEX_CACHE:
+        return _S3_TAR_INDEX_CACHE[cache_key]
+    members, pos = {}, 0
+    while pos + 512 <= size:
+        block = client.get_object(Bucket=bucket, Key=key, Range=f"bytes={pos}-{pos + 511}")["Body"].read()
+        if block == b"\0" * 512:
+            break
+        info = tarfile.TarInfo.frombuf(block, tarfile.ENCODING, "surrogateescape")
+        members.setdefault(info.name, []).append((pos + 512, info.size))
+        pos += 512 + math.ceil(info.size / 512) * 512
+    if cache_key is not None:
+        if len(_S3_TAR_INDEX_CACHE) >= _S3_TAR_INDEX_CACHE_MAX:
+            _S3_TAR_INDEX_CACHE.clear()
+        _S3_TAR_INDEX_CACHE[cache_key] = members
+    return members
+
+
+def _s3_npy_rows(uri: str, offset: int, size: int) -> int:
+    """Row count of an .npy member, as _repair_wds_tar counts it, from its header only."""
+    bucket, key = _s3_parts(uri)
+    head = _s3_client().get_object(
+        Bucket=bucket, Key=key, Range=f"bytes={offset}-{offset + min(size, 4096) - 1}")["Body"].read()
+    buf = io.BytesIO(head)
+    major, _minor = np.lib.format.read_magic(buf)
+    read_header = np.lib.format.read_array_header_1_0 if major == 1 else np.lib.format.read_array_header_2_0
+    shape, _fortran, _dtype = read_header(buf)
+    return shape[0] if len(shape) > 1 else 1
+
+
+def _s3_shard_needs_repair(uri: str, members: dict[str, list[tuple[int, int]]],
+                           slide_ids: set[str] | None, *, require_coords: bool,
+                           with_tiles: "set[str] | dict" = frozenset()) -> bool:
+    """Whether _repair_wds_tar would change anything for these slides (all if None).
+
+    Mirrors its rules from headers: a duplicate entry, coords whose row count differs
+    from the features', or no coords where they are required or a tile file
+    (``with_tiles``, slide ids with a .patch.h5) can supply them.
+    """
+    grouped: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    for name, entries in members.items():
+        sid = _slide_id_from_member(name)
+        if sid is None or (slide_ids is not None and sid not in slide_ids):
+            continue
+        kind = "features" if name.endswith(".features.npy") else "coords"
+        grouped.setdefault(sid, {"features": [], "coords": []})[kind].extend(entries)
+    for sid, parts in grouped.items():
+        if len(parts["features"]) > 1 or len(parts["coords"]) > 1:
+            return True
+        if not parts["features"]:
+            continue
+        if not parts["coords"]:
+            if require_coords or sid in with_tiles:
+                return True
+            continue
+        if _s3_npy_rows(uri, *parts["coords"][0]) != _s3_npy_rows(uri, *parts["features"][0]):
+            return True
+    return False
 
 
 def _local_shard_path_for_index_entry(
@@ -804,18 +928,54 @@ def _repair_indexed_slide_coords_if_possible(
         stats["missing_shard"] = 1
         return stats
 
-    tar_path = _local_shard_path_for_index_entry(wds_dest, model_type, staging_dir, shard_file)
-    if not tar_path.exists() and _is_s3(wds_dest):
-        tar_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_copy = False
+    if _is_s3(wds_dest):
+        # S3 is the copy the index points at; staging may hold a stale one. Read
+        # the tar headers first and download only if this slide lacks coords.
         shard_uri = f"{wds_dest.rstrip('/')}/{model_type}/{shard_file}"
+        members = _s3_tar_index(shard_uri)
+        if members is None:
+            stats["missing_shard"] = 1
+            return stats
+        if not _s3_shard_needs_repair(shard_uri, members, {slide_id}, require_coords=True):
+            stats["checked"] = 1
+            return stats
+        tar_path = staging_dir / model_type / "_repair" / shard_file
+        tar_path.parent.mkdir(parents=True, exist_ok=True)
         if not _s3_download(shard_uri, tar_path, s3_max_concurrency):
             stats["missing_shard"] = 1
             return stats
         stats["downloaded"] = 1
-    elif not tar_path.exists():
-        stats["missing_shard"] = 1
-        return stats
+        temp_copy = True
+    else:
+        tar_path = _local_shard_path_for_index_entry(wds_dest, model_type, staging_dir, shard_file)
+        if not tar_path.exists():
+            stats["missing_shard"] = 1
+            return stats
+    try:
+        return _repair_coords_in_tar(
+            stats, tar_path, slide_id=slide_id, h5_path=h5_path, wds_dest=wds_dest,
+            model_type=model_type, shard_file=shard_file, dry_run=dry_run,
+            s3_max_concurrency=s3_max_concurrency, verify_lock=verify_lock)
+    finally:
+        if temp_copy:
+            tar_path.unlink(missing_ok=True)
 
+
+def _repair_coords_in_tar(
+    stats: dict[str, int],
+    tar_path: Path,
+    *,
+    slide_id: str,
+    h5_path: Path,
+    wds_dest: str,
+    model_type: str,
+    shard_file: str,
+    dry_run: bool,
+    s3_max_concurrency: int,
+    verify_lock: "Callable[[], None] | None",
+) -> dict[str, int]:
+    """Rewrite one slide's coords in ``tar_path`` from its .patch.h5; upload it back if S3."""
     stats["checked"] = 1
     verify_lock = verify_lock or (lambda: None)
     if not _is_s3(wds_dest) and not dry_run:
@@ -880,6 +1040,7 @@ class _ShardWriter:
         self._current_index: int = 0
         self._current_bytes: int = 0
         self._local_slide_locations: dict[str, set[Path]] | None = None
+        self._sealed_staging: list[Path] = []  # uploaded and size-verified; see discard_sealed_staging
         self._init_current_shard()
 
     def _init_current_shard(self) -> None:
@@ -1089,15 +1250,31 @@ class _ShardWriter:
         """Upload the full shard to S3 (if needed) and start a new index slot."""
         if self._current_path and self._use_s3 and not self._dry_run:
             self._upload_current()
-            # Keep the sealed local staging shard. If upload succeeds but index
-            # save fails, a retry can inspect/compact the shard instead of
-            # blindly appending duplicate slide entries.
+            # Kept until the index is saved (a failed save leaves the journal to
+            # clean up), then deleted by discard_sealed_staging: S3 holds it.
+            self._sealed_staging.append(self._current_path)
         self._current_index += 1
         if self._use_s3 and not self._dry_run:
             # Another staging dir may already own the next number on S3.
             self._current_index = max(self._current_index, self._next_s3_shard_index())
         self._current_path = None
         self._current_bytes = 0
+
+    def discard_sealed_staging(self) -> int:
+        """Delete the staging copies of shards this writer sealed and uploaded.
+
+        Call only after the index is saved. Sealed shards are never appended to
+        again (the writer reuses only its last, open shard), and keeping them made
+        the shared staging dir grow without bound (sealed copies add up to many TiB).
+        """
+        n = 0
+        for path in self._sealed_staging:
+            if path != self._current_path and path.exists():
+                path.unlink()
+                n += 1
+        self._sealed_staging = []
+        self._local_slide_locations = None
+        return n
 
     def flush(self) -> None:
         """Upload the current (possibly unsealed) staging shard to S3 at end of run."""
@@ -1712,6 +1889,10 @@ def append_wds(
     # copies are gone.
     if journal is not None:
         journal.close()
+    if not dry_run and _is_s3(wds_dest):
+        n_discarded = sum(w.discard_sealed_staging() for w in writers.values())
+        if n_discarded:
+            log.info("Deleted %d sealed staging shard(s); S3 holds them", n_discarded)
 
     # Delete local source files now that data is durably in WDS / S3 and the
     # index records it: if the index save failed, the next run strips this

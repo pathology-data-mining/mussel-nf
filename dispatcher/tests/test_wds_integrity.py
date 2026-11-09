@@ -300,8 +300,16 @@ class _FakeS3:
                 raise err
             return {"ContentLength": p.stat().st_size}
 
+        def get_object(Bucket, Key, Range=None):
+            data = (self.root / Key).read_bytes()
+            if Range:
+                lo, hi = (int(x) for x in Range.removeprefix("bytes=").split("-"))
+                data = data[lo:hi + 1]
+            return {"Body": io.BytesIO(data)}
+
         fake.get_paginator.return_value.paginate.side_effect = paginate
         fake.head_object.side_effect = head_object
+        fake.get_object.side_effect = get_object
         fake.delete_object.side_effect = lambda Bucket, Key: (self.root / Key).unlink()
         return fake
 

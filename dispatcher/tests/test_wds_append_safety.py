@@ -336,23 +336,25 @@ def _staged_shard_needing_repair(staging, slide_id="A"):
     return shard
 
 
-def test_coords_repairs_upload_only_under_a_verified_lock(dirs, monkeypatch):
+def test_coords_repairs_upload_only_under_a_verified_lock(dirs, s3, monkeypatch):
     uploads = []
     monkeypatch.setattr(wds_mod, "_s3_upload", lambda *a, **k: uploads.append(a))
     _write_slide(dirs / "pt", dirs / "tiles", "A", rows=2, value=1)  # .patch.h5 with 2 coords
     h5 = {"A": dirs / "tiles" / "A.patch.h5"}
+    # The shard needing repair is on S3 (staging no longer mirrors it).
+    _staged_shard_needing_repair(s3.root / "wds")
 
-    _staged_shard_needing_repair(dirs / "staging1")
     with pytest.raises(wds_mod.WdsLockLost):
         wds_mod._repair_indexed_slide_coords_if_possible(
             slide_id="A", index_entry={"shard_file": "PROJ/000000.tar"},
             wds_dest="s3://bucket/wds", model_type="optimus", staging_dir=dirs / "staging1",
             h5_lookup=h5, dry_run=False, s3_max_concurrency=1, verify_lock=_lost)
-    _staged_shard_needing_repair(dirs / "staging2")
     with pytest.raises(wds_mod.WdsLockLost):
         wds_mod.repair_wds_shards("s3://bucket/wds", "optimus", dirs / "staging2", dirs / "tiles",
                                   verify_lock=_lost)
     assert uploads == []
+    # Temporary downloads are not left in staging.
+    assert not list((dirs / "staging1").rglob("*.tar")) and not list((dirs / "staging2").rglob("*.tar"))
 
     # Local destinations rewrite in place: verified before the rewrite.
     local_root = dirs / "local"
@@ -461,3 +463,130 @@ def test_append_through_ecs_403_for_missing_keys(dirs, monkeypatch):
     with pytest.raises(ClientError):
         _run_s3(dirs, "staging", {"C"}, lock_dir=dirs / "locks")
     assert remote_index.read_text() == before
+
+
+# ---------------------------------------------------------------------------
+# Staging keeps only open shards; sealed copies are not retained.
+# ---------------------------------------------------------------------------
+
+def _append_rotating(tmp_path, staging, ids):
+    return wds_mod.append_wds(
+        pt_dir=tmp_path / "pt", h5_dir=tmp_path / "tiles",
+        inventory_df=pd.DataFrame({"file_name": [f"{i}.svs" for i in ids], "project_id": ["PROJ"] * len(ids)}),
+        wds_dest="s3://bucket/wds", model_type="optimus", staging_dir=tmp_path / staging,
+        max_shard_bytes=1, slide_id_filter=set(ids))       # one slide per shard: every append rotates
+
+
+def test_sealed_staging_shards_are_deleted_once_indexed(dirs, s3):
+    for sid in ("A", "B", "C"):
+        _write_slide(dirs / "pt", dirs / "tiles", sid, rows=2, value=1)
+
+    index = _append_rotating(dirs, "staging", ["A", "B", "C"])
+
+    staged = sorted(p.name for p in (dirs / "staging" / "optimus" / "PROJ").glob("*.tar"))
+    on_s3 = s3.shards()
+    assert len(on_s3) == 3                                   # every shard reached S3
+    assert staged == [index["C"]["shard_file"].split("/")[1]]  # only the open shard stays
+    assert all(f"{sid}.features.npy" in on_s3[index[sid]["shard_file"]] for sid in "ABC")
+
+
+def test_sealed_staging_shards_survive_a_failed_index_save(dirs, s3, monkeypatch):
+    for sid in ("A", "B"):
+        _write_slide(dirs / "pt", dirs / "tiles", sid, rows=2, value=1)
+    monkeypatch.setattr(wds_mod, "_save_index", lambda *a, **k: (_ for _ in ()).throw(OSError("save failed")))
+
+    with pytest.raises(OSError):
+        _append_rotating(dirs, "staging", ["A", "B"])
+
+    assert len(list((dirs / "staging" / "optimus" / "PROJ").glob("*.tar"))) == 2
+
+
+def test_coords_check_reads_headers_and_skips_complete_shards(dirs, s3, monkeypatch):
+    _write_slide(dirs / "pt", dirs / "tiles", "A", rows=2, value=1)
+    _append_rotating(dirs, "staging", ["A"])                # A on S3 with coords
+    downloads = []
+    monkeypatch.setattr(wds_mod, "_s3_download", lambda *a, **k: downloads.append(a) or False)
+
+    stats = wds_mod._repair_indexed_slide_coords_if_possible(
+        slide_id="A", index_entry={"shard_file": "PROJ/000000.tar"},
+        wds_dest="s3://bucket/wds", model_type="optimus", staging_dir=dirs / "staging",
+        h5_lookup={"A": dirs / "tiles" / "A.patch.h5"}, dry_run=False, s3_max_concurrency=1)
+
+    assert stats["checked"] == 1 and stats["downloaded"] == 0 and downloads == []
+
+
+def _s3_shard(s3, shard_file, members):
+    """Write a shard straight to the fake S3: members is [(name, array), ...]."""
+    import io as _io
+    import tarfile as _tarfile
+    import numpy as np
+    path = s3.root / "wds" / "optimus" / shard_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _tarfile.open(path, "w") as tar:
+        for name, arr in members:
+            buf = _io.BytesIO(); np.save(buf, arr); data = buf.getvalue()
+            info = _tarfile.TarInfo(name); info.size = len(data)
+            tar.addfile(info, _io.BytesIO(data))
+    return path
+
+
+def test_coords_with_the_wrong_row_count_are_repaired_from_s3(dirs, s3):
+    import numpy as np
+    _write_slide(dirs / "pt", dirs / "tiles", "A", rows=2, value=1)       # .patch.h5 with 2 coords
+    _s3_shard(s3, "PROJ/000000.tar", [("A.features.npy", np.zeros((2, 4), np.float32)),
+                                      ("A.coords.npy", np.zeros((3, 2), np.int64))])   # 3 rows: wrong
+
+    stats = wds_mod._repair_indexed_slide_coords_if_possible(
+        slide_id="A", index_entry={"shard_file": "PROJ/000000.tar"},
+        wds_dest="s3://bucket/wds", model_type="optimus", staging_dir=dirs / "staging",
+        h5_lookup={"A": dirs / "tiles" / "A.patch.h5"}, dry_run=False, s3_max_concurrency=1)
+
+    assert stats["downloaded"] == 1 and stats["repaired"] == 1
+    uri = "s3://bucket/wds/optimus/PROJ/000000.tar"
+    members = wds_mod._s3_tar_index(uri)
+    assert wds_mod._s3_npy_rows(uri, *members["A.coords.npy"][0]) == 2
+    assert not list((dirs / "staging").rglob("*.tar"))                   # no copy left behind
+
+
+def test_repair_existing_shards_downloads_only_shards_that_need_it(dirs, s3, monkeypatch):
+    import numpy as np
+    f, c = np.zeros((2, 4), np.float32), np.zeros((2, 2), np.int64)
+    _s3_shard(s3, "PROJ/000000.tar", [("A.features.npy", f), ("A.coords.npy", c)])              # healthy
+    _s3_shard(s3, "PROJ/000001.tar", [("B.features.npy", f), ("B.coords.npy", c),
+                                      ("B.features.npy", f), ("B.coords.npy", c)])              # duplicate
+    downloads = []
+    real_download = wds_mod._s3_download
+    monkeypatch.setattr(wds_mod, "_s3_download", lambda uri, *a: downloads.append(uri) or real_download(uri, *a))
+
+    dry = wds_mod.repair_wds_shards("s3://bucket/wds", "optimus", dirs / "staging", None, dry_run=True)
+    assert downloads == [] and dry["would_repair"] == 1 and dry["shards"] == 2
+
+    wds_mod.repair_wds_shards("s3://bucket/wds", "optimus", dirs / "staging", None)
+    assert downloads == ["s3://bucket/wds/optimus/PROJ/000001.tar"]
+    assert wds_mod._s3_tar_index("s3://bucket/wds/optimus/PROJ/000001.tar") == {
+        "B.features.npy": [(512, len(_npy(f)))], "B.coords.npy": [(1536, len(_npy(c)))]}
+
+
+def _npy(arr):
+    import io as _io
+    import numpy as np
+    buf = _io.BytesIO(); np.save(buf, arr); return buf.getvalue()
+
+
+def test_tar_header_scan_is_cached_per_etag(dirs, s3, monkeypatch):
+    import numpy as np
+    _s3_shard(s3, "PROJ/000000.tar", [("A.features.npy", np.zeros((2, 4), np.float32))])
+    client = s3.client()
+    etag = ["e1"]
+    real_head = client.head_object.side_effect
+    client.head_object.side_effect = lambda **kw: dict(real_head(**kw), ETag=f'"{etag[0]}"')
+    monkeypatch.setattr(wds_mod, "_s3_client", lambda: client)
+    uri = "s3://bucket/wds/optimus/PROJ/000000.tar"
+
+    wds_mod._s3_tar_index(uri)
+    scans = client.get_object.call_count
+    wds_mod._s3_tar_index(uri)
+    assert client.get_object.call_count == scans          # same ETag: served from the cache
+    etag[0] = "e2"                                         # rewritten: scanned again
+    wds_mod._s3_tar_index(uri)
+    assert client.get_object.call_count > scans

@@ -31,7 +31,7 @@ process DOWNLOAD_SLIDE {
     // gdc-client: <local_dir>/<file_id>/<file_name>.
     storeDir "${params.download.local_dir}/${meta.file_id}"
 
-    errorStrategy { task.attempt <= 3 ? 'retry' : 'ignore' }
+    errorStrategy { task.attempt <= 3 || task.previousException?.message?.startsWith('Error submitting process') || task.exitStatus == 75 ? 'retry' : 'ignore' }
     maxRetries 3
 
     input:

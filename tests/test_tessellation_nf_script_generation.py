@@ -76,6 +76,24 @@ def test_segmentation_model_overrides_named_presets():
     assert "validate_tessellation_h5.py" in combined
 
 
+# Nextflow never counts an ignored *submission* failure as done, so its process never
+# closes its outputs and the run hangs; see the cluster profile. Exit 75
+# is a job Slurm lost, failed by the driver watch: the slide never ran, so it is retried.
+SUBMIT_GUARD = ("task.previousException?.message?.startsWith('Error submitting process')"
+                " || task.exitStatus == 75")
+
+
+def test_no_error_strategy_ignores_a_failed_submission():
+    root = TESSELLATION_NF.parents[1]
+    files = [root / "nextflow.config",
+             *sorted((root / "dispatcher").glob("*.config")), *sorted((root / "modules").rglob("*.nf"))]
+    for path in dict.fromkeys(files):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("//", 1)[0]
+            if "errorStrategy" in code and "ignore" in code:
+                assert SUBMIT_GUARD in code, f"{path.relative_to(root)}:{n}: {line.strip()}"
+
+
 def test_tessellate_batch_multi_size_script_is_valid_bash(tmp_path):
     """Several tile sets: one segmentation, Mussel's {patch_size} placeholder in every output path."""
     template = _extract_batch_script()
@@ -216,3 +234,33 @@ def test_tessellate_batch_still_validates_written_tiles(tmp_path):
     result = _run_batch(tmp_path, fake)
     assert result.returncode == 1
     assert "seg_model=classic, expected neural" in result.stderr
+
+
+def _cluster_retry_reason():
+    config = (TESSELLATION_NF.parents[1] / "nextflow.config").read_text()
+    m = re.search(r"cluster \{\s*executor \{.*?retry \{.*?reason\s*=\s*'([^']*)'", config, re.S)
+    assert m, "cluster profile has no executor.retry.reason"
+    return re.compile(m.group(1))
+
+
+def test_sbatch_is_retried_only_when_the_job_was_not_accepted():
+    """A retried sbatch resubmits the same .command.run: an error that can follow an
+    accepted job would put a duplicate job in the same work dir."""
+    reason = _cluster_retry_reason()
+    not_accepted = [
+        "sbatch: error: Batch job submission failed: Unable to contact slurm controller (connect failure)",
+        "sbatch: error: Slurm temporarily unable to accept job, sleeping and retrying",
+        "sbatch: error: slurm_persist_conn_open_without_init: failed to open persistent connection: Connection refused",
+        "sbatch: error: Batch job submission failed: Transport endpoint is not connected",
+        "sbatch: error: Batch job submission failed: Socket timed out on send/recv operation",  # Nextflow's default
+    ]
+    maybe_accepted = [
+        "sbatch: error: Batch job submission failed: Zero Bytes were transmitted or received",
+        "sbatch: error: Batch job submission failed: Connection reset by peer",
+        "sbatch: error: Batch job submission failed: Connection timed out",
+        "sbatch: error: Batch job submission failed: Resource temporarily unavailable",
+    ]
+    for line in not_accepted:
+        assert reason.search(line), line
+    for line in maybe_accepted:
+        assert not reason.search(line), line

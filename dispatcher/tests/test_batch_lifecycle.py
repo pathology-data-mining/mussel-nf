@@ -334,7 +334,7 @@ def test_remote_agent_reclaims_persisted_finalization_after_restart(tmp_path, mo
     assert agent._refresh_claimed_orders() is True
     state.claim_finalization_slot.assert_called_once_with(
         "batch-1",
-        lane="remote",
+        lane="remote:hpc",
         max_slots=1,
         owner="test-agent",
         ttl_seconds=300,
@@ -403,7 +403,7 @@ def test_remote_agent_marks_worker_slot_mismatch_degraded(tmp_path):
 
     assert agent._finalization_reconcile_health["state"] == "DEGRADED"
     state.reconcile_finalization_slots.assert_called_once_with(
-        lane="remote",
+        lane="remote:hpc",
         max_slots=1,
         owner="test-agent",
         active_batch_ids={"batch-1", "batch-2"},

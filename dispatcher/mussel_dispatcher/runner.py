@@ -47,6 +47,12 @@ except ImportError:  # sqlite-only installs
 _NF_RUN_NAME_RE = re.compile(r'^[a-z](?:[a-z\d]|[-_](?=[a-z\d])){0,79}$')
 _NF_SESSION_LOCK_ERROR = "Unable to acquire lock on session"
 _AUTO_RESUME_LOCK_RETRY_DELAY_SECONDS = 30
+_NF_PID_WRITE_ATTEMPTS = 3
+_NF_PID_WRITE_RETRY_SECONDS = 1.0
+# A stop that SIGTERMs the whole service (systemd KillMode=control-group) can
+# end Nextflow before the dispatcher's own signal handler runs; wait this long
+# on a non-zero exit for shutdown to show up before booking a failure.
+_SHUTDOWN_EXIT_GRACE_SECONDS = 5.0
 
 log = logging.getLogger("mussel-dispatcher")
 # Optional site defaults come from the environment: MUSSEL_JAVA_HOME pins the
@@ -457,6 +463,7 @@ class NextflowRunner:
             run_env.get("JAVA_HOME", ""),
             run_env.get("JAVA_CMD", ""),
         )
+        proc = None
         try:
             with open(log_path, "w") as lf:
                 proc = subprocess.Popen(
@@ -467,18 +474,21 @@ class NextflowRunner:
                     env=run_env,
                     start_new_session=True,
                 )
-            # Store PID immediately so recover_in_flight() can kill this process
+        except Exception as e:
+            log.error("Batch %s failed to launch: %s", self.batch_id, e)
+        if proc is not None:
+            # Once Nextflow is running it must be waited on, whatever the
+            # bookkeeping does: giving up here would requeue slides it is still
+            # processing. Store PID so recover_in_flight() can kill this process
             # if the dispatcher crashes and restarts before this batch completes.
             self.work_may_be_running = True
-            self.state.set_batch_nf_pid(self.batch_id, proc.pid)
+            self._record_nf_pid(proc.pid)
             log.debug("Batch %s: NF process PID=%d", self.batch_id, proc.pid)
             exit_code = proc.wait()
             self.work_may_be_running = False
-        except Exception as e:
-            log.error("Batch %s failed to launch: %s", self.batch_id, e)
 
         # Clear the stored PID — this process is done.
-        self.state.set_batch_nf_pid(self.batch_id, None)
+        self._record_nf_pid(None)
 
         # Capture and store the NF session ID so future resumes can use -resume <uuid>
         # instead of bare -resume (which would collide across concurrent batches).
@@ -497,13 +507,12 @@ class NextflowRunner:
                 self.state.set_batch_session_id(self.batch_id, session_id)
                 log.debug("Batch %s: recorded NF session ID %s", self.batch_id, session_id)
 
-        # Shutdown may terminate Nextflow while this worker is still in the
-        # post-wait path.  stop_for_restart_recovery() marks resumable batches
-        # RECOVERING/FINALIZING before sending SIGTERM; preserve that state and
-        # let the next dispatcher startup perform recovery.  Without this guard
-        # normal non-zero-exit bookkeeping races with shutdown and changes the
-        # preserved batch back to FAILED, resetting its slides.
-        if self._shutdown_recovery_owns_batch():
+        # A non-zero exit during shutdown belongs to restart recovery, whether
+        # or not stop_for_restart_recovery() has published RECOVERING yet: the
+        # service stop SIGTERMs every Nextflow at once while shutdown marks the
+        # batches one by one.  Booking it here charged fail_count, deleted the
+        # work dir and turned a preserved batch FAILED.
+        if exit_code != 0 and self._shutdown_stopped_run():
             return exit_code
 
         # Auto-resume: if the first run failed but did real work, attempt one NF
@@ -513,22 +522,6 @@ class NextflowRunner:
         # (real work was attempted), and only if the work dir is still intact.
         run_duration = time.time() - run_started_at
         if exit_code != 0 and not self._resume and run_duration >= 60 and os.path.isdir(work_dir):
-            if self._shutdown_event and self._shutdown_event.is_set():
-                log.info(
-                    "Batch %s: skipping auto-resume because dispatcher shutdown is in progress",
-                    self.batch_id,
-                )
-                self.state.complete_batch(self.batch_id, exit_code)
-                self.state.skip_unstarted_batch_hooks(
-                    self.batch_id,
-                    reason=f"driver ended before hooks: exit {exit_code}",
-                )
-                self.state.mark_slides_complete(
-                    self.batch_id, False, charge_fail_count=False
-                )
-                log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
-                self._cleanup(csv_path, log_path, work_dir, succeeded=False)
-                return exit_code
             resume_session_id = self.state.get_batch_session_id(self.batch_id)
             if not resume_session_id:
                 resume_session_id = _lookup_nf_session_id(
@@ -560,16 +553,21 @@ class NextflowRunner:
                             resume_cmd, stdout=lf, stderr=subprocess.STDOUT,
                             cwd=self.cfg.repo_dir, env=run_env, start_new_session=True,
                         )
-                    self.work_may_be_running = True
-                    self.state.set_batch_nf_pid(self.batch_id, resume_proc.pid)
-                    resume_started_at = time.time()
-                    resume_exit = resume_proc.wait()
-                    self.work_may_be_running = False
-                    self.state.set_batch_nf_pid(self.batch_id, None)
+                except Exception as exc:
+                    self._record_nf_pid(None)
+                    log.error("Batch %s: auto-resume failed to launch: %s", self.batch_id, exc)
+                    break
+                self.work_may_be_running = True
+                self._record_nf_pid(resume_proc.pid)
+                resume_started_at = time.time()
+                resume_exit = resume_proc.wait()
+                self.work_may_be_running = False
+                self._record_nf_pid(None)
+                try:
                     # stop_for_restart_recovery() may have marked the batch
                     # RECOVERING/FINALIZING and SIGTERMed this resume run;
                     # its non-zero exit must not be booked as a failure.
-                    if resume_exit != 0 and self._shutdown_recovery_owns_batch():
+                    if resume_exit != 0 and self._shutdown_stopped_run():
                         return resume_exit
                     if resume_exit == 0:
                         log.info("Batch %s: auto-resume succeeded — treating as success", self.batch_id)
@@ -589,22 +587,15 @@ class NextflowRunner:
                             self._shutdown_event.wait(_AUTO_RESUME_LOCK_RETRY_DELAY_SECONDS)
                         else:
                             time.sleep(_AUTO_RESUME_LOCK_RETRY_DELAY_SECONDS)
-                        if self._shutdown_event and self._shutdown_event.is_set():
+                        if self._shutdown_stopped_run(grace=0):
                             # Never launch another Nextflow run during shutdown.
-                            if self._shutdown_recovery_owns_batch():
-                                return resume_exit
-                            log.info(
-                                "Batch %s: dispatcher shutdown in progress; not retrying auto-resume",
-                                self.batch_id,
-                            )
-                            break
+                            return resume_exit
                         continue
                     log.warning("Batch %s: auto-resume also failed (exit %d) — giving up",
                                 self.batch_id, resume_exit)
                     break
                 except Exception as exc:
-                    self.state.set_batch_nf_pid(self.batch_id, None)
-                    log.error("Batch %s: auto-resume failed to launch: %s", self.batch_id, exc)
+                    log.error("Batch %s: auto-resume bookkeeping failed: %s", self.batch_id, exc)
                     break
 
         # Only charge fail_count if the batch ran long enough to have actually
@@ -649,34 +640,65 @@ class NextflowRunner:
             else:
                 self._finalize_success(csv_path, log_path, work_dir, run_started_at)
         else:
-            self.state.complete_batch(self.batch_id, exit_code)
+            # Conditional: shutdown may have preserved the batch since the
+            # check above; it then owns the slides and the work dir.
+            if not self.state.complete_batch(self.batch_id, exit_code, unless_preserved=True):
+                log.info(
+                    "Batch %s: preserved for restart recovery; not booking exit %d",
+                    self.batch_id, exit_code,
+                )
+                return exit_code
             self.state.skip_unstarted_batch_hooks(
                 self.batch_id,
                 reason=f"driver ended before hooks: exit {exit_code}",
             )
             self.state.mark_slides_complete(
-                self.batch_id, False, charge_fail_count=not fast_fail
+                self.batch_id, False, charge_fail_count=not fast_fail,
+                unless_preserved=True,
             )
             log.error("Batch %s failed (exit %d). Log: %s", self.batch_id, exit_code, log_path)
             self._cleanup(csv_path, log_path, work_dir, succeeded=False)
 
         return exit_code
 
-    def _shutdown_recovery_owns_batch(self) -> bool:
-        """Return True when shutdown preserved this batch for restart recovery.
+    def _record_nf_pid(self, pid: int | None) -> None:
+        """Record (or clear) the batch's Nextflow PID, retrying a database blip.
 
-        stop_for_restart_recovery() marks resumable batches RECOVERING or
-        FINALIZING before it SIGTERMs Nextflow. The worker must then leave the
-        batch, its slides and its work dir alone for the next startup.
+        Never raises: the caller is waiting on, or done with, a live process.
+        A stale nf_pid is left to restart recovery, which checks the PID is alive.
         """
-        if not (self._shutdown_event and self._shutdown_event.is_set()):
+        for attempt in range(1, _NF_PID_WRITE_ATTEMPTS + 1):
+            try:
+                self.state.set_batch_nf_pid(self.batch_id, pid)
+                return
+            except Exception as exc:
+                if attempt == _NF_PID_WRITE_ATTEMPTS:
+                    log.error(
+                        "Batch %s: could not write nf_pid=%s after %d attempts: %s",
+                        self.batch_id, pid, attempt, exc,
+                    )
+                    return
+                log.warning(
+                    "Batch %s: NF PID write failed (attempt %d/%d): %s",
+                    self.batch_id, attempt, _NF_PID_WRITE_ATTEMPTS, exc,
+                )
+                time.sleep(_NF_PID_WRITE_RETRY_SECONDS * attempt)
+
+    def _shutdown_stopped_run(self, grace: float | None = None) -> bool:
+        """Return True when dispatcher shutdown ended this (non-zero) run.
+
+        The batch, its slides and its work dir are then left to
+        stop_for_restart_recovery() and the next startup, whatever status the
+        row shows right now: shutdown may not have reached this batch yet.
+        """
+        if self._shutdown_event is None:
             return False
-        batch = self.state.get_batch(self.batch_id) or {}
-        if batch.get("status") not in {"RECOVERING", "FINALIZING"}:
+        if grace is None:
+            grace = _SHUTDOWN_EXIT_GRACE_SECONDS
+        if not self._shutdown_event.wait(grace):
             return False
         log.info(
-            "Batch %s: shutdown recovery state is authoritative; "
-            "leaving batch for restart recovery",
+            "Batch %s: dispatcher shutdown in progress; leaving batch for restart recovery",
             self.batch_id,
         )
         return True

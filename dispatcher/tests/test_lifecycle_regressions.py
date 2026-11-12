@@ -15,6 +15,7 @@ from unittest import mock
 import pytest
 
 from mussel_dispatcher import scheduler as sched
+from mussel_dispatcher import runner as runner_mod
 from mussel_dispatcher.batch_lifecycle import (
     BatchFinalizer,
     FinalizationContext,
@@ -427,6 +428,8 @@ def test_shutdown_during_auto_resume_preserves_recovering_batch(tmp_path):
 def test_shutdown_during_session_lock_backoff_does_not_relaunch(tmp_path):
     class ShutdownDuringWait(threading.Event):
         def wait(self, timeout=None):
+            if timeout != runner_mod._AUTO_RESUME_LOCK_RETRY_DELAY_SECONDS:
+                return super().wait(timeout)  # the post-exit shutdown grace
             _stop_for_restart_recovery(state, self)
             return True
 

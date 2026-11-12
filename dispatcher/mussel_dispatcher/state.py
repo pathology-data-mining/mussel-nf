@@ -337,14 +337,40 @@ def _required_schema_columns() -> dict[str, set[str]]:
     return required
 
 
+# Recompute every slide_id's rollup from slides (the table must be empty first). Used by
+# the one-time migration and by scripts/import_sqlite_to_postgres.py after an import.
+SLIDE_ROLLUPS_REBUILD_SQL = """
+    INSERT INTO slide_rollups (
+        slide_id, has_succeeded, has_retry_pending, has_failed, has_pending, has_dispatched
+    )
+    SELECT
+        slide_id,
+        MAX(CASE WHEN status='SUCCEEDED' THEN 1 ELSE 0 END) AS has_succeeded,
+        MAX(CASE WHEN status='PENDING' AND fail_count > 0 THEN 1 ELSE 0 END) AS has_retry_pending,
+        MAX(CASE WHEN status='FAILED' THEN 1 ELSE 0 END) AS has_failed,
+        MAX(CASE WHEN status='PENDING' THEN 1 ELSE 0 END) AS has_pending,
+        MAX(CASE WHEN status='DISPATCHED' THEN 1 ELSE 0 END) AS has_dispatched
+    FROM slides
+    GROUP BY slide_id
+"""
+
+
 def finalization_slot_name(lane: str, slot: int) -> str:
-    """Return a durable lease name for one local or remote finalizer slot."""
+    """Return a durable lease name for one local or remote finalizer slot.
+
+    A remote lane is ``remote:<target>``: each target's limit
+    (max_concurrent_finalizations is per target) gets its own slots. A bare
+    ``remote`` keeps the shared pre-target names.
+    """
+    kind, _, target = str(lane).strip().partition(":")
     base = {
         "local": LOCAL_FINALIZATION_LEASE_NAME,
         "remote": REMOTE_FINALIZATION_LEASE_NAME,
-    }.get(str(lane).strip().lower())
-    if base is None:
+    }.get(kind.lower())
+    if base is None or (target and kind.lower() != "remote"):
         raise ValueError(f"unknown finalization lane: {lane!r}")
+    if target:
+        base = f"{base}:{target}"
     return base if int(slot) == 0 else f"{base}:{int(slot)}"
 
 
@@ -1120,22 +1146,7 @@ class StateStore:
                         0,
                     ) or 0
                     if not rollup_count:
-                        conn.execute(
-                            """
-                            INSERT INTO slide_rollups (
-                                slide_id, has_succeeded, has_retry_pending, has_failed, has_pending, has_dispatched
-                            )
-                            SELECT
-                                slide_id,
-                                MAX(CASE WHEN status='SUCCEEDED' THEN 1 ELSE 0 END) AS has_succeeded,
-                                MAX(CASE WHEN status='PENDING' AND fail_count > 0 THEN 1 ELSE 0 END) AS has_retry_pending,
-                                MAX(CASE WHEN status='FAILED' THEN 1 ELSE 0 END) AS has_failed,
-                                MAX(CASE WHEN status='PENDING' THEN 1 ELSE 0 END) AS has_pending,
-                                MAX(CASE WHEN status='DISPATCHED' THEN 1 ELSE 0 END) AS has_dispatched
-                            FROM slides
-                            GROUP BY slide_id
-                            """
-                        )
+                        conn.execute(SLIDE_ROLLUPS_REBUILD_SQL)
                     # Existing populated rollups were produced by the previous
                     # startup backfill.  Preserve them rather than rewriting the
                     # entire table during this upgrade.
@@ -1621,15 +1632,26 @@ class StateStore:
 
     def mark_slides_complete(self, batch_id: str, succeeded: bool,
                              per_slide_status: dict | None = None,
-                             charge_fail_count: bool = True):
+                             charge_fail_count: bool = True,
+                             unless_preserved: bool = False):
         """Mark all slides in a batch as SUCCEEDED or FAILED.
 
         When charge_fail_count=False (fast infra failure), slides are reset to
         PENDING instead of FAILED so they don't burn a retry slot.
+        ``unless_preserved`` leaves the slides alone while the batch is
+        RECOVERING/FINALIZING (shutdown preserved it for restart recovery).
         """
         now = datetime.now(timezone.utc).isoformat()
         def _mark(conn) -> None:
             slide_ids: list[str] = []
+            if unless_preserved:
+                lock = " FOR UPDATE" if self.db_cfg.backend == "postgres" else ""
+                row = conn.execute(
+                    self._sql("SELECT status FROM batches WHERE batch_id=?" + lock),
+                    (batch_id,),
+                ).fetchone()
+                if self._row_get(row, "status", 0) in ("RECOVERING", "FINALIZING"):
+                    return
             if per_slide_status:
                 slide_paths = list(per_slide_status.keys())
                 if slide_paths:
@@ -2007,19 +2029,44 @@ class StateStore:
             ),
         )
 
-    def complete_batch(self, batch_id: str, exit_code: int):
+    def complete_batch(self, batch_id: str, exit_code: int, *, unless_preserved: bool = False) -> bool:
+        """Mark a batch terminal; returns False when no row was updated.
+
+        ``unless_preserved`` leaves a batch that shutdown handed to restart
+        recovery (RECOVERING/FINALIZING) untouched, in the same statement.
+        """
         status = "SUCCEEDED" if exit_code == 0 else "FAILED"
         completed_at = datetime.now(timezone.utc).isoformat()
-        def _complete(conn) -> None:
-            conn.execute(
+        guard = " AND status NOT IN ('RECOVERING', 'FINALIZING')" if unless_preserved else ""
+        def _complete(conn) -> bool:
+            cur = conn.execute(
                 self._sql("""UPDATE batches SET status=?, completed_at=?, nextflow_exit=?, nf_pid=NULL,
                                       driver_completed_at=COALESCE(driver_completed_at, ?),
                                       finalization_stage=CASE WHEN ?=0 THEN 'SUCCEEDED' ELSE finalization_stage END,
                                       finalization_retry_at=NULL, finalization_error=NULL
-                   WHERE batch_id=?"""),
+                   WHERE batch_id=?""" + guard),
                 (status, completed_at, exit_code, completed_at, exit_code, batch_id),
             )
-        self._run_write("complete_batch", _complete)
+            return (getattr(cur, "rowcount", 0) or 0) > 0
+        return bool(self._run_write("complete_batch", _complete))
+
+    def preserve_batch_for_recovery(self, batch_id: str, status: str) -> bool:
+        """Hand a live batch to restart recovery unless it already ended.
+
+        Returns False when the batch is already terminal: its worker booked
+        the outcome first, and flipping it back would resume a batch whose
+        slides were already released or charged.
+        """
+        def _preserve(conn) -> bool:
+            cur = conn.execute(
+                self._sql(
+                    "UPDATE batches SET status=?, completed_at=NULL "
+                    "WHERE batch_id=? AND status NOT IN ('SUCCEEDED', 'FAILED')"
+                ),
+                (status, batch_id),
+            )
+            return (getattr(cur, "rowcount", 0) or 0) > 0
+        return bool(self._run_write("preserve_batch_for_recovery", _preserve))
 
     def mark_driver_terminal(self, batch_id: str, exit_code: int) -> None:
         """Record driver completion before finalization or hook execution."""
@@ -2238,6 +2285,7 @@ class StateStore:
                 "status", "driver_job_id", "remote_run_dir", "remote_work_dir",
                 "remote_outdir", "remote_log_path", "slurm", "nextflow_exit",
                 "failure_class", "error", "cancel_requested_at", "log_tail",
+                "lost_jobs", "driver_stall", "warning", "stall_cancelled_at",
             )
             if all(existing.get(key) == merged.get(key) for key in meaningful_keys):
                 return False
@@ -2674,6 +2722,7 @@ class StateStore:
                          WHERE backend='remote_agent'
                            AND target=?
                            AND COALESCE(remote_status, '')='QUEUED'
+                           AND status IN ('RUNNING', 'RECOVERING')
                          ORDER BY dispatched_at ASC NULLS FIRST, batch_id ASC
                          FOR UPDATE SKIP LOCKED
                          LIMIT 1
@@ -2690,6 +2739,7 @@ class StateStore:
                          WHERE backend='remote_agent'
                            AND target=?
                            AND COALESCE(remote_status, '')='QUEUED'
+                           AND status IN ('RUNNING', 'RECOVERING')
                          ORDER BY dispatched_at ASC, batch_id ASC
                          LIMIT 1
                         """
@@ -2717,6 +2767,30 @@ class StateStore:
             return payload
 
         return self._run_write("claim_remote_batch", _claim)
+
+    def withdraw_remote_order(self, batch_id: str) -> bool:
+        """Cancel a remote order the agent has not claimed; False if it may be running.
+
+        True when no order is live: none was written, it was already cancelled,
+        or it was still QUEUED (now CANCELLED, atomically with the agent's claim).
+        """
+        def _withdraw(conn) -> bool:
+            lock = " FOR UPDATE" if self.db_cfg.backend == "postgres" else ""
+            row = conn.execute(
+                self._sql("SELECT remote_status FROM batches WHERE batch_id=?" + lock),
+                (batch_id,),
+            ).fetchone()
+            status = str(self._row_get(row, "remote_status", 0) or "").upper() if row else ""
+            if status == "QUEUED":
+                conn.execute(
+                    self._sql("UPDATE batches SET remote_status='CANCELLED', remote_heartbeat_at=? "
+                              "WHERE batch_id=?"),
+                    (datetime.now(timezone.utc).isoformat(), batch_id),
+                )
+                return True
+            return status in {"", "CANCELLED"}
+
+        return bool(self._run_write("withdraw_remote_order", _withdraw))
 
     def claim_remote_finalization(
         self,
@@ -3044,19 +3118,26 @@ class StateStore:
             return max(1, int(getattr(self.cfg, "max_concurrent_finalizations", 1) or 1))
 
         max_slots = _lane_limit("local")
-        lane_limits = {
-            "local": max_slots,
-            "remote": _lane_limit(
-                "remote", getattr(self.cfg, "default_dispatch_target", "")
-            ),
-        }
+        # Every remote target has its own slots: report them all under "remote".
+        remote_targets = [
+            str(t.name) for t in (getattr(self.cfg, "dispatch_targets", None) or [])
+            if str(getattr(t, "backend", "remote_agent") or "remote_agent") == "remote_agent" and t.name
+        ] or [getattr(self.cfg, "default_dispatch_target", "") or ""]
+        remote_slots = [
+            (f"remote:{target}" if target else "remote", index)
+            for target in remote_targets
+            for index in range(_lane_limit("remote", target))
+        ]
+        lane_limits = {"local": max_slots, "remote": len(remote_slots)}
         lanes = {
-            lane: [
-                lease
-                for index in range(lane_limits[lane])
+            "local": [
+                lease for index in range(max_slots)
+                if (lease := self.finalization_lease_status(finalization_slot_name("local", index)))
+            ],
+            "remote": [
+                lease for lane, index in remote_slots
                 if (lease := self.finalization_lease_status(finalization_slot_name(lane, index)))
-            ]
-            for lane in ("local", "remote")
+            ],
         }
         active_slots = [lease for slots in lanes.values() for lease in slots]
         return {

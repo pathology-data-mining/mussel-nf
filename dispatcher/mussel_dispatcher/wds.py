@@ -593,6 +593,12 @@ def _save_index(
     s3_max_concurrency: int = 4,
     removed: "set[str] | None" = None,
 ) -> None:
+    """Write the index; for S3, first add remote entries this run's copy lacks.
+
+    This run's entries always win: the remote read may be stale (older than the
+    index this run loaded under the lock), and taking its entry for a slide another
+    writer re-appended would point the slide back at a shard it was stripped from.
+    """
     removed = removed or set()
     if _is_s3(wds_dest):
         tmp = staging_dir / model / "wds_index.json"
@@ -655,6 +661,24 @@ def _build_h5_lookup(h5_dir: Path | None) -> dict[str, Path]:
             h5_lookup[sid] = h5_path
         log.info("Found %d .patch.h5 files in %s", len(h5_lookup), h5_dir)
     return h5_lookup
+
+
+def _delete_consumed_coords(h5_lookup: dict[str, Path], slide_ids: set[str],
+                            pt_dirs: list[Path]) -> int:
+    """Delete the .patch.h5 of each slide no pt_dir still holds a .features.pt for.
+
+    A .pt left in any model's dir is an append still to come (a failed hook's
+    retry), and that append reads these coords.
+    """
+    pending = {_slide_id_from_pt(pt) for d in pt_dirs if Path(d).exists()
+               for pt in Path(d).rglob("*.features.pt")}
+    n = 0
+    for slide_id in sorted(slide_ids - pending):
+        h5_path = h5_lookup.get(slide_id)
+        if h5_path is not None and h5_path.exists():
+            h5_path.unlink(missing_ok=True)
+            n += 1
+    return n
 
 
 def _own_coords(pt_path: Path, features: np.ndarray):
@@ -1063,6 +1087,14 @@ class _ShardWriter:
                 with tarfile.open(last, "r") as tar:
                     tar.getmembers()
             except (OSError, tarfile.TarError) as exc:
+                if not self._use_s3:
+                    # For a local destination this is the published shard, which
+                    # the index may point at: renaming it away would drop indexed
+                    # slides. Stop and let an operator repair it.
+                    raise RuntimeError(
+                        f"Published WDS shard {last} is unreadable ({exc}); repair it "
+                        "before appending (renaming it would lose indexed slides)"
+                    ) from exc
                 # A prior hook can be killed while tarfile is appending, leaving
                 # a truncated staging shard. Never append to it or overwrite a
                 # possibly healthy object with the same name in ECS. Preserve
@@ -1570,6 +1602,7 @@ def append_wds(
     slide_to_project: "dict[str, str] | None" = None,
     failed_slides: "set[str] | None" = None,
     also_delete_pt_dirs: "list[Path] | None" = None,
+    coords_shared_pt_dirs: "list[Path] | None" = None,
     force_new_shard: bool = False,
     skip_indexed_repairs: bool = False,
     replace_reprocessed: bool = True,
@@ -1583,7 +1616,11 @@ def append_wds(
     are deleted after all writers have been flushed (i.e. after S3 upload
     completes). If delete_coords_local is also True, shared .patch.h5 coordinate
     files are deleted too. Keep this off until every model sharing the same
-    coordinates has been written to WDS.
+    coordinates has been written to WDS, or pass coords_shared_pt_dirs.
+    coords_shared_pt_dirs: with delete_coords_local, the .pt dirs of the other
+      models sharing these coords. A requested slide's coords are then deleted
+      once no .features.pt for it is left in pt_dir or any of these dirs, i.e.
+      once every model's append has consumed it, whichever hook runs last.
     If manifest_csv is set, appends rows (slide_id, model, wds_path) to that
     CSV so callers can look up the full S3 shard path for each slide.
     s3_max_concurrency limits boto3 multipart threads per upload/download.
@@ -1626,6 +1663,7 @@ def append_wds(
                 slide_to_project=slide_to_project,
                 failed_slides=failed_slides,
                 also_delete_pt_dirs=also_delete_pt_dirs,
+                coords_shared_pt_dirs=coords_shared_pt_dirs,
                 force_new_shard=force_new_shard,
                 skip_indexed_repairs=skip_indexed_repairs,
                 replace_reprocessed=replace_reprocessed,
@@ -1654,6 +1692,7 @@ def append_wds(
                 slide_to_project=slide_to_project,
                 failed_slides=failed_slides,
                 also_delete_pt_dirs=also_delete_pt_dirs,
+                coords_shared_pt_dirs=coords_shared_pt_dirs,
                 force_new_shard=force_new_shard,
                 skip_indexed_repairs=skip_indexed_repairs,
                 replace_reprocessed=replace_reprocessed,
@@ -1912,7 +1951,7 @@ def append_wds(
             # pt_path ends in .features.pt; .with_suffix(".h5") gives .features.h5
             companion_h5 = pt_path.with_suffix(".h5")
             companion_h5.unlink(missing_ok=True)
-            if delete_coords_local and h5_path:
+            if delete_coords_local and coords_shared_pt_dirs is None and h5_path:
                 h5_path.unlink(missing_ok=True)
                 n_coords_deleted += 1
             n_deleted += 1
@@ -1922,6 +1961,12 @@ def append_wds(
             n_deleted,
             n_coords_deleted,
         )
+
+    if delete_local and delete_coords_local and coords_shared_pt_dirs is not None and not dry_run:
+        candidates = (set(slide_id_filter) if slide_id_filter is not None
+                      else {_slide_id_from_pt(pt) for pt, _ in appended_locals})
+        n_coords = _delete_consumed_coords(h5_lookup, candidates, [pt_dir, *coords_shared_pt_dirs])
+        log.info("Deleted %d shared coordinate file(s) no model still needs", n_coords)
 
     # Delete companion files from additional directories (e.g. patch encoder .pt files
     # whose features have been consumed by a slide encoder now safely in WDS).
@@ -2049,6 +2094,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repair-require-coords", action="store_true",
                         help="When repairing shards, count slides still missing coords after "
                              "tar/H5 recovery. Intended for tile embedding models.")
+    parser.add_argument("--coords-shared-pt-dirs", default=None,
+                        help="Comma-separated .pt dirs of the other models sharing --h5-dir. "
+                             "With --delete-coords-local, delete a requested slide's coords "
+                             "once none of these dirs (nor --pt-dir) still holds its .pt.")
     parser.add_argument("--also-delete-pt-dirs", default=None,
                         help="Comma-separated list of additional directories from which to "
                              "delete all files matching {slide_id}.* when --delete-local is "
@@ -2272,6 +2321,8 @@ def main(argv: list[str] | None = None) -> int:
                 failed_slides=failed_slides,
                 also_delete_pt_dirs=[Path(d) for d in args.also_delete_pt_dirs.split(",")]
                     if args.also_delete_pt_dirs else None,
+                coords_shared_pt_dirs=[Path(d) for d in args.coords_shared_pt_dirs.split(",") if d]
+                    if args.coords_shared_pt_dirs is not None else None,
                 force_new_shard=args.force_new_shard,
                 skip_indexed_repairs=args.skip_indexed_repairs,
                 replace_reprocessed=args.replace_reprocessed,

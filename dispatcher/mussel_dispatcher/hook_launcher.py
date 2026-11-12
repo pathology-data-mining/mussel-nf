@@ -82,8 +82,7 @@ def _refuse(detail: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) < 3 or argv[0] != "--release":
-        print("usage: hook_launcher.py --release DIR MODULE [ARGS...]", file=sys.stderr)
-        return 2
+        return _refuse("usage: hook_launcher.py --release DIR MODULE [ARGS...]")
     release, module, args = os.path.realpath(argv[1]), argv[2], argv[3:]
     if not os.path.isdir(os.path.join(release, PACKAGE)):
         return _refuse(f"{release} is not a dispatcher release (no {PACKAGE}/)")

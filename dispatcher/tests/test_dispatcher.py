@@ -3917,7 +3917,10 @@ class TestNextflowRunnerRun:
         assert row["fail_count"] == 0  # retry budget not consumed
 
     def test_run_shutdown_skip_auto_resume(self, tmp_path):
-        """Intentional dispatcher shutdown must not trigger per-batch auto-resume."""
+        """Intentional dispatcher shutdown must not trigger per-batch auto-resume.
+
+        The batch is left as is for restart recovery: slides stay DISPATCHED
+        and uncharged, and the work dir is kept."""
         import unittest.mock as mock
         shutdown_event = threading.Event()
         shutdown_event.set()
@@ -3942,8 +3945,9 @@ class TestNextflowRunnerRun:
         row = state._conn().execute(
             "SELECT status, fail_count FROM slides WHERE slide_path=?", ("/slides/a.svs",)
         ).fetchone()
-        assert row["status"] == "PENDING"
+        assert row["status"] == "DISPATCHED"
         assert row["fail_count"] == 0
+        mock_cleanup.assert_not_called()
 
     def test_auto_resume_retries_once_on_session_lock(self, tmp_path):
         """A transient NF session lock should not make auto-resume give up immediately."""
@@ -4463,7 +4467,7 @@ class TestAutoHooks:
         args = cfg.post_batch_hooks[0]["args"]
         assert "--delete-local" in args
 
-    def test_cleanup_results_deletes_shared_coords_only_on_last_wds_hook(self, tmp_path):
+    def test_cleanup_results_deletes_shared_coords_once_every_model_appended(self, tmp_path):
         """Shared .patch.h5 coords must survive until every model has written WDS."""
         cfg = self._load_config(
             tmp_path,
@@ -4477,9 +4481,11 @@ class TestAutoHooks:
         hooks = cfg.post_batch_hooks
         assert len(hooks) == 3
         assert all("--delete-local" in hook["args"] for hook in hooks)
-        assert "--delete-coords-local" not in hooks[0]["args"]
-        assert "--delete-coords-local" not in hooks[1]["args"]
-        assert "--delete-coords-local" in hooks[2]["args"]
+        models = ["hoptimus1", "optimus", "titan_slide"]
+        for hook, model in zip(hooks, models):
+            assert "--delete-coords-local" in hook["args"]
+            assert "--coords-shared-pt-dirs=" + ",".join(
+                "{outdir}/features/" + m for m in models if m != model) in hook["args"]
 
     def test_cleanup_results_false_does_not_add_delete_local(self, tmp_path):
         """cleanup_results=False (default) does not add --delete-local to hooks."""

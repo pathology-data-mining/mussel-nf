@@ -535,6 +535,54 @@ def _nf_log_indicates_success(nf_log_path: str | None) -> bool:
     return saw_success_stats and saw_execution_complete
 
 
+# Defaults for Config.stale_batch_idle_hours / stale_batch_max_age_hours.
+_STALE_BATCH_IDLE_HOURS = 24.0
+_STALE_BATCH_MAX_AGE_HOURS = 168.0
+
+
+def _batch_created_ts(batch_id: str) -> float | None:
+    """The batch_id's UTC creation timestamp, or None for other id formats."""
+    try:
+        return datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(
+            tzinfo=timezone.utc
+        ).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _local_batch_stale_reason(batch: dict, cfg: "Config | None" = None) -> str | None:
+    """Why a local batch is too stale to resume, or None.
+
+    Age is not staleness: a batch queued behind GPU contention can run for days
+    and still keep its Nextflow log current. Stale means no write to its nf.log,
+    trace or batch log for ``stale_batch_idle_hours``, or created more than
+    ``stale_batch_max_age_hours`` ago (0 disables either).
+    """
+    batch_id = str(batch.get("batch_id") or "")
+    idle_h = float(getattr(cfg, "stale_batch_idle_hours", _STALE_BATCH_IDLE_HOURS))
+    max_h = float(getattr(cfg, "stale_batch_max_age_hours", _STALE_BATCH_MAX_AGE_HOURS))
+    now = time.time()
+    created = _batch_created_ts(batch_id)
+    if created is not None and max_h > 0 and now - created > max_h * 3600:
+        return f"created {(now - created) / 3600:.1f}h ago, past the {max_h:g}h limit"
+    log_path = batch.get("log_path")
+    log_dir = os.path.dirname(log_path) if log_path else ""
+    paths = [log_path] + (
+        [_batch_nf_log_path(log_dir, batch_id), _batch_trace_path(log_dir, batch_id)]
+        if log_dir else []
+    )
+    mtimes = []
+    for path in paths:
+        try:
+            mtimes.append(os.path.getmtime(path))
+        except (OSError, TypeError):
+            pass
+    last = max(mtimes) if mtimes else created
+    if last is not None and idle_h > 0 and now - last > idle_h * 3600:
+        return f"no progress for {(now - last) / 3600:.1f}h"
+    return None
+
+
 def _batch_run_started_at(batch: dict) -> float:
     """Best-effort recovery of the original batch start time as a Unix timestamp."""
     dispatched_at = batch.get("dispatched_at")
@@ -1542,30 +1590,31 @@ class RunManager:
 
     def submit_resume(self, batch_id: str, csv_path: str, work_dir: str, *, allow_stale: bool = False) -> bool:
         """Re-submit an interrupted batch using the existing work dir and -resume.
-        Returns False if at the concurrency limit or if the batch is stale (>24h old)."""
-        # Reject batches whose batch_id timestamp is older than 24 hours.
-        # This prevents stale May-27 legacy batches from re-entering the
-        # pipeline across repeated dispatcher restarts.
-        try:
-            from datetime import timezone as _tz
-            id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
-            age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
-            if age_hours > 24 and not allow_stale:
-                log.warning("submit_resume: rejecting stale batch %s (created %.1fh ago) — "
-                            "resetting slides to PENDING", batch_id, age_hours)
-                self.state.reset_dispatched_to_pending(batch_id)
-                self.state.complete_batch(batch_id, exit_code=-1)
-                return False
-        except (ValueError, AttributeError):
-            pass  # batch_id doesn't match expected format; proceed
-
-        if not self._slots.acquire(blocking=False):
-            return False
-        runner_cfg = self.cfg
+        Returns False if at the concurrency limit or if the batch is stale."""
+        # Reject stale batches so abandoned legacy batches cannot re-enter the
+        # pipeline across repeated dispatcher restarts. Remote batches keep the
+        # creation-age rule; local ones are stale only without recent progress.
         try:
             batch = self.state.get_batch(batch_id) or {}
         except Exception:
             batch = {}
+        if not allow_stale:
+            if batch.get("backend") == "remote_agent":
+                created = _batch_created_ts(batch_id)
+                age_hours = (time.time() - created) / 3600 if created is not None else 0.0
+                stale_reason = f"created {age_hours:.1f}h ago" if age_hours > 24 else None
+            else:
+                stale_reason = _local_batch_stale_reason({"batch_id": batch_id, **batch}, self.cfg)
+            if stale_reason:
+                log.warning("submit_resume: rejecting stale batch %s (%s) — "
+                            "resetting slides to PENDING", batch_id, stale_reason)
+                self.state.reset_dispatched_to_pending(batch_id)
+                self.state.complete_batch(batch_id, exit_code=-1)
+                return False
+
+        if not self._slots.acquire(blocking=False):
+            return False
+        runner_cfg = self.cfg
         if batch.get("backend") == "remote_agent":
             runner_cfg = copy.deepcopy(self.cfg)
             runner_cfg.execution_backend = "remote_agent"
@@ -1708,16 +1757,22 @@ class RunManager:
                     row["batch_id"]: row for row in self.state.get_active_batches()
                 }
                 batch = active_rows.get(batch_id) or {}
-                shutdown_recovery = (
-                    self._shutdown_event.is_set()
-                    and batch.get("status") in {"RECOVERING", "FINALIZING"}
-                )
+                # Once shutdown began the batch belongs to restart recovery,
+                # whether or not stop_for_restart_recovery() reached it yet.
+                shutdown_recovery = self._shutdown_event.is_set()
                 # Requeue only when nothing can still be computing these slides. nf_pid
                 # is not that signal: a remote batch never records one. A runner that
                 # predates the flag falls back to it.
                 running = getattr(runner, "work_may_be_running", None)
                 if running is None:
                     running = bool(self.state.get_batch_nf_pid(batch_id))
+                if (not running and batch_id in active_rows and not shutdown_recovery
+                        and batch.get("backend") == "remote_agent"
+                        and not getattr(runner, "driver_succeeded", False)
+                        and not self.state.withdraw_remote_order(batch_id)):
+                    # The submit failed after its order committed and the agent has
+                    # claimed it: requeueing now would run these slides twice.
+                    running = True
                 if (batch_id in active_rows and not shutdown_recovery and not running
                         and getattr(runner, "driver_succeeded", False)):
                     # Nextflow finished: the outputs exist. Hand the batch to the
@@ -1756,6 +1811,14 @@ class RunManager:
         finally:
             self._close_worker_state_connection()
 
+    def begin_shutdown(self) -> None:
+        """Tell workers shutdown has begun; safe from a signal handler.
+
+        A worker whose Nextflow then exits non-zero leaves the batch to
+        restart recovery instead of booking a failure.
+        """
+        self._shutdown_event.set()
+
     def shutdown(self, wait: bool = True):
         self._shutdown_event.set()
         log.info("RunManager shutting down (wait=%s)…", wait)
@@ -1780,8 +1843,10 @@ class RunManager:
         with self._lock:
             active = list(self._futures.keys())
 
-        preserved = 0
-        failed = 0
+        # Publish every recovery decision before terminating any Nextflow: a
+        # batch's run can end (signalled by the service stop, or by another
+        # batch's teardown) while this loop is still busy with an earlier one.
+        plans = []
         for batch_id in active:
             batch = self.state.get_batch(batch_id) or {"batch_id": batch_id}
             backend = batch.get("backend")
@@ -1796,20 +1861,26 @@ class RunManager:
                 and work_dir and os.path.isdir(work_dir)
                 and csv_path and os.path.isfile(csv_path)
             )
-            # Publish the recovery decision before terminating Nextflow.  The
-            # worker can return from proc.wait() immediately after SIGTERM; if
-            # it observes RUNNING, its normal exit path can overwrite the
-            # preservation decision with FAILED before this method gets there.
             recovery_status = None
+            outcome = "remote" if backend == "remote_agent" else "failed"
             if has_resume_state:
                 recovery_status = (
                     "FINALIZING" if _nf_log_indicates_success(nf_log_path)
                     else "RECOVERING"
                 )
-                self.state.set_batch_status(batch_id, recovery_status)
+                # Conditional: never revive a batch its worker already ended.
+                if self.state.preserve_batch_for_recovery(batch_id, recovery_status):
+                    outcome = "preserved"
+                else:
+                    outcome = "ended"
             elif backend != "remote_agent":
                 self.state.reset_dispatched_to_pending(batch_id)
                 self.state.complete_batch(batch_id, exit_code=-1)
+            plans.append((batch_id, outcome, recovery_status, trace_path, nf_log_path))
+
+        preserved = 0
+        failed = 0
+        for batch_id, outcome, recovery_status, trace_path, nf_log_path in plans:
             nf_pid = self.state.get_batch_nf_pid(batch_id)
             if nf_pid:
                 try:
@@ -1824,14 +1895,13 @@ class RunManager:
                     )
                 except Exception:
                     pass
-            if backend == "remote_agent":
+            if outcome == "remote":
                 log.info(
                     "Shutdown: preserving remote batch %s for status-driven recovery on restart",
                     batch_id,
                 )
                 preserved += 1
-                continue
-            if has_resume_state:
+            elif outcome == "preserved":
                 if recovery_status == "FINALIZING":
                     log.info(
                         "Shutdown: preserved local batch %s for post-success finalization replay on restart",
@@ -1843,9 +1913,11 @@ class RunManager:
                         batch_id,
                     )
                 preserved += 1
-                continue
-            log.info("Shutdown: marked batch %s FAILED and reset slides to PENDING", batch_id)
-            failed += 1
+            elif outcome == "ended":
+                log.info("Shutdown: batch %s already ended before shutdown; left as is", batch_id)
+            else:
+                log.info("Shutdown: marked batch %s FAILED and reset slides to PENDING", batch_id)
+                failed += 1
 
         return preserved, failed
 
@@ -2068,13 +2140,7 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
             has_resume_state = bool(
                 work_dir and os.path.isdir(work_dir) and csv_path and os.path.isfile(csv_path)
             )
-            batch_age_hours = None
-            try:
-                from datetime import timezone as _tz
-                id_ts = datetime.strptime(batch_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
-                batch_age_hours = (datetime.now(_tz.utc) - id_ts).total_seconds() / 3600
-            except (ValueError, KeyError):
-                pass  # batch_id doesn't match expected format; proceed normally
+            stale_reason = _local_batch_stale_reason(batch, cfg)
 
             # If nf_pid is missing or dead but the work dir and batch CSV still
             # exist, prefer a Nextflow -resume over resetting the slides. This
@@ -2105,9 +2171,9 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
                         batch_id,
                     )
                     continue
-                if batch_age_hours is not None and batch_age_hours > 24:
-                    log.info("  Batch %s: stale (created %.1fh ago) — resetting slides to PENDING",
-                             batch_id, batch_age_hours)
+                if stale_reason:
+                    log.info("  Batch %s: stale (%s) — resetting slides to PENDING",
+                             batch_id, stale_reason)
                     state.reset_dispatched_to_pending(batch_id)
                     state.complete_batch(batch_id, exit_code=-1)
                     continue
@@ -2159,9 +2225,9 @@ def recover_in_flight(state: StateStore, pending_deque: deque, retry_failed: boo
                             batch_id, nf_pid,
                         )
                         continue
-                    if batch_age_hours is not None and batch_age_hours > 24:
-                        log.info("  Batch %s: stale (created %.1fh ago) — resetting slides to PENDING",
-                                 batch_id, batch_age_hours)
+                    if stale_reason:
+                        log.info("  Batch %s: stale (%s) — resetting slides to PENDING",
+                                 batch_id, stale_reason)
                         state.reset_dispatched_to_pending(batch_id)
                         state.complete_batch(batch_id, exit_code=-1)
                         continue
@@ -2526,10 +2592,16 @@ def main():
     _start_status_snapshot_publisher(cfg, state, stop_event)
 
     # Signal handling — first Ctrl+C: graceful stop; second Ctrl+C: immediate exit
+    shutdown_hooks: list = []
+
     def _handle_signal(signum, frame):
         sys.stderr.write(f"\nReceived signal {signum}, shutting down gracefully…\n")
         sys.stderr.write("Press Ctrl+C again to force exit immediately.\n")
         stop_event.set()
+        # Workers must know at once: the same stop may already be ending
+        # their Nextflow runs (systemd signals the whole control group).
+        for hook in shutdown_hooks:
+            hook()
         # Restore default handlers so a second signal exits immediately
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
@@ -2539,6 +2611,7 @@ def main():
 
     # RunManager
     run_manager = RunManager(cfg, state)
+    shutdown_hooks.append(run_manager.begin_shutdown)
 
     pending_deque: deque = deque()
 

@@ -3,8 +3,9 @@
 
 Creates:
 1. Application role
-2. Application database
-3. Dispatcher tables and indexes
+2. Application database (owned by the application role)
+3. Dispatcher tables and indexes, created by the application role through StateStore,
+   so it owns them and its schema migrations can ALTER them
 
 Usage:
   python dispatcher/scripts/provision_postgres.py \
@@ -12,8 +13,8 @@ Usage:
     --admin-user postgres \
     --admin-password-env POSTGRES_ADMIN_PASSWORD \
     --db-host db.example.org \
-    --db-name mussel_dispatcher_cohort \
-    --app-user mussel_dispatcher_cohort \
+    --db-name mussel_dispatcher \
+    --app-user mussel_dispatcher \
     --app-password-env POSTGRES_APP_PASSWORD
 """
 from __future__ import annotations
@@ -26,192 +27,29 @@ import psycopg
 from psycopg import sql
 
 
-SCHEMA_STATEMENTS = [
-    """
-    CREATE TABLE IF NOT EXISTS slides (
-        slide_path TEXT PRIMARY KEY,
-        slide_id TEXT NOT NULL,
-        oncotree_code TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'PENDING',
-        batch_id TEXT,
-        download_path TEXT,
-        fail_count INTEGER NOT NULL DEFAULT 0,
-        first_seen_at TEXT,
-        dispatched_at TEXT,
-        completed_at TEXT,
-        error_msg TEXT,
-        file_id TEXT,
-        file_name TEXT,
-        needs_download INTEGER NOT NULL DEFAULT 0,
-        priority INTEGER NOT NULL DEFAULT 0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS batches (
-        batch_id TEXT PRIMARY KEY,
-        status TEXT NOT NULL DEFAULT 'RUNNING',
-        slide_count INTEGER,
-        dispatched_at TEXT,
-        completed_at TEXT,
-        nextflow_exit INTEGER,
-        csv_path TEXT,
-        work_dir TEXT,
-        log_path TEXT,
-        manifest_path TEXT,
-        session_id TEXT,
-        nf_pid INTEGER,
-        run_name TEXT,
-        backend TEXT NOT NULL DEFAULT 'local',
-        target TEXT,
-        remote_run_id TEXT,
-        remote_status TEXT,
-        remote_heartbeat_at TEXT,
-        remote_driver_job_id TEXT,
-        remote_work_dir TEXT,
-        remote_outdir TEXT,
-        remote_log_path TEXT,
-        remote_payload TEXT,
-        finalization_stage TEXT NOT NULL DEFAULT 'PENDING',
-        finalization_owner TEXT,
-        finalization_heartbeat_at TEXT,
-        finalization_retry_at TEXT,
-        finalization_error TEXT
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS batch_hooks (
-        batch_id TEXT NOT NULL,
-        hook_index INTEGER NOT NULL,
-        phase TEXT NOT NULL DEFAULT '',
-        hook_name TEXT NOT NULL DEFAULT '',
-        command TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'PENDING',
-        started_at TEXT,
-        completed_at TEXT,
-        exit_code INTEGER,
-        error_msg TEXT,
-        required INTEGER NOT NULL DEFAULT 1,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        next_retry_at TEXT,
-        executor_job_id TEXT,
-        executor_state TEXT,
-        failure_category TEXT,
-        failure_detail TEXT,
-        runtime_revision TEXT,
-        execution_node TEXT,
-        idempotency_key TEXT,
-        active_attempt_number INTEGER,
-        PRIMARY KEY (batch_id, hook_index)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS hook_circuit_breakers (
-        target TEXT PRIMARY KEY,
-        category TEXT NOT NULL DEFAULT '',
-        failure_times TEXT NOT NULL DEFAULT '[]',
-        paused INTEGER NOT NULL DEFAULT 0,
-        state TEXT NOT NULL DEFAULT 'CLOSED',
-        canary_batch_id TEXT,
-        canary_started_at TEXT,
-        reason TEXT NOT NULL DEFAULT '',
-        updated_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS hook_failure_events (
-        target TEXT NOT NULL,
-        hook_name TEXT NOT NULL,
-        category TEXT NOT NULL,
-        batch_id TEXT NOT NULL,
-        attempt_number INTEGER NOT NULL DEFAULT 0,
-        detail TEXT NOT NULL DEFAULT '',
-        failed_at TEXT NOT NULL,
-        PRIMARY KEY (target, hook_name, category, batch_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS hook_attempts (
-        batch_id TEXT NOT NULL,
-        hook_index INTEGER NOT NULL,
-        attempt_number INTEGER NOT NULL,
-        started_at TEXT,
-        completed_at TEXT,
-        status TEXT NOT NULL DEFAULT 'RUNNING',
-        exit_code INTEGER,
-        failure_category TEXT,
-        failure_detail TEXT,
-        runtime_revision TEXT,
-        execution_node TEXT,
-        idempotency_key TEXT,
-        PRIMARY KEY (batch_id, hook_index, attempt_number)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS remote_agents (
-        target TEXT PRIMARY KEY,
-        heartbeat_at TEXT,
-        host TEXT,
-        status TEXT,
-        payload TEXT
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS coordination_leases (
-        lease_name TEXT PRIMARY KEY,
-        owner TEXT NOT NULL,
-        batch_id TEXT,
-        acquired_at TEXT NOT NULL,
-        heartbeat_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL
-    )
-    """,
-    "CREATE TABLE IF NOT EXISTS _schema_migrations (name TEXT PRIMARY KEY)",
-    "CREATE INDEX IF NOT EXISTS idx_slides_status ON slides(status)",
-    "CREATE INDEX IF NOT EXISTS idx_slides_batch_id ON slides(batch_id)",
-    "CREATE INDEX IF NOT EXISTS idx_slides_slide_id ON slides(slide_id)",
-    "CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status)",
-    "CREATE INDEX IF NOT EXISTS idx_batches_remote_queue ON batches(target, remote_status)",
-    "CREATE INDEX IF NOT EXISTS idx_batches_remote_finalization ON batches(target, remote_status, finalization_retry_at)",
-    "CREATE INDEX IF NOT EXISTS idx_batches_remote_queue_order ON batches(target, remote_status, dispatched_at, batch_id)",
-    "CREATE INDEX IF NOT EXISTS idx_batches_remote_finalization_order ON batches(target, remote_status, finalization_retry_at, dispatched_at, batch_id)",
-    "CREATE INDEX IF NOT EXISTS idx_batch_hooks_batch_id ON batch_hooks(batch_id)",
-    "CREATE INDEX IF NOT EXISTS idx_batch_hooks_status ON batch_hooks(status)",
-    "CREATE INDEX IF NOT EXISTS idx_batch_hooks_executor_poll ON batch_hooks(status, executor_state, executor_job_id, batch_id)",
-    "CREATE INDEX IF NOT EXISTS idx_hook_failure_events_window ON hook_failure_events(target, hook_name, category, failed_at)",
-    "CREATE INDEX IF NOT EXISTS idx_coordination_leases_expires_at ON coordination_leases(expires_at)",
-    "CREATE INDEX IF NOT EXISTS idx_remote_agents_heartbeat_at ON remote_agents(heartbeat_at)",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS run_name TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS backend TEXT NOT NULL DEFAULT 'local'",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS target TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS remote_run_id TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS remote_status TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS remote_heartbeat_at TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS remote_driver_job_id TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS remote_work_dir TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS remote_outdir TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS remote_log_path TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS remote_payload TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS finalization_stage TEXT NOT NULL DEFAULT 'PENDING'",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS finalization_owner TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS finalization_heartbeat_at TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS finalization_retry_at TEXT",
-    "ALTER TABLE batches ADD COLUMN IF NOT EXISTS finalization_error TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS required INTEGER NOT NULL DEFAULT 1",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS next_retry_at TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS executor_job_id TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS executor_state TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS failure_category TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS failure_detail TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS runtime_revision TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS execution_node TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS idempotency_key TEXT",
-    "ALTER TABLE batch_hooks ADD COLUMN IF NOT EXISTS active_attempt_number INTEGER",
-    "ALTER TABLE hook_circuit_breakers ADD COLUMN IF NOT EXISTS state TEXT",
-    "ALTER TABLE hook_circuit_breakers ADD COLUMN IF NOT EXISTS canary_batch_id TEXT",
-    "ALTER TABLE hook_circuit_breakers ADD COLUMN IF NOT EXISTS canary_started_at TEXT",
-    "UPDATE hook_circuit_breakers SET state=CASE WHEN paused=1 THEN 'OPEN' ELSE 'CLOSED' END WHERE state IS NULL",
-]
+def schema_tables() -> list[str]:
+    """Every table the dispatcher's Postgres schema defines (the state module is the
+    source of truth; this script used to keep its own, stale copy)."""
+    from mussel_dispatcher.state import _PG_SCHEMA, _SLIDE_ROLLUPS_DDL, _schema_table_columns
+    return sorted(_schema_table_columns(_PG_SCHEMA + ";" + _SLIDE_ROLLUPS_DDL))
+
+
+def create_schema_as_app_user(*, host: str, port: int, db_name: str, app_user: str,
+                              app_password: str, sslmode: str) -> None:
+    """Create and migrate the schema with StateStore, connected as the app user, so the
+    app owns every table: its later ALTER TABLE migrations must be run by the owner."""
+    from mussel_dispatcher.config import Config, PostgresConfig
+    from mussel_dispatcher.state import StateStore
+    env_name = "MUSSEL_PROVISION_APP_PASSWORD"
+    os.environ[env_name] = app_password
+    try:
+        StateStore(Config(
+            nextflow_profiles="", outdir="", state_backend="postgres",
+            postgres=PostgresConfig(host=host, port=port, database=db_name, user=app_user,
+                                    password_env=env_name, sslmode=sslmode),
+        ), strict_schema=True)
+    finally:
+        os.environ.pop(env_name, None)
 
 
 def _password_from_env(name: str, *, required: bool = True) -> str:
@@ -296,27 +134,32 @@ def provision(args: argparse.Namespace) -> None:
         autocommit=False,
     ) as conn:
         with conn.cursor() as cur:
+            tables = schema_tables()
             if args.recreate_schema:
-                cur.execute("DROP TABLE IF EXISTS batch_hooks")
-                cur.execute("DROP TABLE IF EXISTS batches")
-                cur.execute("DROP TABLE IF EXISTS slides")
-                cur.execute("DROP TABLE IF EXISTS remote_agents")
-                cur.execute("DROP TABLE IF EXISTS coordination_leases")
-                cur.execute("DROP TABLE IF EXISTS _schema_migrations")
-            for stmt in SCHEMA_STATEMENTS:
-                cur.execute(stmt)
+                # Every table of the schema, so no stale rollups, breakers or
+                # deployment state survive a recreate.
+                for table in tables:
+                    cur.execute(sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(sql.Identifier(table)))
             cur.execute(
                 sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
                     sql.Identifier(args.db_name),
                     sql.Identifier(args.app_user),
                 )
             )
-            cur.execute(
-                sql.SQL("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {}").format(
-                    sql.Identifier(args.app_user),
-                )
-            )
+            cur.execute(sql.SQL("GRANT ALL ON SCHEMA public TO {}").format(sql.Identifier(args.app_user)))
+            # Tables an older provisioning created as the admin: hand them to the app,
+            # whose StateStore migrations ALTER them.
+            cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            for (table,) in cur.fetchall():
+                if table in tables:
+                    cur.execute(sql.SQL("ALTER TABLE {} OWNER TO {}").format(
+                        sql.Identifier(table), sql.Identifier(args.app_user)))
             conn.commit()
+
+    create_schema_as_app_user(
+        host=args.db_host, port=args.db_port, db_name=args.db_name, app_user=args.app_user,
+        app_password=app_password, sslmode=args.sslmode,
+    )
 
     with _connect(
         host=args.db_host,

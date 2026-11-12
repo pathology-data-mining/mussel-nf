@@ -28,6 +28,7 @@ from .batch_lifecycle import (
     build_nextflow_command,
     write_batch_csv,
 )
+from . import driver_watch
 from .config import Config, RemoteTargetConfig
 from .contract import (
     build_contract,
@@ -37,7 +38,7 @@ from .contract import (
     tracked_source_manifest,
     validate_semantic_params,
 )
-from .hook_launcher import is_launched
+from .hook_launcher import LAUNCHER, is_launched
 from .state import REMOTE_FINALIZATION_LEASE_NAME, StateStore
 from .storage import (
     CapacityGuard,
@@ -81,6 +82,8 @@ _SLURM_INFRASTRUCTURE_FAILURES = frozenset({
     "DEADLINE", "OOM", "REVOKED",
 })
 log = logging.getLogger("mussel-dispatcher")
+# nextflow.log tail read for stall detection (dumps every 5 min, so hours fit).
+_DRIVER_STALL_LOG_TAIL_BYTES = 2 * 1024 * 1024
 
 
 _ORDER_FAILURE_BACKOFF_BASE_SECONDS = 30
@@ -463,6 +466,7 @@ def render_driver_script(order: dict[str, Any], target: RemoteTargetConfig) -> s
         ],
     ))
     quoted_cmd = " ".join(shlex.quote(str(part)) for part in cmd)
+    watch_block = _render_driver_watch(order, target, nf_log)
     runtime_checks = _render_runtime_checks(order)
     release_check = _render_release_check(order)
     # Computed here: a backslash inside an f-string expression is a SyntaxError before 3.12.
@@ -505,8 +509,35 @@ if [[ -n "${{ECS_SECRET_KEY:-}}" ]]; then
 fi
 echo "[mussel-driver] $(date -Is) starting batch {batch_id}"
 echo "[mussel-driver] command: {quoted_cmd}"
-{quoted_cmd}
+{watch_block}{quoted_cmd}
 echo "[mussel-driver] $(date -Is) completed batch {batch_id}"
+"""
+
+
+def _render_driver_watch(order: dict[str, Any], target: RemoteTargetConfig, nf_log: str) -> str:
+    """Start driver_watch.py beside Nextflow (lost Slurm jobs); it exits with the driver.
+
+    It runs under the dispatcher's own interpreter (or ``driver_watch_python``), never
+    a bare python3: a cluster's system python3 may be 3.6, which cannot even import it.
+    """
+    if not target.lost_job_detection:
+        return ""
+    run_dir = order["remote_run_dir"]
+    script = os.path.join(order["remote_repo_dir"], "dispatcher", "mussel_dispatcher", "driver_watch.py")
+    python = target.driver_watch_python or sys.executable
+    args = " ".join(shlex.quote(str(part)) for part in (
+        "--run-dir", run_dir, "--nf-log", nf_log,
+        "--grace-seconds", int(target.lost_job_grace_seconds),
+        "--interval-seconds", int(target.driver_watch_interval_seconds),
+    ))
+    log_path = shlex.quote(os.path.join(run_dir, "driver_watch.log"))
+    return f"""if [[ -x {shlex.quote(python)} && -f {shlex.quote(script)} ]]; then
+  {shlex.quote(python)} {shlex.quote(script)} {args} --parent-pid $$ >> {log_path} 2>&1 &
+  watch_pid=$!
+  trap 'kill "$watch_pid" 2>/dev/null || true' EXIT
+else
+  echo "[mussel-driver] driver watch unavailable: no {python} or {script}" >&2
+fi
 """
 
 
@@ -801,7 +832,11 @@ class RemoteAgent:
             target=_watchdog, name="remote-agent-watchdog", daemon=True
         )
         self._agent_heartbeat_thread.start()
-        self._agent_watchdog_thread.start()
+        # --once runs finalization synchronously in this thread, so a long WDS hook
+        # would look like a stall and be killed (os._exit) mid-append. A single pass
+        # has no loop to un-stick; the watchdog is for the long-running agent.
+        if not getattr(self, "once", False):
+            self._agent_watchdog_thread.start()
 
     def _stop_agent_heartbeat(self) -> None:
         self._agent_heartbeat_stop.set()
@@ -961,7 +996,7 @@ class RemoteAgent:
         active_batch_ids = pool.running_batch_ids() if pool is not None else set()
         try:
             health = self.state.reconcile_finalization_slots(
-                lane="remote",
+                lane=f"remote:{self.target.name}",
                 max_slots=self._finalization_limit(),
                 owner=self._finalization_owner,
                 active_batch_ids=active_batch_ids,
@@ -1757,6 +1792,14 @@ class RemoteAgent:
         self._attach_remote_log_tail(order, status, update)
         raw_state = str(slurm_state.get("state") or "").split()
         state = raw_state[0].rstrip("+") if raw_state else None   # "CANCELLED by 123", "CANCELLED+"
+        if state == "RUNNING":
+            self._attach_driver_watch(order, status, update, str(job_id))
+        stall_cancelled = status.get("stall_cancelled_at") or update.get("stall_cancelled_at")
+        nextflow_abort = (
+            self._nextflow_infrastructure_abort(order)
+            if state in _SLURM_TERMINAL_STATES - _SLURM_INFRASTRUCTURE_FAILURES - {"COMPLETED", "CANCELLED"}
+            and not stall_cancelled else None
+        )
         if state in {"COMPLETED"}:
             self.state.mark_driver_terminal(batch_id, 0)
             self._cleanup_remote_work_dir(order)
@@ -1783,7 +1826,7 @@ class RemoteAgent:
                 return
             lease_name = self.state.claim_finalization_slot(
                 batch_id,
-                lane="remote",
+                lane=f"remote:{self.target.name}",
                 max_slots=max_finalizations,
                 owner=getattr(self, "_finalization_owner", "remote-agent"),
                 ttl_seconds=max(
@@ -1817,16 +1860,23 @@ class RemoteAgent:
         elif state in _SLURM_TERMINAL_STATES - {"COMPLETED"}:
             # Every terminal state, as for hook jobs: DEADLINE, OOM or REVOKED used
             # to fall through to RUNNING and leave the batch running forever.
-            update["status"] = "CANCELLED" if state == "CANCELLED" else "FAILED"
+            update["status"] = "CANCELLED" if state == "CANCELLED" and not stall_cancelled else "FAILED"
             # sacct often reports 0:0 for a job Slurm ended (CANCELLED, TIMEOUT,
             # DEADLINE, REVOKED). A failed batch must never publish exit 0: the
             # dispatcher's waiter would clean it up as a success.
             update["nextflow_exit"] = slurm_state.get("exit_code") or -1
             update["failure_class"] = (
-                "SLURM_INFRASTRUCTURE" if state in _SLURM_INFRASTRUCTURE_FAILURES
+                "DRIVER_STALLED" if stall_cancelled
+                else "SLURM_INFRASTRUCTURE" if state in _SLURM_INFRASTRUCTURE_FAILURES or nextflow_abort
                 else "SLURM_EXECUTION"
             )
-            update["error"] = f"driver job ended with Slurm state {state}"
+            update["error"] = (
+                f"driver cancelled after stalling ({(status.get('driver_stall') or {}).get('reason', 'stalled')})"
+                if stall_cancelled
+                else f"driver job ended with Slurm state {state}: Nextflow aborted, "
+                     f"{nextflow_abort['reason']} ({nextflow_abort['cause']})"
+                if nextflow_abort else f"driver job ended with Slurm state {state}"
+            )
         elif status.get("cancel_requested_at"):
             update["status"] = "CANCEL_REQUESTED"
         else:
@@ -1854,7 +1904,10 @@ class RemoteAgent:
                 reason=f"driver ended before hooks: Slurm state {state}",
             )
             slurm_failure = str(state or "").upper()
-            infrastructure_failure = slurm_failure in _SLURM_INFRASTRUCTURE_FAILURES
+            infrastructure_failure = (
+                bool(stall_cancelled) or bool(nextflow_abort)
+                or slurm_failure in _SLURM_INFRASTRUCTURE_FAILURES
+            )
             # mark_slides_complete charges fail_count on every call, so a
             # replay after a crash must not run it for already-released
             # slides.
@@ -1866,6 +1919,110 @@ class RemoteAgent:
                 )
             self._write_status_if_changed(client, batch_id, update)
             self._cleanup_remote_work_dir(order)
+
+    def _attach_driver_watch(
+        self, order: dict[str, Any], status: dict[str, Any], update: dict[str, Any], job_id: str,
+    ) -> None:
+        """Publish lost jobs (from driver_watch.json) and a stalled driver; alert on new ones."""
+        batch_id = order["batch_id"]
+        run_dir = Path(str(order.get("remote_run_dir") or ""))
+        if not str(order.get("remote_run_dir") or "").strip():
+            return
+        warnings = []
+        watch = driver_watch.read_status(run_dir)
+        interval = max(1, int(self.target.driver_watch_interval_seconds or 120))
+        missing_since = self.__dict__.setdefault("_driver_watch_missing_since", {})
+        if watch is None:
+            if self.target.lost_job_detection:
+                # Process-local: after an agent restart the clock starts over, which
+                # only delays this warning.
+                first = missing_since.setdefault(batch_id, time.monotonic())
+                if time.monotonic() - first > max(600, 5 * interval):
+                    warnings.append("driver watch never started (no driver_watch.json; see driver_watch.log)")
+        else:
+            missing_since.pop(batch_id, None)
+            lost = list(watch.get("lost_jobs") or [])
+            known = {(j.get("job_id"), j.get("work_dir")) for j in status.get("lost_jobs") or []}
+            for job in lost:
+                if (job.get("job_id"), job.get("work_dir")) not in known:
+                    log.error(
+                        "ALERT batch %s: Slurm job %s of %s was lost (%s); the driver watch "
+                        "failed the task (exit %s), work dir %s",
+                        batch_id, job.get("job_id"), job.get("task"), job.get("reason"),
+                        job.get("exit_code"), job.get("work_dir"),
+                    )
+            update["lost_jobs"] = lost
+            if lost:
+                warnings.append(f"{len(lost)} lost Slurm job(s) failed by the driver watch")
+            try:
+                beat = datetime.fromisoformat(str(watch.get("heartbeat_at")))
+                quiet = (datetime.now(timezone.utc) - beat).total_seconds()
+            except (TypeError, ValueError):
+                quiet = float("inf")
+            if quiet > max(600, 5 * interval):
+                warnings.append("driver watch is not running (stale driver_watch.json)")
+        nf_log = Path(str(order.get("remote_nf_log") or run_dir / "nextflow.log"))
+        try:
+            text = driver_watch.read_tail(nf_log, _DRIVER_STALL_LOG_TAIL_BYTES)
+        except OSError:
+            text = ""
+        stall = driver_watch.assess_stall(
+            text, datetime.now(timezone.utc),
+            idle_seconds=float(self.target.driver_stall_idle_seconds or 0),
+            no_progress_seconds=float(self.target.driver_stall_no_progress_seconds or 0),
+        ) if text else None
+        if stall:
+            previous = status.get("driver_stall") or {}
+            if not previous:
+                log.error(
+                    "ALERT batch %s: driver %s stalled (%s, no task event for %ds; idle executors %s)",
+                    batch_id, job_id, stall["reason"], stall["quiet_seconds"],
+                    ", ".join(stall["idle_executors"]) or "-",
+                )
+            if all(previous.get(k) == stall.get(k) for k in ("reason", "last_task_event_at")):
+                # The same stall: republish it as first seen. quiet_seconds grows every
+                # poll and would rewrite the stored status each time.
+                stall = previous
+            else:
+                stall["detected_at"] = previous.get("detected_at") or utc_now()
+            update["driver_stall"] = stall
+            warnings.append(
+                f"DRIVER_STALLED: {stall['reason']} "
+                f"(no task event since {stall.get('last_task_event_at') or stall['detected_at']})"
+            )
+            # Only a deadlock is cancelled: a run with no progress may be waiting on its queue.
+            if (self.target.driver_stall_cancel and stall.get("cancellable")
+                    and not status.get("stall_cancelled_at")):
+                log.error("Batch %s: cancelling stalled driver %s (driver_stall_cancel)", batch_id, job_id)
+                try:
+                    subprocess.run(
+                        ["scancel", job_id], check=False, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+                    )
+                except Exception as exc:   # retried next poll; this poll's status still lands
+                    log.error("Batch %s: scancel of stalled driver %s failed: %s", batch_id, job_id, exc)
+                else:
+                    update["stall_cancelled_at"] = utc_now()
+        elif status.get("driver_stall"):
+            update["driver_stall"] = None
+        update["warning"] = "; ".join(warnings) or None
+
+    def _nextflow_infrastructure_abort(self, order: dict[str, Any]) -> dict[str, Any] | None:
+        """Why Nextflow aborted this driver, when Slurm (not the run) caused it.
+
+        Past every sbatch retry (or a lost job's last retry) Nextflow aborts the
+        session and the driver ends FAILED, which on its own reads as the run's
+        failure and would charge every slide.
+        """
+        run_dir = str(order.get("remote_run_dir") or "").strip()
+        nf_log = order.get("remote_nf_log") or (os.path.join(run_dir, "nextflow.log") if run_dir else "")
+        if not nf_log:
+            return None
+        try:
+            text = driver_watch.read_tail(Path(str(nf_log)), _DRIVER_STALL_LOG_TAIL_BYTES)
+        except OSError:
+            return None
+        return driver_watch.nextflow_abort_cause(text)
 
     def _batch_still_owns_dispatched_slides(self, order: dict[str, Any]) -> bool:
         """True unless every slide of the order is known to be released."""
@@ -2016,7 +2173,7 @@ class RemoteAgent:
         )
         lease_name = self.state.claim_finalization_slot(
             batch_id,
-            lane="remote",
+            lane=f"remote:{self.target.name}",
             max_slots=max_finalizations,
             owner=owner,
             ttl_seconds=ttl_seconds,
@@ -2516,7 +2673,13 @@ class RemoteAgent:
                 shlex.quote(str(Path(cwd) / "dispatcher" / "mussel_dispatcher")),
             )
             # A launched hook checks where its module comes from in the process that runs it.
-            if not is_launched(cmd):
+            # Its launcher must still exist here: python exits 2 for a missing script.
+            if is_launched(cmd):
+                preflight += (
+                    "test -r %s || { echo '[mussel-hook-preflight] category=RELEASE_OR_CONFIG "
+                    "detail=hook-launcher-missing'; exit 78; }\n"
+                ) % shlex.quote(LAUNCHER)
+            else:
                 preflight += (
                     "if ! %s -c %s; then echo '[mussel-hook-preflight] category=RELEASE_OR_CONFIG "
                     "detail=dispatcher-import-failed'; exit 78; fi\n"

@@ -39,7 +39,9 @@ include = ["mussel_dispatcher*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not live_nextflow'"
 markers = [
     "integration: exercises several dispatcher components together",
     "e2e: end-to-end runs of the dispatcher against stub pipelines",
+    "live_nextflow: runs a real Nextflow pipeline (stub mode); run with -m live_nextflow",
 ]

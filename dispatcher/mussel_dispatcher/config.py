@@ -144,6 +144,22 @@ class RemoteTargetConfig:
     agent_heartbeat_timeout_seconds: int = 300
     secrets_env_file: str = ""
     env: dict = field(default_factory=dict)
+    # Driver watch (driver_watch.py, run next to Nextflow in the driver job): fail a
+    # task whose Slurm job is gone without having run (not queued under our name;
+    # sacct has no record of it for us, or ours never started) after this grace.
+    lost_job_detection: bool = True
+    lost_job_grace_seconds: int = 1800
+    driver_watch_interval_seconds: int = 120
+    # Interpreter (>=3.9) for driver_watch.py in the driver job; empty: the one running
+    # this agent. Not a bare python3 (a cluster's system one may be 3.6).
+    driver_watch_python: str = ""
+    # Stalled driver: every executor idle with dataflow nodes still active, or no task
+    # submitted/completed while no executor has tasks in flight, for this long (0
+    # disables). Published as DRIVER_STALLED; with driver_stall_cancel the idle case
+    # (a deadlock) is cancelled as an infrastructure failure, never no-progress alone.
+    driver_stall_idle_seconds: int = 3 * 3600
+    driver_stall_no_progress_seconds: int = 12 * 3600
+    driver_stall_cancel: bool = False
 
 
 @dataclass
@@ -193,6 +209,10 @@ class Config:
     retry_failed: bool = True
     max_slide_retries: int = 5
     stuck_batch_timeout_hours: float = 4.0  # kill NF if log file silent for this long (0 = disabled)
+    # Restart recovery resets a local batch only when its NF logs show no
+    # progress for this long, or it is older than the max age (0 = disabled).
+    stale_batch_idle_hours: float = 24.0
+    stale_batch_max_age_hours: float = 168.0
     cleanup_work_dir: bool = False
     cleanup_downloads: bool = False
     cleanup_batch_csv: bool = False
@@ -621,7 +641,7 @@ class Config:
         for w in self.watchers:
             if w.type == "databricks" and w.wds_destinations:
                 destinations = list(w.wds_destinations.items())
-                for idx, (model, dest) in enumerate(destinations):
+                for model, dest in destinations:
                     args = [
                         "--pt-dir={outdir}/features/" + model,
                         "--h5-dir={outdir}/tiles",
@@ -644,8 +664,7 @@ class Config:
                         args.append("--aws-profile=" + w.aws_profile)
                     if self.cleanup_results:
                         args.append("--delete-local")
-                        if idx == len(destinations) - 1:
-                            args.append("--delete-coords-local")
+                        args.extend(_coords_cleanup_args(model, [m for m, _ in destinations]))
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args, "required": True})
 
             if w.type != "tcga":
@@ -653,7 +672,7 @@ class Config:
 
             if w.wds_destinations:
                 destinations = list(w.wds_destinations.items())
-                for idx, (model, dest) in enumerate(destinations):
+                for model, dest in destinations:
                     args = [
                         "--pt-dir={outdir}/features/" + model,
                         "--h5-dir={outdir}/tiles",
@@ -676,8 +695,7 @@ class Config:
                         args.append("--s3-endpoint=" + w.s3_endpoint)
                     if self.cleanup_results:
                         args.append("--delete-local")
-                        if idx == len(destinations) - 1:
-                            args.append("--delete-coords-local")
+                        args.extend(_coords_cleanup_args(model, [m for m, _ in destinations]))
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args, "required": True})
 
             if w.databricks_volume_folder or w.databricks_volume_path:
@@ -689,6 +707,19 @@ class Config:
                 )
 
         return hooks + db_hooks
+
+
+def _coords_cleanup_args(model: str, models: list[str]) -> list[str]:
+    """WDS args deleting a slide's shared .patch.h5 once every model has appended it.
+
+    Every model's hook gets them, so whichever append finishes the slide last,
+    including a failed hook's retry, deletes its coords.
+    """
+    others = [m for m in models if m != model]
+    if not others:
+        return ["--delete-coords-local"]
+    return ["--delete-coords-local",
+            "--coords-shared-pt-dirs=" + ",".join("{outdir}/features/" + m for m in others)]
 
 
 def _build_db_sync_hook(w: "WatcherConfig", module: str, extra_args: list[str],
@@ -856,8 +887,10 @@ def _read_nf_model_types(repo_dir: str, nextflow_params_file: str = "") -> list[
         try:
             with open(nextflow_params_file) as f:
                 data = yaml.safe_load(f) or {}
-            models = (data.get("featurize") or {}).get("model_types") or []
-            if isinstance(models, list):
+            models = (data.get("featurize") or {}).get("model_types")
+            # Only a params file that lists models overrides the defaults; one that
+            # doesn't set them used to return [] and skip the nextflow.config fallback.
+            if isinstance(models, list) and models:
                 return [str(m) for m in models]
         except OSError:
             log.warning("Could not read %s — falling back to nextflow.config", nextflow_params_file)

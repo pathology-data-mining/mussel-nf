@@ -74,7 +74,14 @@ def classify_hook_failure(
         # argparse exits 2 as well (e.g. a release without a newly added flag). That is
         # a release problem for the circuit breaker, not missing slides to retry.
         return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "hook command-line usage error")
+    if returncode == 2 and (re.search(r"can't open file '.*': \[errno \d+\]", text)
+                            or "usage: hook_launcher.py" in text):
+        # Python exits 2 for a script it cannot open (a removed release's launcher),
+        # and so did the launcher's own usage error: a release problem, not coverage.
+        return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "hook launcher is missing or misinvoked")
     if returncode == 2 and "mussel_dispatcher.wds" in hook_command:
+        # wds.main's "WDS validation failed for <model>: ... no index entry"; an exit 2
+        # with no recognizable marker is conservatively treated the same way.
         return HookOutcome(HookFailureCategory.COVERAGE_MISSING, "WDS coverage is incomplete")
     if returncode == 78:
         if "hook batch csv is unreadable" in text or "dispatcher package is missing" in text:

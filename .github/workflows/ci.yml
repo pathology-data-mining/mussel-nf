@@ -245,6 +245,20 @@ jobs:
             tests/pipeline_real_featurize_partial_slide.nf.test \
             tests/abmil_features_suffix.nf.test
 
+      # Production cluster + slurm profiles against a fake Slurm that fails submissions;
+      # its watchdog turns a hung run into a failure.
+      - name: Run Slurm submission-failure test (fake Slurm)
+        timeout-minutes: 20
+        run: PATH="$GITHUB_WORKSPACE/tests/fake_slurm:$PATH" nf-test test tests/pipeline_fake_slurm.nf.test
+
+      # The driver watch beside real Nextflow (lost job failed and retried) and the remote
+      # agent classifying runs Nextflow aborted on Slurm failures (~1 min).
+      - name: Run live driver-watch tests (Nextflow + fake Slurm)
+        timeout-minutes: 20
+        run: |
+          pip install pytest -e dispatcher/
+          cd dispatcher && pytest tests/test_driver_watch.py -q -m live_nextflow
+
   # ── TCGA scripts integration: stub pipeline output → append_wds ────────
   nf-test-stub-tcga:
     name: nf-test — TCGA scripts integration (stub)

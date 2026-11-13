@@ -53,6 +53,37 @@ def resolve_database_config(cfg: "Config") -> ResolvedDatabaseConfig:
     return ResolvedDatabaseConfig(backend="sqlite", sqlite_path=cfg.state_db_path())
 
 
+def _postgres_socket_kwargs() -> dict[str, int]:
+    """Client-side TCP liveness for PostgreSQL sessions.
+
+    statement_timeout and lock_timeout are enforced by the server, so they do
+    nothing when the server never sees the statement. A session idle for tens
+    of minutes (a finalization worker between batches) can be silently dropped
+    by the network path to the database host; the next statement is then
+    retransmitted for ~15 min (tcp_retries2) while its writer holds the
+    process-wide write lock. Keepalives keep idle flows alive, and
+    tcp_user_timeout fails a send the peer never acknowledges.
+    """
+    kwargs = {
+        "keepalives": 1,
+        "keepalives_idle": int(os.environ.get("MUSSEL_POSTGRES_KEEPALIVES_IDLE", "60")),
+        "keepalives_interval": int(os.environ.get("MUSSEL_POSTGRES_KEEPALIVES_INTERVAL", "10")),
+        "keepalives_count": int(os.environ.get("MUSSEL_POSTGRES_KEEPALIVES_COUNT", "3")),
+    }
+    tcp_user_timeout_ms = int(os.environ.get("MUSSEL_POSTGRES_TCP_USER_TIMEOUT_MS", "30000"))
+    # libpq < 12 rejects tcp_user_timeout as an unknown connection option.
+    if tcp_user_timeout_ms > 0 and _libpq_version() >= 120000:
+        kwargs["tcp_user_timeout"] = tcp_user_timeout_ms
+    return kwargs
+
+
+def _libpq_version() -> int:
+    try:
+        return int(psycopg.pq.version())
+    except Exception:
+        return 0
+
+
 def connect_database(
     db_cfg: ResolvedDatabaseConfig,
     *,
@@ -105,6 +136,7 @@ def connect_database(
                 f"-c idle_in_transaction_session_timeout={idle_tx_timeout_ms}"
             )
         connect_kwargs["options"] = options
+        connect_kwargs.update(_postgres_socket_kwargs())
 
         conn = psycopg.connect(**connect_kwargs)
         # State reads must not retain an implicit transaction between polling

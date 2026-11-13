@@ -22,6 +22,7 @@ from .config import Config
 from .hook_hardening import (
     HookFailureCategory,
     classify_hook_failure,
+    hook_failure_text,
     preflight_hook,
 )
 from .hook_launcher import launch_command
@@ -837,7 +838,7 @@ class PostBatchHooks:
                 else:
                     if required:
                         phase_ok = False
-                    error = (result.stderr or result.stdout or "")[-1000:]
+                    error = hook_failure_text(result.stdout, result.stderr)
                     outcome = classify_hook_failure(
                         result.returncode,
                         error,

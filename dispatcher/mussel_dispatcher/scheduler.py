@@ -850,6 +850,8 @@ class BatchScheduler:
         _last_failed_workdir_cleanup = time.monotonic()
         _ETA_LOG_INTERVAL = 1800  # log ETA every 30 minutes
         while not self.stop_event.is_set():
+            # Before fresh work: deferred resumes already count as active batches.
+            self.run_manager.submit_deferred_resumes()
             self._maybe_dispatch()
             now = time.monotonic()
             if now - _last_pool_status >= 60:
@@ -1211,6 +1213,42 @@ def _split_startup_resumes(cfg: Config, resume_specs: list) -> tuple[list, list]
     return resume_specs[:cap], resume_specs[cap:]
 
 
+def _submit_startup_resumes(cfg: Config, state: StateStore, run_manager: "RunManager",
+                            resume_specs: list) -> int:
+    """Submit startup resumes up to the slot count; returns how many were submitted.
+
+    Over the cap, a local batch is reset to PENDING; a remote one keeps its
+    remote run and is resumed (its status polled) once a slot frees up.
+    """
+    resume_cap = _execution_slot_count(cfg)
+    capped_resumes, excess_resumes = _split_startup_resumes(cfg, resume_specs)
+    for batch_id, csv_path, work_dir in excess_resumes:
+        batch = state.get_batch(batch_id) or {}
+        if batch.get("backend") == "remote_agent":
+            log.warning(
+                "Startup cap: deferring remote recovery batch %s beyond "
+                "max_concurrent_runs (effective)=%d; its status polling resumes when a slot frees up",
+                batch_id,
+                resume_cap,
+            )
+            run_manager.defer_resume(batch_id, csv_path, work_dir)
+            continue
+        log.info(
+            "Startup cap: resetting recovery batch %s slides to PENDING "
+            "(exceeds max_concurrent_runs (effective)=%d)",
+            batch_id, resume_cap,
+        )
+        state.reset_dispatched_to_pending(batch_id)
+        state.complete_batch(batch_id, exit_code=-1)
+    submitted = 0
+    for batch_id, csv_path, work_dir in capped_resumes:
+        if run_manager.submit_resume(batch_id, csv_path, work_dir):
+            submitted += 1
+        else:
+            log.error("Recovery submission failed for resume batch %s", batch_id)
+    return submitted
+
+
 class RunManager:
     _ACTIVE_BATCH_COUNT_CACHE_TTL = 30.0
 
@@ -1244,6 +1282,11 @@ class RunManager:
         # the DB.  BatchScheduler._requeue_db_pending() excludes these IDs so that
         # the 60-second sweep never re-enqueues slides that are mid-submission.
         self._in_flight: dict[str, set] = {}
+        # batch_id -> execution pool of a fresh submission until its runner ends.
+        # Its batch row is written later in the worker, so pool limits count these too.
+        self._submitted_pools: dict[str, str] = {}
+        # Startup resumes of remote batches beyond the slot count, resubmitted as slots free.
+        self._deferred_resumes: deque = deque()
         self._remote_reattach_attempts: dict[str, int] = {}
         self._lock = threading.Lock()
         # Semaphore that serialises concurrency decisions atomically.
@@ -1348,13 +1391,20 @@ class RunManager:
 
     def active_batch_counts_by_pool(self) -> dict[str, int]:
         counts: dict[str, int] = {}
+        seen: set[str] = set()
         for batch in self.state.get_scheduling_active_batches():
+            seen.add(str(batch.get("batch_id") or ""))
             pool_name = self.cfg.infer_batch_pool_name(
                 backend=batch.get("backend"),
                 target=batch.get("target"),
             )
             if not pool_name:
                 continue
+            counts[pool_name] = counts.get(pool_name, 0) + 1
+        # Submitted batches whose worker has not written the row yet.
+        with self._lock:
+            pending = [pool for batch_id, pool in self._submitted_pools.items() if batch_id not in seen]
+        for pool_name in pending:
             counts[pool_name] = counts.get(pool_name, 0) + 1
         return counts
 
@@ -1534,8 +1584,13 @@ class RunManager:
             shutdown_event=self._shutdown_event,
             finalization_submitter=self._queue_post_success_finalization,
         )
+        pool_name = self.cfg.infer_batch_pool_name(
+            backend=runner_cfg.execution_backend, target=runner_cfg.default_dispatch_target
+        )
         with self._lock:
             self._in_flight[batch_id] = slide_ids
+            if pool_name:
+                self._submitted_pools[batch_id] = pool_name
             future: Future = self._executor.submit(self._run_runner, runner)
             self._futures[batch_id] = future
         future.add_done_callback(lambda f, r=runner: self._on_done(batch_id, f, r))
@@ -1615,10 +1670,16 @@ class RunManager:
         if not self._slots.acquire(blocking=False):
             return False
         runner_cfg = self.cfg
+        # The batch row, not the top-level default, says how this batch runs:
+        # a local batch under execution_backend=remote_agent must not poll for an agent.
         if batch.get("backend") == "remote_agent":
             runner_cfg = copy.deepcopy(self.cfg)
             runner_cfg.execution_backend = "remote_agent"
             runner_cfg.default_dispatch_target = batch.get("target") or self.cfg.default_dispatch_target
+        elif batch.get("backend") == "local" and self.cfg.execution_backend != "local":
+            runner_cfg = copy.deepcopy(self.cfg)
+            runner_cfg.execution_backend = "local"
+            runner_cfg.default_dispatch_target = ""
         # Resume batches have slides already DISPATCHED in DB — no in-flight tracking needed.
         runner = NextflowRunner(runner_cfg, batch_id, [], self.state,
                                 resume=True, existing_csv_path=csv_path,
@@ -1630,6 +1691,42 @@ class RunManager:
             self._futures[batch_id] = future
         future.add_done_callback(lambda f, r=runner: self._on_done(batch_id, f, r))
         return True
+
+    def defer_resume(self, batch_id: str, csv_path: str, work_dir: str) -> None:
+        """Resume a batch with submit_resume() once a slot frees up."""
+        with self._lock:
+            self._deferred_resumes.append((batch_id, csv_path, work_dir))
+
+    def submit_deferred_resumes(self) -> int:
+        """Submit deferred resumes while slots are free; returns how many were submitted."""
+        submitted = 0
+        while True:
+            with self._lock:
+                if not self._deferred_resumes:
+                    return submitted
+                batch_id, csv_path, work_dir = self._deferred_resumes[0]
+                running = batch_id in self._futures
+            try:
+                batch = self.state.get_batch(batch_id) or {}
+            except Exception as exc:
+                log.warning("Deferred resume of %s: batch lookup failed: %s", batch_id, exc)
+                return submitted
+            if running or batch.get("status") not in ("RUNNING", "RECOVERING"):
+                with self._lock:
+                    self._deferred_resumes.popleft()
+                continue
+            # allow_stale: the agent still owns a remote batch; a creation-age reset
+            # here would requeue slides it is computing (as _reattach_remote_waiter).
+            if not self.submit_resume(batch_id, csv_path, work_dir, allow_stale=True):
+                if (self.state.get_batch(batch_id) or {}).get("status") in ("RUNNING", "RECOVERING"):
+                    return submitted  # no free slot yet
+                with self._lock:
+                    self._deferred_resumes.popleft()  # ended meanwhile
+                continue
+            with self._lock:
+                self._deferred_resumes.popleft()
+            submitted += 1
+            log.info("Resumed deferred recovery batch %s", batch_id)
 
     def submit_finalize_recovered_success(
         self,
@@ -1746,6 +1843,7 @@ class RunManager:
         with self._lock:
             self._futures.pop(batch_id, None)
             self._in_flight.pop(batch_id, None)
+            self._submitted_pools.pop(batch_id, None)
         self._slots.release()
         self._invalidate_active_batch_count_cache()
         try:
@@ -2639,33 +2737,8 @@ def main():
     # The cap must match RunManager's slot count (the summed execution pool
     # limits); a larger cap makes submit_resume() refuse the overflow, leaving
     # those batches RECOVERING with no runner.
-    resume_cap = _execution_slot_count(cfg)
-    capped_resumes, excess_resumes = _split_startup_resumes(cfg, resume_specs)
-    for batch_id, csv_path, work_dir in excess_resumes:
-        batch = state.get_batch(batch_id) or {}
-        if batch.get("backend") == "remote_agent":
-            log.warning(
-                "Startup cap: leaving remote recovery batch %s active even though it exceeds "
-                "max_concurrent_runs (effective)=%d; remote agent heartbeats remain authoritative until a "
-                "resume slot is available",
-                batch_id,
-                resume_cap,
-            )
-            continue
-        log.info(
-            "Startup cap: resetting recovery batch %s slides to PENDING "
-            "(exceeds max_concurrent_runs (effective)=%d)",
-            batch_id, resume_cap,
-        )
-        state.reset_dispatched_to_pending(batch_id)
-        state.complete_batch(batch_id, exit_code=-1)
-    submitted_resumes = 0
+    submitted_resumes = _submit_startup_resumes(cfg, state, run_manager, resume_specs)
     submitted_finalizations = 0
-    for batch_id, csv_path, work_dir in capped_resumes:
-        if run_manager.submit_resume(batch_id, csv_path, work_dir):
-            submitted_resumes += 1
-        else:
-            log.error("Recovery submission failed for resume batch %s", batch_id)
     for batch_id, csv_path, log_path, work_dir, run_started_at, nf_log_path in finalize_specs:
         if run_manager.submit_finalize_recovered_success(
             batch_id,

@@ -32,6 +32,8 @@ _LOCK_RETRY_BASE_SECONDS = 1.0
 _POSTGRES_STATUS_READ_TIMEOUT_MS = 5000
 _POSTGRES_SCHEMA_LOCK_TIMEOUT_MS = 1000
 _POSTGRES_SCHEMA_STATEMENT_TIMEOUT_MS = 5000
+# A thread's session idle longer than this is reconnected before use (StateStore._idle_too_long).
+_POSTGRES_MAX_IDLE_SECONDS = 600
 _SNAPSHOT_ENRICHMENT_TTL_SECONDS = 5 * 60
 _SNAPSHOT_ENRICHMENT_RETRY_SECONDS = 60
 _RUN_NAME_LOG_TAIL_BYTES = 128 * 1024
@@ -539,14 +541,44 @@ class StateStore:
             # closed psycopg connection must not be handed back to callers;
             # otherwise every subsequent operation in that worker fails before
             # post-batch hooks can even be started.
+            now = time.monotonic()
             try:
-                if not bool(getattr(conn, "closed", False)):
+                if not bool(getattr(conn, "closed", False)) and not self._idle_too_long(conn, now):
+                    self._local.conn_used_at = now
                     return conn
             except Exception:
                 pass
             self.close_thread_connection()
         self._local.conn = connect_database(self.db_cfg, check_same_thread=False)
+        self._local.conn_used_at = time.monotonic()
         return self._local.conn
+
+    def _idle_too_long(self, conn, now: float) -> bool:
+        """A PostgreSQL session idle past MUSSEL_POSTGRES_MAX_IDLE_SECONDS is replaced.
+
+        Finalization workers sit idle between batches for an hour or more, long
+        enough for the network path to drop the flow without a reset. Reusing
+        that socket hung the worker's first write (set_batch_status) inside the
+        process-wide write lock until TCP gave up (~15 min), so the main loop and
+        the agent heartbeat queued behind it and the stall watchdog killed the
+        agent. A fresh session costs one connect.
+        """
+        if self.db_cfg.backend != "postgres":
+            return False
+        max_idle = float(os.environ.get(
+            "MUSSEL_POSTGRES_MAX_IDLE_SECONDS", str(_POSTGRES_MAX_IDLE_SECONDS)))
+        used_at = getattr(self._local, "conn_used_at", None)
+        if max_idle <= 0 or used_at is None or now - used_at <= max_idle:
+            return False
+        # Never drop a session mid-transaction (a nested _conn() in a long write).
+        try:
+            in_transaction = int(conn.info.transaction_status) != 0   # 0 = IDLE
+        except Exception:
+            in_transaction = False
+        if in_transaction:
+            return False
+        log.debug("Replacing PostgreSQL session idle for %.0fs", now - used_at)
+        return True
 
     def close_thread_connection(self) -> None:
         """Release the database session owned by the current worker thread."""
@@ -767,9 +799,10 @@ class StateStore:
                 conn.execute(
                     f"SET LOCAL lock_timeout TO '{_POSTGRES_SCHEMA_LOCK_TIMEOUT_MS}ms'"
                 )
-                conn.execute(
-                    f"SET LOCAL statement_timeout TO '{_POSTGRES_SCHEMA_STATEMENT_TIMEOUT_MS}ms'"
-                )
+                # Startup DDL is bounded; an explicit migration (index builds,
+                # the rollup backfill over every slide) must be allowed to finish.
+                statement_timeout_ms = 0 if self._strict_schema else _POSTGRES_SCHEMA_STATEMENT_TIMEOUT_MS
+                conn.execute(f"SET LOCAL statement_timeout TO '{statement_timeout_ms}ms'")
 
             def _exec_schema_ddl(sql: str) -> None:
                 if self.db_cfg.backend == "postgres":
@@ -977,7 +1010,11 @@ class StateStore:
                 CREATE TABLE IF NOT EXISTS _schema_migrations (name TEXT PRIMARY KEY);
             """
             if self.db_cfg.backend == "sqlite":
-                conn.executescript(sqlite_schema)
+                # Not executescript(): it COMMITs the BEGIN IMMEDIATE first, so the
+                # migration below would run in autocommit (and concurrently).
+                # Split on ";": keep the schema free of triggers and of ";" in comments or strings.
+                for stmt in [s.strip() for s in sqlite_schema.split(";") if s.strip()]:
+                    conn.execute(stmt)
             else:
                 for stmt in [s.strip() for s in _PG_SCHEMA.split(";") if s.strip()]:
                     _exec_schema_ddl(stmt)

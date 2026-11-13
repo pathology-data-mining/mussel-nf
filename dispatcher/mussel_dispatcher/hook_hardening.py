@@ -45,6 +45,10 @@ def classify_hook_failure(
     """Map an executor result to a bounded recovery policy."""
     text = (output or "").lower()
     state = (slurm_state or "").upper()
+    if not state:
+        # The Slurm executor reports the job's end state as a line in the output.
+        state_match = re.search(r"slurm hook state=([a-z_]+)", text)
+        state = state_match.group(1).upper() if state_match else ""
     marker = re.search(r"\[mussel-hook-preflight\]\s+category=([A-Z_]+)", output or "", re.IGNORECASE)
     if marker:
         category = marker.group(1).upper()
@@ -84,9 +88,10 @@ def classify_hook_failure(
         # with no recognizable marker is conservatively treated the same way.
         return HookOutcome(HookFailureCategory.COVERAGE_MISSING, "WDS coverage is incomplete")
     if returncode == 78:
-        if "hook batch csv is unreadable" in text or "dispatcher package is missing" in text:
+        # The details the Slurm hook preflight prints, should its marker be cut off.
+        if "batch-csv-unreadable" in text or "dispatcher-package-missing" in text:
             return HookOutcome(HookFailureCategory.NODE_INFRA, "compute-node hook preflight path is unavailable")
-        if "dispatcher import preflight failed" in text:
+        if "dispatcher-import-failed" in text:
             return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "compute-node hook import preflight failed")
         return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "hook preflight failed")
     # Before the release/config markers: a timeout's traceback names files and
@@ -105,6 +110,26 @@ def classify_hook_failure(
     )):
         return HookOutcome(HookFailureCategory.RELEASE_OR_CONFIG, "runtime or configuration mismatch")
     return HookOutcome(HookFailureCategory.HOOK_BUG, "hook returned a non-success result")
+
+
+_PREFLIGHT_MARKER_LINE = re.compile(r"^.*\[mussel-hook-preflight\]\s+category=.*$", re.MULTILINE | re.IGNORECASE)
+
+
+def hook_failure_text(stdout: str | None, stderr: str | None, limit: int = 1000) -> str:
+    """The tail of a failed hook's output, keeping a preflight marker from either stream.
+
+    The Slurm preflight prints its marker on stdout, while stderr usually has
+    content too (the Slurm state and node lines, a traceback).
+    """
+    text = (stderr or stdout or "")[-limit:]
+    for stream in (stderr, stdout):
+        markers = _PREFLIGHT_MARKER_LINE.findall(stream or "")
+        if markers:
+            marker = markers[-1].strip()
+            if marker not in text:
+                text = (text.rstrip() + "\n" + marker)[-limit:]
+            break
+    return text
 
 
 def preflight_hook(

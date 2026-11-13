@@ -241,10 +241,12 @@ class CapacityGuard:
         return True
 
     def _thresholds(self, *, resume: bool) -> tuple[float, float]:
-        percent = float(
-            self.policy.resume_free_percent if resume else self.policy.min_free_percent
-        )
-        gib = float(self.policy.resume_free_gib if resume else self.policy.min_free_gib)
+        percent = float(self.policy.min_free_percent or 0)
+        gib = float(self.policy.min_free_gib or 0)
+        if resume:
+            # An unset (0) resume threshold must not resume onto a still-full FS.
+            percent = max(percent, float(self.policy.resume_free_percent or 0))
+            gib = max(gib, float(self.policy.resume_free_gib or 0))
         return percent, gib
 
     @staticmethod

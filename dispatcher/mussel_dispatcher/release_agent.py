@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import Config, RemoteTargetConfig
+from .config import Config, RemoteTargetConfig, release_stage_root
 from .contract import build_contract, git_revision, release_manifest_hash, tracked_source_manifest
 from .state import StateStore
 
@@ -97,12 +97,7 @@ class ReleaseAgent:
             f"{target.name}:{socket.gethostname()}"
         )
         self.repo_dir = target.remote_repo_dir or cfg.repo_dir
-        stage_root = (
-            os.environ.get("MUSSEL_RELEASE_STAGE_ROOT", "").strip()
-            or getattr(target, "release_stage_root", "")
-            or f"{self.repo_dir}.releases"
-        )
-        self.stage_root = Path(stage_root)
+        self.stage_root = Path(release_stage_root(target, self.repo_dir)[0])
         self.active_release_link = (
             os.environ.get("MUSSEL_ACTIVE_RELEASE_LINK", "").strip()
             or getattr(target, "active_release_link", "")

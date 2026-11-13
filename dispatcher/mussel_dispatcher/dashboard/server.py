@@ -311,7 +311,6 @@ def _build_handler(cfg: Config):
     if not os.path.exists(dispatcher_log_path):
         dispatcher_log_path = os.path.join(cfg.log_dir, "dispatcher.nohup.out")
     wds_manifest = os.path.join(cfg.outdir, "wds_manifest.csv")
-    wds_staging_dir = os.path.join(cfg.state_dir, "wds-staging")
     nf_log_path = os.path.join(cfg.repo_dir, ".nextflow.log")
     sync_status_path = os.path.join(cfg.state_dir, "sync_status.json")
     dispatcher_status_snapshot_path = os.path.join(cfg.state_dir, "dispatcher_status.json")
@@ -321,6 +320,9 @@ def _build_handler(cfg: Config):
         if w.wds_destinations:
             tcga_watcher = w
             break
+    wds_staging_dir = (
+        getattr(tcga_watcher, "wds_staging_dir", "") or os.path.join(cfg.state_dir, "wds-staging")
+    )
 
     # Cache inventory total (unique slides the dispatcher should eventually process).
     # Filter by the watcher's slide_type (e.g. "DX" matches DX1, DX2, ...) since
@@ -849,6 +851,7 @@ def _build_handler(cfg: Config):
     _status_cache_lock = threading.Lock()
 
     def _compute_status_payload():
+        release_sync = _release_sync_health()
         with _db() as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) AS n FROM slides GROUP BY status"

@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -69,6 +70,9 @@ class FaultyConnection:
         self._tx: list[str] = []
         self.closed = False
         self.broken = False
+        # Set to an Event to black-hole the session: the network dropped the idle
+        # flow without a reset, so a statement hangs until TCP gives up.
+        self.hang: threading.Event | None = None
 
     def _die(self):
         self.closed = self.broken = True
@@ -80,6 +84,10 @@ class FaultyConnection:
     def execute(self, sql, params=()):
         if self.closed:
             raise psycopg.OperationalError("the connection is closed")
+        if self.hang is not None:
+            self.hang.wait(30)
+            self._die()
+            raise psycopg.OperationalError(_LOST)
         text = f"{sql} {params!r}"
         if sql.strip().upper() == "BEGIN":
             self._tx = []
@@ -384,3 +392,40 @@ def test_remote_waiter_reconnects_after_its_session_drops(db, tmp_path, monkeypa
     assert finished, "waiter kept polling a dead session"
     assert faults.connects > connects
     assert result == {"rc": 0}
+
+
+def test_idle_session_is_replaced_before_the_dropped_flow_hangs_a_write(db, monkeypatch):
+    # A finalization worker's session sat idle between
+    # batches, the network dropped the flow without a reset, and the worker's first
+    # write (set_batch_status) hung inside the process-wide write lock. The main
+    # loop's next write queued behind it and the stall watchdog killed the agent.
+    make_store, faults = db
+    store = make_store()
+    monkeypatch.setenv("MUSSEL_POSTGRES_MAX_IDLE_SECONDS", "0.2")
+    dropped, idle, resume, finished = (threading.Event() for _ in range(4))
+
+    def finalization_worker():
+        store.set_batch_status("batch-a", "FINALIZING")
+        store._conn().hang = dropped           # the idle flow is gone
+        idle.set()
+        resume.wait(10)
+        store.set_batch_status("batch-a", "FINALIZING")
+        finished.set()
+
+    worker = threading.Thread(target=finalization_worker, daemon=True)
+    worker.start()
+    try:
+        assert idle.wait(10)
+        connects = faults.connects
+        time.sleep(0.3)                        # idle past MUSSEL_POSTGRES_MAX_IDLE_SECONDS
+        resume.set()
+        main_write = threading.Thread(
+            target=store.set_batch_status, args=("batch-b", "RUNNING"), daemon=True)
+        main_write.start()
+        main_write.join(5)
+        assert finished.wait(5), "worker reused the dead session"
+        assert not main_write.is_alive(), "main-loop write stuck behind the write lock"
+        assert faults.connects > connects
+    finally:
+        dropped.set()
+        worker.join(35)

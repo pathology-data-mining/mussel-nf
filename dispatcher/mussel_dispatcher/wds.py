@@ -977,13 +977,30 @@ def _repair_indexed_slide_coords_if_possible(
             stats["missing_shard"] = 1
             return stats
     try:
-        return _repair_coords_in_tar(
+        stats = _repair_coords_in_tar(
             stats, tar_path, slide_id=slide_id, h5_path=h5_path, wds_dest=wds_dest,
             model_type=model_type, shard_file=shard_file, dry_run=dry_run,
             s3_max_concurrency=s3_max_concurrency, verify_lock=verify_lock)
     finally:
         if temp_copy:
             tar_path.unlink(missing_ok=True)
+    staged = staging_dir / model_type / shard_file if temp_copy else None
+    if staged is not None and stats["repaired"] and not dry_run and staged.exists():
+        # A writer may hold this shard open and upload its staged copy at flush;
+        # repair that copy too, or the flush undoes the repair. Best effort: S3 is
+        # already repaired, and a truncated staged copy (a killed hook's) must not
+        # fail the hook; quarantine it so no writer reopens it.
+        try:
+            _repair_wds_tar(staged, h5_lookup={slide_id: h5_path}, require_coords=True, dry_run=False)
+        except (tarfile.TarError, OSError, EOFError, ValueError) as exc:
+            quarantine = staged.with_name(f"{staged.name}.corrupt.{int(time.time())}")
+            try:
+                staged.replace(quarantine)
+            except OSError:
+                quarantine = staged
+            log.warning("Could not repair staged WDS shard %s (%s); quarantined as %s",
+                        staged, exc, quarantine)
+    return stats
 
 
 def _repair_coords_in_tar(

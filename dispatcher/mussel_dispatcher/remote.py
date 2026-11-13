@@ -2,18 +2,21 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import hashlib
 import json
 import logging
 import os
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -29,7 +32,7 @@ from .batch_lifecycle import (
     write_batch_csv,
 )
 from . import driver_watch
-from .config import Config, RemoteTargetConfig
+from .config import Config, RemoteTargetConfig, release_stage_root
 from .contract import (
     build_contract,
     execution_profile_hash,
@@ -131,6 +134,39 @@ def _hard_exit(code: int) -> None:
         except Exception:
             pass
     os._exit(code)
+
+
+def _format_thread_stacks() -> str:
+    """Every thread's current stack, labelled with its name (faulthandler has none)."""
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    blocks = []
+    for ident, frame in sys._current_frames().items():
+        stack = "".join(traceback.format_stack(frame))
+        blocks.append(f"--- thread {names.get(ident, '?')} (ident {ident}) ---\n{stack}")
+    return "\n".join(blocks)
+
+
+def _install_process_diagnostics() -> None:
+    """Timestamped logging, and a live all-thread stack dump on SIGUSR1.
+
+    ``kill -USR1 <agent pid>`` writes every thread's stack to stderr (the agent
+    log) without stopping the agent.
+    """
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)-8s %(threadName)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+            stream=sys.stderr,
+        )
+    # INFO from the S3/HTTP stack ("Found credentials ..." per client) would bury the agent's own lines.
+    for noisy in ("botocore", "boto3", "s3transfer", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    if hasattr(signal, "SIGUSR1"):
+        try:
+            faulthandler.register(signal.SIGUSR1, all_threads=True)
+        except (RuntimeError, ValueError, OSError) as exc:
+            log.warning("Could not register SIGUSR1 stack dump: %s", exc)
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -466,6 +502,8 @@ def render_driver_script(order: dict[str, Any], target: RemoteTargetConfig) -> s
         ],
     ))
     quoted_cmd = " ".join(shlex.quote(str(part)) for part in cmd)
+    # Quoted as a whole: "$", "`" or '"' in the command must not expand or break the echo.
+    command_message = shlex.quote(f"[mussel-driver] command: {quoted_cmd}")
     watch_block = _render_driver_watch(order, target, nf_log)
     runtime_checks = _render_runtime_checks(order)
     release_check = _render_release_check(order)
@@ -508,7 +546,7 @@ if [[ -n "${{ECS_SECRET_KEY:-}}" ]]; then
   {shlex.quote(nextflow_bin)} secrets set ECS_SECRET_KEY "${{ECS_SECRET_KEY}}" >/dev/null
 fi
 echo "[mussel-driver] $(date -Is) starting batch {batch_id}"
-echo "[mussel-driver] command: {quoted_cmd}"
+printf '%s\\n' {command_message}
 {watch_block}{quoted_cmd}
 echo "[mussel-driver] $(date -Is) completed batch {batch_id}"
 """
@@ -792,6 +830,51 @@ class RemoteAgent:
         with self._main_loop_progress_lock:
             return self._main_loop_progress_at, self._main_loop_progress_monotonic
 
+    def _set_main_loop_phase(self, phase: str, batch_id: str = "") -> None:
+        """Record the main loop's current step for the stall watchdog's report."""
+        # One tuple assignment: the watchdog thread reads it without a lock.
+        self._main_loop_phase = (phase, str(batch_id or ""), time.monotonic())
+
+    def _describe_main_loop_phase(self) -> str:
+        phase, batch_id, since = getattr(self, "_main_loop_phase", None) or ("unknown", "", None)
+        text = f"phase {phase}"
+        if batch_id:
+            text += f" batch {batch_id}"
+        if since is not None:
+            text += f" for {time.monotonic() - since:.0f}s"
+        return text
+
+    def _check_main_loop_stall(self, watchdog_timeout: float) -> bool:
+        """Exit for supervisor recovery when the main loop stopped making progress.
+
+        Logs the main loop's phase and every thread's stack first: without them a
+        stall leaves no evidence of what blocked.
+        """
+        progress_at, progress_mono = self._main_loop_progress()
+        stalled = time.monotonic() - progress_mono
+        if stalled <= watchdog_timeout:
+            return False
+        # Dumping takes logging and stream locks a stuck thread may hold; never
+        # let the dump keep a stalled agent alive.
+        backstop = threading.Timer(30.0, _hard_exit, args=(_WATCHDOG_EXIT_CODE,))
+        backstop.daemon = True
+        backstop.start()
+        log.error(
+            "Remote agent main loop stalled for %.0fs (last progress %s; %s); "
+            "exiting %d for supervisor recovery",
+            stalled,
+            progress_at,
+            self._describe_main_loop_phase(),
+            _WATCHDOG_EXIT_CODE,
+        )
+        try:
+            log.error("Thread stacks at main-loop stall:\n%s", _format_thread_stacks())
+        except Exception:
+            faulthandler.dump_traceback(all_threads=True)
+        _hard_exit(_WATCHDOG_EXIT_CODE)
+        backstop.cancel()      # only reached when _hard_exit is stubbed (tests)
+        return True
+
     def _start_agent_heartbeat(self) -> None:
         if self._agent_heartbeat_thread and self._agent_heartbeat_thread.is_alive():
             return
@@ -811,19 +894,8 @@ class RemoteAgent:
         def _watchdog() -> None:
             check_interval = max(5, min(30, interval))
             while not self._agent_heartbeat_stop.wait(check_interval):
-                progress_at, progress_mono = self._main_loop_progress()
-                stalled = time.monotonic() - progress_mono
-                if stalled <= watchdog_timeout:
-                    continue
-                log.error(
-                    "Remote agent main loop stalled for %.0fs (last progress %s); "
-                    "exiting %d for supervisor recovery",
-                    stalled,
-                    progress_at,
-                    _WATCHDOG_EXIT_CODE,
-                )
-                _hard_exit(_WATCHDOG_EXIT_CODE)
-                return
+                if self._check_main_loop_stall(watchdog_timeout):
+                    return
 
         self._agent_heartbeat_thread = threading.Thread(
             target=_heartbeat, name="remote-agent-heartbeat", daemon=True
@@ -860,12 +932,17 @@ class RemoteAgent:
         # interpret a large stale work directory as a dead worker.
         self._publish_agent_snapshot(force=True)
         while True:
+            self._set_main_loop_phase("reconcile_finalization_workers")
             self._reconcile_finalization_workers()
             self._mark_main_loop_progress()
+            self._set_main_loop_phase("reconcile_finalization_state")
             self._reconcile_finalization_state()
+            self._set_main_loop_phase("reconcile_execution_cleanup")
             self._reconcile_execution_cleanup()
+            self._set_main_loop_phase("reconcile_hook_executors")
             self._reconcile_hook_executors()
             try:
+                self._set_main_loop_phase("refresh_claimed_orders")
                 has_active_orders = self._refresh_claimed_orders()
             except Exception:
                 # Per-order failures are isolated inside the refresh; this is
@@ -873,7 +950,9 @@ class RemoteAgent:
                 # crash-looping every batch on this target.
                 log.exception("Remote order refresh cycle failed; retrying next poll")
                 has_active_orders = True
+            self._set_main_loop_phase("claim_and_process")
             did_work = self._claim_and_process_one()
+            self._set_main_loop_phase("publish_agent_snapshot")
             self._publish_agent_snapshot(force=did_work)
             if self.once:
                 self._stop_agent_heartbeat()
@@ -891,6 +970,7 @@ class RemoteAgent:
                         int(self.target.idle_poll_max_interval_seconds or 300),
                     ),
                 )
+            self._set_main_loop_phase("idle_sleep")
             self._idle_sleep(max(1, self._next_poll_delay))
 
     def _idle_sleep(self, seconds: float, chunk: float = 30.0) -> None:
@@ -1298,6 +1378,7 @@ class RemoteAgent:
         )
         if not order:
             return False
+        self._set_main_loop_phase("process_order", order.get("batch_id"))
         self._process_order(order)
         return True
 
@@ -1697,6 +1778,7 @@ class RemoteAgent:
                 continue
             # One bad order (a persistent DB or filesystem error while
             # recovering it) must not halt every other batch on this target.
+            self._set_main_loop_phase("refresh_order", batch_id)
             try:
                 self._refresh_order(order, client, cycle)
             except Exception as exc:
@@ -1776,6 +1858,7 @@ class RemoteAgent:
                 pass
         if not job_id:
             return
+        self._set_main_loop_phase("refresh_order:driver_slurm_state", batch_id)
         slurm_state = self._driver_slurm_state(str(job_id))
         update = {
             "batch_id": batch_id,
@@ -1801,8 +1884,11 @@ class RemoteAgent:
             and not stall_cancelled else None
         )
         if state in {"COMPLETED"}:
+            self._set_main_loop_phase("refresh_order:driver_completed", batch_id)
             self.state.mark_driver_terminal(batch_id, 0)
+            self._set_main_loop_phase("refresh_order:cleanup_work_dir", batch_id)
             self._cleanup_remote_work_dir(order)
+            self._set_main_loop_phase("refresh_order:claim_finalization", batch_id)
             # The database lease, not this process-local thread list, is
             # the serialization boundary. Publish queued state while a
             # different batch owns the lease so completed drivers do not
@@ -1887,8 +1973,10 @@ class RemoteAgent:
         if update["status"] in {"RUNNING", "CANCEL_REQUESTED"}:
             update["nextflow_exit"] = None
         if update["status"] not in TERMINAL_REMOTE_STATUSES:
+            self._set_main_loop_phase("refresh_order:write_status", batch_id)
             self._write_status_if_changed(client, batch_id, update)
         if update["status"] == "HOOKS_RUNNING":
+            self._set_main_loop_phase("refresh_order:launch_finalization", batch_id)
             self._launch_finalization(order, job_id)
         elif update["status"] in TERMINAL_REMOTE_STATUSES:
             # Release the batch and its slides BEFORE publishing the
@@ -1898,6 +1986,7 @@ class RemoteAgent:
             # the batch RUNNING and its slides DISPATCHED forever. Each
             # step is idempotent and is simply redone on the next poll.
             exit_code = int(update.get("nextflow_exit") or -1)
+            self._set_main_loop_phase("refresh_order:driver_failed", batch_id)
             self.state.complete_batch(batch_id, exit_code)
             self.state.skip_unstarted_batch_hooks(
                 batch_id,
@@ -2365,13 +2454,21 @@ class RemoteAgent:
         )
 
     def _staged_release_path(self, order: dict[str, Any]) -> Path | None:
-        """Return ``release_stage_root/<deployment>/<order revision>`` if configured."""
+        """Return ``<stage root>/<deployment>/<order revision>`` if staging is in use.
+
+        The stage root is the release agent's: an explicit one (env or target),
+        else its ``<repo>.releases`` default once that holds this deployment.
+        """
         revision = str(order.get("source_revision") or "").strip()
-        stage_root = str(getattr(self.target, "release_stage_root", "") or "").strip()
+        stage_root, explicit = release_stage_root(
+            self.target, self.target.remote_repo_dir or self.cfg.repo_dir or ""
+        )
         deployment_id = str(
             getattr(self.cfg, "release_deployment_id", "") or "default"
         ).strip()
         if not (revision and stage_root and deployment_id):
+            return None
+        if not explicit and not (Path(stage_root) / deployment_id).is_dir():
             return None
         return Path(stage_root) / deployment_id / revision
 
@@ -2897,8 +2994,10 @@ class RemoteAgent:
 
         stdout = stem.with_suffix(".out").read_text(errors="replace") if stem.with_suffix(".out").exists() else ""
         stderr = stem.with_suffix(".err").read_text(errors="replace") if stem.with_suffix(".err").exists() else ""
-        if state != "COMPLETED" and not stderr:
-            stderr = f"Slurm hook state={state} job_id={job_id}\n"
+        if state != "COMPLETED":
+            # Always, not only for an empty .err: Slurm writes its own
+            # "CANCELLED ... DUE TO TIME LIMIT" there, and the classifier needs the state.
+            stderr = (stderr.rstrip() + f"\nSlurm hook state={state} job_id={job_id}\n").lstrip()
         if node:
             stderr = (stderr.rstrip() + f"\nSlurm hook node={node}\n").strip() + "\n"
         executor_kwargs = {"job_id": job_id, "state": state}
@@ -3172,6 +3271,7 @@ def agent_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    _install_process_diagnostics()
     cfg, target = _load_target(args.config, args.target or None)
     return RemoteAgent(cfg, target, once=args.once, dry_run=args.dry_run).run()
 

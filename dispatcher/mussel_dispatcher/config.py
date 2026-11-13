@@ -709,6 +709,21 @@ class Config:
         return hooks + db_hooks
 
 
+def release_stage_root(target: object, repo_dir: str) -> tuple[str, bool]:
+    """Where the release agent stages releases, and whether that was set explicitly.
+
+    Shared by the release agent (which stages there) and the remote agent
+    (which runs each order from its staged revision).
+    """
+    explicit = (
+        os.environ.get("MUSSEL_RELEASE_STAGE_ROOT", "").strip()
+        or str(getattr(target, "release_stage_root", "") or "").strip()
+    )
+    if explicit:
+        return explicit, True
+    return (f"{repo_dir}.releases" if repo_dir else ""), False
+
+
 def _coords_cleanup_args(model: str, models: list[str]) -> list[str]:
     """WDS args deleting a slide's shared .patch.h5 once every model has appended it.
 

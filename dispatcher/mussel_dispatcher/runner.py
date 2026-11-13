@@ -750,7 +750,7 @@ class NextflowRunner:
         lease_name = self.state.claim_finalization_slot(
             self.batch_id,
             lane="local",
-            max_slots=getattr(self.cfg, "max_concurrent_finalizations", 1),
+            max_slots=self.cfg.effective_max_concurrent_finalizations(lane="local"),
             owner=owner,
             ttl_seconds=lease_ttl,
         )

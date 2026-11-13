@@ -128,11 +128,16 @@ print(f"Table ensured  : {target_table}")
 # the target Delta table.
 # ---------------------------------------------------------------------------
 
+def _q(name: str) -> str:
+    """Backtick-quote a column identifier (a backtick in the name is doubled)."""
+    return "`" + str(name).replace("`", "``") + "`"
+
+
 target_cols = set(spark.table(target_table).columns)  # noqa: F821
 for field in source_df.schema:
     if field.name not in target_cols:
         dtype = field.dataType.simpleString()
-        spark.sql(f"ALTER TABLE {target_table} ADD COLUMN IF NOT EXISTS `{field.name}` {dtype}")  # noqa: F821
+        spark.sql(f"ALTER TABLE {target_table} ADD COLUMN IF NOT EXISTS {_q(field.name)} {dtype}")  # noqa: F821
         print(f"Added column   : {field.name} ({dtype})")
 
 # COMMAND ----------
@@ -169,15 +174,17 @@ extra_target = sorted(target_col_set - source_col_set)
 if extra_target:
     print(f"Target-only columns (preserved on UPDATE, NULL on INSERT): {extra_target}")
 
-update_set  = ",\n    ".join(f"target.{c} = source.{c}" for c in common_cols)
-insert_cols = ", ".join(common_cols + extra_target)
-insert_vals = ", ".join([f"source.{c}" for c in common_cols] + ["NULL"] * len(extra_target))
+# Every column identifier is quoted: the schema-evolution step above can add
+# columns whose names need it (spaces, hyphens, reserved words).
+update_set  = ",\n    ".join(f"target.{_q(c)} = source.{_q(c)}" for c in common_cols)
+insert_cols = ", ".join(_q(c) for c in common_cols + extra_target)
+insert_vals = ", ".join([f"source.{_q(c)}" for c in common_cols] + ["NULL"] * len(extra_target))
 
 merge_sql = f"""
 MERGE INTO {target_table} AS target
 USING _metadata_source AS source
-ON target.{merge_key} = source.{merge_key}
-   AND target.model = source.model
+ON target.{_q(merge_key)} = source.{_q(merge_key)}
+   AND target.`model` = source.`model`
 WHEN MATCHED THEN
     UPDATE SET
     {update_set}

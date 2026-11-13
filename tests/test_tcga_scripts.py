@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import io
 import json
+import multiprocessing
+import shutil
 import tarfile
 from pathlib import Path
 from unittest.mock import patch
@@ -97,6 +99,99 @@ def make_h5_file(path: Path, n_patches: int = 8) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as f:
         f.create_dataset("coords", data=np.random.randint(0, 1000, (n_patches, 2)))
+
+
+def _tar_npy_entries(tar_path: Path) -> dict[str, list[np.ndarray]]:
+    entries: dict[str, list[np.ndarray]] = {}
+    with tarfile.open(tar_path) as tf:
+        for member in tf.getmembers():
+            if not member.name.endswith(".npy"):
+                continue
+            fh = tf.extractfile(member)
+            assert fh is not None
+            entries.setdefault(member.name, []).append(np.load(io.BytesIO(fh.read())))
+    return entries
+
+
+def _copy_s3_object_to_fake_remote(local_path: Path, s3_uri: str, remote_root: Path) -> None:
+    _, _, rest = s3_uri.partition("s3://")
+    bucket, _, key = rest.partition("/")
+    dest = remote_root / bucket / key
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(local_path, dest)
+
+
+def _copy_fake_remote_to_local(s3_uri: str, local_path: Path, remote_root: Path) -> bool:
+    _, _, rest = s3_uri.partition("s3://")
+    bucket, _, key = rest.partition("/")
+    src = remote_root / bucket / key
+    if not src.exists():
+        return False
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, local_path)
+    return True
+
+
+class _FakeRemoteS3Client:
+    """The S3 client calls wds.py makes (list, head, delete) against <remote_root>/<bucket>/<key>."""
+
+    def __init__(self, remote_root: Path):
+        self.root = remote_root
+
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+        root = self.root
+
+        class _Paginator:
+            def paginate(self, Bucket, Prefix):
+                base = root / Bucket
+                keys = sorted(p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file()) \
+                    if base.exists() else []
+                yield {"Contents": [{"Key": k} for k in keys if k.startswith(Prefix)]}
+
+        return _Paginator()
+
+    def head_object(self, Bucket, Key):
+        path = self.root / Bucket / Key
+        if not path.exists():
+            err = Exception(f"404: {Key}")
+            err.response = {"Error": {"Code": "404"}}
+            raise err
+        return {"ContentLength": path.stat().st_size}
+
+    def delete_object(self, Bucket, Key):
+        (self.root / Bucket / Key).unlink(missing_ok=True)
+
+
+def _append_wds_in_subprocess(
+    pt_dir: str,
+    h5_dir: str,
+    wds_dest: str,
+    lock_dir: str,
+    n_patches: int,
+    ready_dir: str,
+) -> None:
+    from mussel_dispatcher.wds import append_wds
+
+    slide = "TCGA-BR-A44T-01Z-00-DX1"
+    pt_path = Path(pt_dir) / f"{slide}.features.pt"
+    h5_path = Path(h5_dir) / f"{slide}.patch.h5"
+    make_pt_file(pt_path, n_patches=n_patches)
+    make_h5_file(h5_path, n_patches=n_patches)
+    Path(ready_dir, f"ready-{n_patches}").write_text("ready")
+    while len(list(Path(ready_dir).glob("ready-*"))) < 2:
+        pass
+
+    append_wds(
+        pt_dir=Path(pt_dir),
+        h5_dir=Path(h5_dir),
+        inventory_df=make_inventory(),
+        wds_dest=wds_dest,
+        model_type="ctranspath",
+        staging_dir=None,
+        max_shard_bytes=500 * 1024 * 1024,
+        lock_dir=Path(lock_dir),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +887,224 @@ class TestAppendWds:
 
         assert len(index2) - 1 == len(index1) - 1 == 3  # -1 for _stats key
 
+    def test_retry_after_lost_index_compacts_duplicate_tar_entries(self, tmp_path):
+        """If index save is lost after tar append, retry replaces stale tar entries."""
+        from mussel_dispatcher.wds import append_wds
+
+        model = "ctranspath"
+        slide = "TCGA-BR-A44T-01Z-00-DX1"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        wds_dest = str(tmp_path / "wds")
+        pt_file = pt_dir / f"{slide}.features.pt"
+        h5_file = h5_dir / f"{slide}.patch.h5"
+
+        make_pt_file(pt_file, n_patches=8)
+        make_h5_file(h5_file, n_patches=8)
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+        )
+
+        # Simulate successful tar append followed by lost index save.
+        (Path(wds_dest) / model / "wds_index.json").unlink()
+        make_pt_file(pt_file, n_patches=12)
+        make_h5_file(h5_file, n_patches=12)
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+        )
+
+        shard = Path(wds_dest) / model / "TCGA-BRCA" / "000000.tar"
+        entries = _tar_npy_entries(shard)
+        assert list(entries) == [f"{slide}.features.npy", f"{slide}.coords.npy"]
+        assert len(entries[f"{slide}.features.npy"]) == 1
+        assert len(entries[f"{slide}.coords.npy"]) == 1
+        assert entries[f"{slide}.features.npy"][0].shape[0] == 12
+        assert entries[f"{slide}.coords.npy"][0].shape[0] == 12
+
+    def test_repair_wds_tar_restores_missing_coords_from_h5(self, tmp_path):
+        from mussel_dispatcher.wds import _add_npy_to_tar, _npy_bytes, repair_wds_shards
+
+        model = "ctranspath"
+        slide = "TCGA-BR-A44T-01Z-00-DX1"
+        wds_dest = tmp_path / "wds"
+        tar_path = wds_dest / model / "TCGA-BRCA" / "000000.tar"
+        tar_path.parent.mkdir(parents=True)
+        h5_dir = tmp_path / "tile_h5"
+        h5_path = h5_dir / f"{slide}.patch.h5"
+        make_h5_file(h5_path, n_patches=12)
+
+        with tarfile.open(tar_path, "w") as tf:
+            _add_npy_to_tar(tf, f"{slide}.features.npy", _npy_bytes(np.zeros((8, 4), dtype="float32")))
+            _add_npy_to_tar(tf, f"{slide}.coords.npy", _npy_bytes(np.zeros((8, 2), dtype="int64")))
+            _add_npy_to_tar(tf, f"{slide}.features.npy", _npy_bytes(np.ones((12, 4), dtype="float32")))
+
+        stats = repair_wds_shards(
+            str(wds_dest),
+            model,
+            staging_dir=None,
+            h5_dir=h5_dir,
+            require_coords=True,
+        )
+
+        assert stats["shards"] == 1
+        assert stats["duplicate_slides"] == 1
+        assert stats["repaired_coords_from_h5"] == 1
+        assert stats["rewritten"] == 1
+        entries = _tar_npy_entries(tar_path)
+        assert list(entries) == [f"{slide}.features.npy", f"{slide}.coords.npy"]
+        assert entries[f"{slide}.features.npy"][0].shape[0] == 12
+        assert entries[f"{slide}.coords.npy"][0].shape[0] == 12
+
+    def test_s3_retry_after_lost_index_compacts_duplicate_remote_tar_entries(self, tmp_path, monkeypatch):
+        from mussel_dispatcher.wds import append_wds
+
+        model = "ctranspath"
+        slide = "TCGA-BR-A44T-01Z-00-DX1"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        staging_dir = tmp_path / "staging"
+        remote_root = tmp_path / "remote"
+        wds_dest = "s3://fake-bucket/wds"
+        pt_file = pt_dir / f"{slide}.features.pt"
+        h5_file = h5_dir / f"{slide}.patch.h5"
+
+        def fake_upload(local_path, s3_uri, max_concurrency=4):
+            _copy_s3_object_to_fake_remote(Path(local_path), s3_uri, remote_root)
+
+        def fake_download(s3_uri, local_path, max_concurrency=4):
+            return _copy_fake_remote_to_local(s3_uri, Path(local_path), remote_root)
+
+        monkeypatch.setattr("mussel_dispatcher.wds._s3_upload", fake_upload)
+        monkeypatch.setattr("mussel_dispatcher.wds._s3_download", fake_download)
+        # The writer resumes its staged shard only after checking the S3 copy matches.
+        monkeypatch.setattr("mussel_dispatcher.wds._s3_client", lambda: _FakeRemoteS3Client(remote_root))
+
+        make_pt_file(pt_file, n_patches=8)
+        make_h5_file(h5_file, n_patches=8)
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=staging_dir,
+            max_shard_bytes=500 * 1024 * 1024,
+        )
+
+        remote_index = remote_root / "fake-bucket" / "wds" / model / "wds_index.json"
+        remote_index.unlink()
+
+        make_pt_file(pt_file, n_patches=12)
+        make_h5_file(h5_file, n_patches=12)
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=staging_dir,
+            max_shard_bytes=500 * 1024 * 1024,
+        )
+
+        remote_tar = remote_root / "fake-bucket" / "wds" / model / "TCGA-BRCA" / "000000.tar"
+        entries = _tar_npy_entries(remote_tar)
+        assert list(entries) == [f"{slide}.features.npy", f"{slide}.coords.npy"]
+        assert len(entries[f"{slide}.features.npy"]) == 1
+        assert len(entries[f"{slide}.coords.npy"]) == 1
+        assert entries[f"{slide}.features.npy"][0].shape[0] == 12
+        assert entries[f"{slide}.coords.npy"][0].shape[0] == 12
+
+    def test_s3_writer_starts_after_existing_remote_shards(self, tmp_path, monkeypatch):
+        from mussel_dispatcher.wds import _add_npy_to_tar, _npy_bytes, append_wds
+
+        model = "ctranspath"
+        slide = "TCGA-BR-A44T-01Z-00-DX1"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        staging_dir = tmp_path / "staging"
+        remote_root = tmp_path / "remote"
+        remote_tar = remote_root / "fake-bucket" / "wds" / model / "TCGA-BRCA" / "000000.tar"
+        remote_tar.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(remote_tar, "w") as tf:
+            _add_npy_to_tar(tf, "preexisting.features.npy", _npy_bytes(np.zeros((2, 2), dtype="float32")))
+        wds_dest = "s3://fake-bucket/wds"
+
+        def fake_upload(local_path, s3_uri, max_concurrency=4):
+            _copy_s3_object_to_fake_remote(Path(local_path), s3_uri, remote_root)
+
+        def fake_download(s3_uri, local_path, max_concurrency=4):
+            return _copy_fake_remote_to_local(s3_uri, Path(local_path), remote_root)
+
+        monkeypatch.setattr("mussel_dispatcher.wds._s3_upload", fake_upload)
+        monkeypatch.setattr("mussel_dispatcher.wds._s3_download", fake_download)
+        monkeypatch.setattr("mussel_dispatcher.wds._s3_client", lambda: _FakeRemoteS3Client(remote_root))
+
+        make_pt_file(pt_dir / f"{slide}.features.pt", n_patches=8)
+        make_h5_file(h5_dir / f"{slide}.patch.h5", n_patches=8)
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=staging_dir,
+            max_shard_bytes=1,
+        )
+
+        uploaded = remote_root / "fake-bucket" / "wds" / model / "TCGA-BRCA" / "000001.tar"
+        assert uploaded.exists()
+        assert remote_tar.exists()
+
+    def test_lock_dir_serializes_concurrent_appenders(self, tmp_path):
+        model = "ctranspath"
+        wds_dest = str(tmp_path / "wds")
+        lock_dir = tmp_path / "locks"
+        ready_dir = tmp_path / "ready"
+        ready_dir.mkdir()
+        mp = multiprocessing.get_context("spawn")
+
+        proc1_pt = tmp_path / "proc1" / "pt"
+        proc1_h5 = tmp_path / "proc1" / "h5"
+        proc2_pt = tmp_path / "proc2" / "pt"
+        proc2_h5 = tmp_path / "proc2" / "h5"
+
+        proc1 = mp.Process(
+            target=_append_wds_in_subprocess,
+            args=(str(proc1_pt), str(proc1_h5), wds_dest, str(lock_dir), 8, str(ready_dir)),
+        )
+        proc2 = mp.Process(
+            target=_append_wds_in_subprocess,
+            args=(str(proc2_pt), str(proc2_h5), wds_dest, str(lock_dir), 12, str(ready_dir)),
+        )
+        proc1.start()
+        proc2.start()
+        proc1.join(30)
+        proc2.join(30)
+
+        assert proc1.exitcode == 0
+        assert proc2.exitcode == 0
+
+        shard = Path(wds_dest) / model / "TCGA-BRCA" / "000000.tar"
+        entries = _tar_npy_entries(shard)
+        slide = "TCGA-BR-A44T-01Z-00-DX1"
+        assert list(entries) == [f"{slide}.features.npy", f"{slide}.coords.npy"]
+        assert len(entries[f"{slide}.features.npy"]) == 1
+        assert len(entries[f"{slide}.coords.npy"]) == 1
+        assert entries[f"{slide}.features.npy"][0].shape[0] in {8, 12}
+        assert entries[f"{slide}.coords.npy"][0].shape[0] == entries[f"{slide}.features.npy"][0].shape[0]
+
 
 # ---------------------------------------------------------------------------
 # 4. End-to-end pipeline: status → prepare → append
@@ -800,7 +1113,7 @@ class TestAppendWds:
 class TestDeleteLocal:
     """append_wds() with delete_local=True removes source files after WDS flush."""
 
-    def test_delete_local_removes_pt_and_h5(self, tmp_path):
+    def test_delete_local_removes_model_files_but_keeps_shared_coords(self, tmp_path):
         from mussel_dispatcher.wds import append_wds
 
         model = "ctranspath"
@@ -825,7 +1138,35 @@ class TestDeleteLocal:
         )
 
         assert not pt_file.exists(), ".pt should be deleted after WDS flush"
-        assert not h5_file.exists(), ".patch.h5 should be deleted after WDS flush"
+        assert h5_file.exists(), ".patch.h5 should be kept for later model WDS hooks"
+
+    def test_delete_coords_local_removes_shared_coords(self, tmp_path):
+        from mussel_dispatcher.wds import append_wds
+
+        model = "ctranspath"
+        pt_dir = tmp_path / "pt"
+        h5_dir = tmp_path / "tile_h5"
+        wds_dest = str(tmp_path / "wds")
+
+        pt_file = pt_dir / "TCGA-BR-A44T-01Z-00-DX1.features.pt"
+        h5_file = h5_dir / "TCGA-BR-A44T-01Z-00-DX1.patch.h5"
+        make_pt_file(pt_file)
+        make_h5_file(h5_file)
+
+        append_wds(
+            pt_dir=pt_dir,
+            h5_dir=h5_dir,
+            inventory_df=make_inventory(),
+            wds_dest=wds_dest,
+            model_type=model,
+            staging_dir=None,
+            max_shard_bytes=500 * 1024 * 1024,
+            delete_local=True,
+            delete_coords_local=True,
+        )
+
+        assert not pt_file.exists(), ".pt should be deleted after WDS flush"
+        assert not h5_file.exists(), ".patch.h5 should be deleted only when explicitly requested"
 
     def test_delete_local_false_keeps_files(self, tmp_path):
         from mussel_dispatcher.wds import append_wds

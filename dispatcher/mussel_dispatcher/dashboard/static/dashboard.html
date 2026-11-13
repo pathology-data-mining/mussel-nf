@@ -16,6 +16,10 @@
   .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 16px; }
   .card h2 { font-size: 0.85rem; font-weight: 600; color: #94a3b8; text-transform: uppercase;
              letter-spacing: .05em; margin-bottom: 12px; }
+  .alert-banner { border-radius: 8px; padding: 12px 14px; font-size: 0.82rem; line-height: 1.35; }
+  .alert-dead { background: rgba(127, 29, 29, 0.35); border: 1px solid rgba(248, 113, 113, 0.5); color: #fecaca; }
+  .alert-warn { background: rgba(120, 53, 15, 0.35); border: 1px solid rgba(251, 191, 36, 0.45); color: #fde68a; }
+  .alert-ok { background: rgba(20, 83, 45, 0.24); border: 1px solid rgba(74, 222, 128, 0.28); color: #bbf7d0; }
   .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
   .stat { background: #0f172a; border-radius: 6px; padding: 12px 16px; }
   .stat .val { font-size: 1.8rem; font-weight: 700; }
@@ -28,10 +32,15 @@
   tr:hover td { background: #0f172a; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.7rem; font-weight: 600; }
   .badge-running   { background:#0c4a6e; color:#38bdf8; }
+  .badge-recovering{ background:#3f3f46; color:#fbbf24; }
+  .badge-finalizing{ background:#064e3b; color:#6ee7b7; }
   .badge-succeeded { background:#14532d; color:#4ade80; }
   .badge-failed    { background:#450a0a; color:#f87171; }
   .badge-pending   { background:#312e81; color:#a5b4fc; }
   .badge-stalled   { background:#451a03; color:#fb923c; }
+  .badge-execution { font-size:0.62rem; letter-spacing:.04em; vertical-align:middle; }
+  .badge-local { background:#334155; color:#cbd5e1; }
+  .badge-remote { background:#312e81; color:#c4b5fd; }
   .pbar-wrap { background: #0f172a; border-radius: 999px; height: 6px; margin-top: 3px; min-width: 80px; }
   .pbar      { border-radius: 999px; height: 6px; transition: width .5s; }
   .pbar-green  { background: #22c55e; }
@@ -43,6 +52,11 @@
   .btn-sm { background: #334155; border: none; color: #94a3b8; padding: 3px 10px;
             border-radius: 4px; cursor: pointer; font-size: 0.72rem; }
   .btn-sm:hover { background: #475569; color: #e2e8f0; }
+  .recent-batch-section + .recent-batch-section { margin-top: 18px; }
+  .recent-batch-heading { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:6px; }
+  .recent-batch-heading h3 { font-size:0.78rem; color:#cbd5e1; text-transform:uppercase; letter-spacing:.05em; }
+  .recent-batch-count { color:#67e8f9; font-size:0.7rem; font-weight:400; margin-left:5px; }
+  .recent-batch-note { color:#64748b; font-size:0.7rem; }
   /* Running batch cards */
   .batch-card { background: #0f172a; border: 1px solid #334155; border-radius: 8px;
                 padding: 14px 16px; margin-bottom: 12px; }
@@ -62,6 +76,11 @@
   .chip-red    { background: rgba(69,10,10,.4);   color: #f87171; }
   .chip-gray   { background: #1e293b; color: #64748b; }
   .chip-yellow { background: rgba(69,39,0,.27);   color: #fcd34d; }
+  .chip-hook-pending { background: rgba(30,41,59,.9); color: #94a3b8; }
+  .chip-hook-running { background: rgba(8,47,73,.55); color: #67e8f9; }
+  .chip-hook-ok { background: rgba(20,83,45,.35); color: #86efac; }
+  .chip-hook-fail { background: rgba(69,10,10,.48); color: #fca5a5; }
+  .chip-hook-waived { background: rgba(71,85,105,.35); color: #cbd5e1; }
   .resource-row { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
   .resource-chip { background: #1e293b; border-radius: 4px; padding: 3px 8px; font-size: 0.72rem; color: #94a3b8; }
   .resource-chip span { color: #e2e8f0; font-weight: 600; }
@@ -73,6 +92,14 @@
   .failure-item .fi-meta { color: #64748b; margin-left: 8px; }
   .stall-banner { background: rgba(69,26,3,.13); border: 1px solid rgba(251,146,60,.27); border-radius: 4px;
                   padding: 4px 10px; font-size: 0.75rem; color: #fb923c; margin-bottom: 8px; }
+  /* Live post-batch hooks */
+  .running-hooks-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:8px; }
+  .running-hook-row { background:#0f172a; border:1px solid #334155; border-radius:6px; padding:9px 11px; }
+  .running-hook-main { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+  .running-hook-name { font-family:monospace; font-size:0.78rem; font-weight:600; color:#e2e8f0; }
+  .running-hook-batch { margin-top:5px; font-family:monospace; font-size:0.7rem; color:#94a3b8; }
+  .running-hook-meta { margin-top:5px; font-size:0.7rem; color:#64748b; }
+  .hook-live-dot { color:#22d3ee; font-size:0.78rem; }
   /* Log modal */
   #log-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7);
                z-index:1000; align-items:center; justify-content:center; }
@@ -110,19 +137,31 @@
 </header>
 
 <div class="grid">
+  <div class="full" id="dispatcher-health-wrap" style="display:none">
+    <div class="alert-banner" id="dispatcher-health-banner"></div>
+  </div>
+  <div class="full" id="release-sync-wrap" style="display:none">
+    <div class="alert-banner" id="release-sync-banner"></div>
+  </div>
+
+  <div class="card full" id="execution-capacity-card">
+    <h2>Execution Capacity <span id="execution-capacity-state" style="font-size:0.7rem;font-weight:400;color:#94a3b8;margin-left:6px"></span></h2>
+    <div id="execution-capacity-content"><span class="no-data">Loading...</span></div>
+  </div>
+
   <!-- Overview -->
   <div class="card full">
     <h2>Overview</h2>
     <div class="summary-grid" id="summary-grid">
       <div class="stat" title="Total slides in the dispatch queue across all statuses"><div class="val" id="s-total">--</div><div class="lbl">Total Slides</div></div>
       <div class="stat" title="Slides whose Nextflow batch exited successfully (exit 0). Does not guarantee WDS upload — see % in WDS."><div class="val" id="s-done" style="color:#4ade80">--</div><div class="lbl">Succeeded</div></div>
-      <div class="stat" title="Slides whose Nextflow task failed and are queued for automatic retry on the next dispatch sweep."><div class="val" id="s-failed" style="color:#f87171">--</div><div class="lbl">Failed</div></div>
+      <div class="stat" title="Distinct slides that failed previously and are currently back in PENDING for automatic retry."><div class="val" id="s-failed" style="color:#f87171">--</div><div class="lbl">Retry Pending</div></div>
       <div class="stat" title="Slides waiting to be included in the next dispatch batch."><div class="val" id="s-pending" style="color:#a5b4fc">--</div><div class="lbl">Pending</div></div>
       <div class="stat" title="Slides currently assigned to an active Nextflow batch (status=DISPATCHED in DB)."><div class="val" id="s-dispatched" style="color:#38bdf8">--</div><div class="lbl">Dispatched</div></div>
       <div class="stat" title="Percentage of total slides with status SUCCEEDED in DB (Nextflow exited 0 for their batch)."><div class="val" id="s-pct">--</div><div class="lbl">% Features Extracted</div></div>
       <div class="stat" title="Percentage of total slides confirmed written to WDS shards on S3 (minimum across all required models)."><div class="val" id="s-wds-pct" style="color:#38bdf8">--</div><div class="lbl">% in WDS</div></div>
-      <div class="stat" title="Number of Nextflow batch runs currently active."><div class="val" id="s-running">--</div><div class="lbl">Running Batches</div></div>
-      <div class="stat" title="Slides permanently excluded after exceeding the retry limit (fail_count ≥ 10). Require manual investigation."><div class="val" id="s-blacklisted" style="color:#fb923c">--</div><div class="lbl">Blacklisted</div></div>
+      <div class="stat" title="Number of Nextflow batch runs currently active."><div class="val" id="s-running">--</div><div class="lbl">Running Batches</div><div class="sub" id="s-running-detail" style="font-size:0.8rem;color:#94a3b8;margin-top:4px">local -- · remote --</div></div>
+      <div class="stat" title="Failed slides permanently excluded after reaching the configured retry limit. Require manual investigation."><div class="val" id="s-blacklisted" style="color:#fb923c">--</div><div class="lbl">Blacklisted</div></div>
       <div class="stat" title="Slides reaching SUCCEEDED status per hour, computed over a 6-hour rolling window."><div class="val" id="s-throughput" style="color:#a78bfa">--</div><div class="lbl">Slides/hr</div></div>
       <div class="stat" title="Estimated wall-clock time until all remaining slides are processed, based on current throughput."><div class="val" id="s-eta" style="color:#fbbf24">--</div><div class="lbl">ETA</div></div>
       <div class="stat" id="s-sync-tile" title="Status of the last Databricks metadata sync job run."><div class="val" id="s-sync">--</div><div class="lbl">DB Sync</div></div>
@@ -150,32 +189,78 @@
     <div id="slurm-content"><span class="no-data">Loading...</span></div>
   </div>
 
+  <!-- Remote targets -->
+  <div class="card">
+    <h2>Remote Targets</h2>
+    <div id="remote-content"><span class="no-data">No remote targets configured.</span></div>
+  </div>
+
   <!-- Running batches - Tower live view -->
   <div class="card full" id="running-card">
     <h2>Running Batches <span id="running-tower-badge" style="display:none;font-size:0.7rem;font-weight:400;color:#38bdf8;margin-left:6px">&#x25CF; Tower live</span></h2>
     <div id="running-content"><span class="no-data">No running batches.</span></div>
   </div>
 
+  <!-- Running post-batch hooks -->
+  <div class="card full" id="running-hooks-card">
+    <h2>Running Hooks <span id="running-hooks-count" style="font-size:0.7rem;font-weight:400;color:#67e8f9;margin-left:6px"></span></h2>
+    <div id="running-hooks-content"><span class="no-data">No hooks currently running.</span></div>
+  </div>
+
   <!-- Batch history table -->
   <div class="card full">
     <h2>Recent Batches</h2>
-    <div style="overflow-x:auto">
-      <table>
-        <thead>
-          <tr>
-            <th title="Timestamp + 8-character UUID (e.g. 20260521T150637_410bb3ce)">Batch ID</th>
-            <th title="RUNNING = active NF process · SUCCEEDED = NF exited 0 · FAILED = NF error or abort · Note: SUCCEEDED reflects NF exit code, not WDS coverage">Status</th>
-            <th title="Number of slides assigned to this batch">Slides</th>
-            <th title="Nextflow tasks completed / total. ⚠ = batch completed but fewer tasks finished than expected (usually from node failures with errorStrategy=ignore).">Progress</th>
-            <th title="SLURM jobs: ▶ running · ⏳ pending. Hover cell for node list.">SLURM</th>
-            <th>Started</th>
-            <th>Duration</th>
-            <th title="Nextflow process exit code (0 = clean exit · non-zero = error or abort · Tower disconnect used to abort before proxy was added)">Exit</th>
-            <th>Log</th>
-          </tr>
-        </thead>
-        <tbody id="batch-tbody"><tr><td colspan="9" class="no-data">Loading...</td></tr></tbody>
-      </table>
+    <div class="recent-batch-section">
+      <div class="recent-batch-heading">
+        <h3>Local <span id="local-batch-count" class="recent-batch-count"></span></h3>
+        <span class="recent-batch-note">Current host / local Slurm</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th title="Timestamp + 8-character UUID (e.g. 20260521T150637_410bb3ce)">Batch ID</th>
+              <th title="RUNNING = active NF process · SUCCEEDED = NF exited 0 · FAILED = NF error or abort · Note: SUCCEEDED reflects NF exit code, not WDS coverage">Status</th>
+              <th title="Execution backend and dispatch target">Target</th>
+              <th title="Number of slides assigned to this batch">Slides</th>
+              <th title="Nextflow tasks completed / total. ⚠ = batch completed but fewer tasks finished than expected (usually from node failures with errorStrategy=ignore).">Progress</th>
+              <th title="SLURM jobs: ▶ running · ⏳ pending. Hover cell for node list.">SLURM</th>
+              <th title="Post-batch hook state. Shows WDS append hooks and Databricks sync with pending, running, success, failure, exit code, and timing in the tooltip.">Hooks</th>
+              <th>Started</th>
+              <th>Duration</th>
+              <th title="Nextflow process exit code (0 = clean exit · non-zero = error or abort · Tower disconnect used to abort before proxy was added)">Exit</th>
+              <th>Log</th>
+            </tr>
+          </thead>
+          <tbody id="local-batch-tbody"><tr><td colspan="11" class="no-data">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="recent-batch-section">
+      <div class="recent-batch-heading">
+        <h3>Remote <span id="remote-batch-count" class="recent-batch-count"></span></h3>
+        <span class="recent-batch-note">Remote agents</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th title="Timestamp + 8-character UUID (e.g. 20260521T150637_410bb3ce)">Batch ID</th>
+              <th title="RUNNING = active NF process · SUCCEEDED = NF exited 0 · FAILED = NF error or abort · Note: SUCCEEDED reflects NF exit code, not WDS coverage">Status</th>
+              <th title="Execution backend and dispatch target">Target</th>
+              <th title="Number of slides assigned to this batch">Slides</th>
+              <th title="Nextflow tasks completed / total. ⚠ = batch completed but fewer tasks finished than expected (usually from node failures with errorStrategy=ignore).">Progress</th>
+              <th title="SLURM jobs: ▶ running · ⏳ pending. Hover cell for node list.">SLURM</th>
+              <th title="Post-batch hook state. Shows WDS append hooks and Databricks sync with pending, running, success, failure, exit code, and timing in the tooltip.">Hooks</th>
+              <th>Started</th>
+              <th>Duration</th>
+              <th title="Nextflow process exit code (0 = clean exit · non-zero = error or abort · Tower disconnect used to abort before proxy was added)">Exit</th>
+              <th>Log</th>
+            </tr>
+          </thead>
+          <tbody id="remote-batch-tbody"><tr><td colspan="11" class="no-data">Loading...</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
@@ -187,10 +272,20 @@ let _chartJsReady = false;
 function onChartJsReady() { _chartJsReady = true; loadStatus(); }
 
 function badge(status, stalled) {
-  if (stalled) return '<span class="badge badge-stalled" title="No Tower heartbeat for >5 min — NF may be hung or disconnected">STALLED</span>';
-  const cls = {RUNNING:'running',SUCCEEDED:'succeeded',FAILED:'failed',PENDING:'pending',DISPATCHED:'running'}[status] || 'pending';
+  if (status === 'RUNNING' && stalled) return '<span class="badge badge-stalled" title="No Tower heartbeat for >5 min — NF may be hung or disconnected">STALLED</span>';
+  const cls = {
+    RUNNING:'running',
+    RECOVERING:'recovering',
+    FINALIZING:'finalizing',
+    SUCCEEDED:'succeeded',
+    FAILED:'failed',
+    PENDING:'pending',
+    DISPATCHED:'running'
+  }[status] || 'pending';
   const tips = {
     RUNNING:    'Nextflow process is active; slides are being processed',
+    RECOVERING: 'Dispatcher restart recovery is in progress; the batch has not resumed live task execution yet.',
+    FINALIZING: 'Nextflow already finished successfully; dispatcher is replaying manifest/WDS/sync cleanup work.',
     SUCCEEDED:  'Nextflow exited 0 — all slides attempted. Check WDS Gap for any that did not make it to S3.',
     FAILED:     'Nextflow exited non-zero or was aborted (e.g. Tower disconnect). Slides reset to PENDING or FAILED for retry.',
     PENDING:    'Batch queued but not yet started',
@@ -198,6 +293,90 @@ function badge(status, stalled) {
   };
   const tip = tips[status] ? ' title="' + tips[status] + '"' : '';
   return '<span class="badge badge-' + cls + '"' + tip + '>' + status + '</span>';
+}
+
+function isRemoteBatch(b) {
+  return String(b.backend || '').toLowerCase() === 'remote_agent' || !!b.target;
+}
+
+function executionLabel(b) {
+  return isRemoteBatch(b) ? 'REMOTE · ' + (b.target || 'unknown') : 'LOCAL';
+}
+
+function executionBadge(b) {
+  const remote = isRemoteBatch(b);
+  const label = executionLabel(b);
+  const tip = remote
+    ? 'Remote dispatch target: ' + (b.target || 'unknown')
+    : 'Local dispatcher execution';
+  return '<span class="badge badge-execution ' + (remote ? 'badge-remote' : 'badge-local') +
+    '" title="' + tip.replace(/"/g, '&quot;') + '">' + label + '</span>';
+}
+
+function renderHookSummary(hooks) {
+  if (!hooks || !hooks.length) return '--';
+  return hooks.map(function(h) {
+    const st = h.status || 'PENDING';
+    const chipCls = {
+      PENDING: 'chip-hook-pending',
+      RUNNING: 'chip-hook-running',
+      SUCCEEDED: 'chip-hook-ok',
+      FAILED: 'chip-hook-fail',
+      WAIVED: 'chip-hook-waived'
+    }[st] || 'chip-hook-pending';
+    const label = (h.hook_name || h.phase || ('hook ' + ((h.hook_index || 0) + 1)))
+      .replace(/^wds:/, '')
+      .replace(/^db_sync:/, 'db:');
+    const prefix = st === 'RUNNING' ? '&#x25B6; ' : (st === 'SUCCEEDED' ? '&#x2714; ' : (st === 'FAILED' ? '&#x2716; ' : (st === 'WAIVED' ? '&#x2298; ' : '&#x23F3; ')));
+    const tip = [
+      'Hook: ' + (h.hook_name || label),
+      'Phase: ' + (h.phase || '--'),
+      'Status: ' + st,
+      h.started_at ? 'Started: ' + h.started_at : '',
+      h.completed_at ? 'Completed: ' + h.completed_at : '',
+      h.duration_s != null ? 'Duration: ' + fmtDuration(h.duration_s) : '',
+      h.exit_code != null ? 'Exit: ' + h.exit_code : '',
+      h.failure_category ? 'Failure class: ' + h.failure_category : '',
+      h.execution_node ? 'Node: ' + h.execution_node : '',
+      h.error_msg ? 'Error: ' + h.error_msg : ''
+    ].filter(Boolean).join('\n').replace(/"/g, '&quot;');
+    return '<span class="chip ' + chipCls + '" style="margin-right:4px;margin-bottom:3px" title="' + tip + '">' +
+      prefix + label + (h.exit_code != null && h.exit_code !== 0 ? ' (' + h.exit_code + ')' : '') + '</span>';
+  }).join('');
+}
+
+function renderRunningHooks(batches) {
+  const runningHooks = [];
+  (batches || []).forEach(function(b) {
+    (b.hooks || []).forEach(function(h) {
+      if (h.status === 'RUNNING') runningHooks.push({ batch: b, hook: h });
+    });
+  });
+  runningHooks.sort(function(a, b) {
+    return String(b.hook.started_at || '').localeCompare(String(a.hook.started_at || ''));
+  });
+  const countEl = document.getElementById('running-hooks-count');
+  const contentEl = document.getElementById('running-hooks-content');
+  countEl.textContent = runningHooks.length ? '(' + runningHooks.length + ')' : '';
+  if (!runningHooks.length) {
+    contentEl.innerHTML = '<span class="no-data">No hooks currently running.</span>';
+    return;
+  }
+  contentEl.innerHTML = '<div class="running-hooks-grid">' + runningHooks.map(function(item) {
+    const b = item.batch;
+    const h = item.hook;
+    const hookName = String(h.hook_name || h.phase || 'post-batch hook')
+      .replace(/^wds:/, '').replace(/^db_sync:/, 'db:');
+    const attempt = h.attempt_count != null ? ' · attempt ' + h.attempt_count : '';
+    return '<div class="running-hook-row">' +
+      '<div class="running-hook-main"><span class="hook-live-dot">&#x25CF;</span>' +
+        '<span class="running-hook-name">' + hookName + '</span>' +
+        '<span class="chip chip-hook-running">RUNNING</span></div>' +
+      '<div class="running-hook-batch">' + b.batch_id + ' · ' + executionBadge(b) + '</div>' +
+      '<div class="running-hook-meta">started ' + fmtTime(h.started_at) +
+        ' · elapsed ' + fmtDuration(null, h.started_at, true) + attempt + '</div>' +
+      '</div>';
+  }).join('') + '</div>';
 }
 
 function fmtDuration(s, startIso, ongoing) {
@@ -226,10 +405,23 @@ function fmtBytes(b) {
   return (b/1073741824).toFixed(1) + ' GB';
 }
 
+const _apiFetches = new Map();
 async function apiFetch(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
+  // Slow SLURM, GPFS, or network responses must not make timer ticks pile up
+  // duplicate requests for the same expensive endpoint.
+  const existing = _apiFetches.get(url);
+  if (existing) return existing;
+  const request = (async function() {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })();
+  _apiFetches.set(url, request);
+  try {
+    return await request;
+  } finally {
+    if (_apiFetches.get(url) === request) _apiFetches.delete(url);
+  }
 }
 
 function fmtEta(seconds) {
@@ -244,20 +436,134 @@ function fmtEta(seconds) {
   return d + 'd ' + (h % 24) + 'h';
 }
 
+function shortRevision(value) {
+  return value ? String(value).slice(0, 12) : '--';
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+function renderReleaseSync(sync) {
+  const wrap = document.getElementById('release-sync-wrap');
+  const banner = document.getElementById('release-sync-banner');
+  const state = String((sync || {}).state || 'UNMANAGED').toUpperCase();
+  if (state === 'ACTIVE' || state === 'UNMANAGED') {
+    wrap.style.display = 'none';
+    banner.textContent = '';
+    return;
+  }
+  wrap.style.display = '';
+  banner.className = 'alert-banner ' + (state === 'ERROR' ? 'alert-dead' : 'alert-warn');
+  const desired = shortRevision(sync.desired_revision);
+  const targetText = (sync.targets || []).map(function(target) {
+    return escapeHtml(target.name) + ': active ' + escapeHtml(shortRevision(target.active_revision)) +
+      ', worker ' + escapeHtml(shortRevision(target.agent_revision));
+  }).join(' · ');
+  const heading = state === 'ERROR'
+    ? 'Release synchronization error.'
+    : (state === 'BLOCKED_LOCAL'
+        ? 'Remote dispatch paused — local release is not publishable.'
+        : 'Remote dispatch paused — release syncing.');
+  banner.innerHTML = '<strong>' + heading + '</strong> Desired ' + escapeHtml(desired) +
+    (sync.phase ? ' · phase ' + escapeHtml(sync.phase) : '') +
+    (targetText ? ' · ' + targetText : '') +
+    (sync.message ? '<br>' + escapeHtml(sync.message) : '') +
+    '<br><span style="opacity:.82">Local dispatch and existing remote Slurm jobs continue; fresh remote batches resume automatically after verification.</span>';
+}
+
+function renderExecutionCapacity(d) {
+  const content = document.getElementById("execution-capacity-content");
+  const stateEl = document.getElementById("execution-capacity-state");
+  const pools = d.execution_pools || [];
+  const summary = d.dispatch_summary || {};
+  if (!pools.length) { content.innerHTML = '<span class="no-data">Capacity status not published yet.</span>'; stateEl.textContent = "unknown"; return; }
+  const blocked = Boolean(summary.queued_work_blocked);
+  const blockers = summary.blockers || [];
+  const capacityFull = blocked && blockers.length > 0 && blockers.every(function(b) {
+    return String(b.code || "").toUpperCase() === "CONCURRENCY_LIMIT";
+  });
+  stateEl.textContent = capacityFull ? "capacity full" : (blocked ? "dispatch blocked" : ((summary.available_pool_count || 0) + " pool(s) available"));
+  stateEl.style.color = capacityFull ? "#fbbf24" : (blocked ? "#f87171" : "#4ade80");
+  const heading = capacityFull
+    ? `<div class="alert-banner alert-warn" style="margin-bottom:8px"><strong>Execution capacity is full.</strong> Queued work will start automatically when a running batch finishes.</div>`
+    : (blocked
+      ? `<div class="alert-banner alert-dead" style="margin-bottom:8px"><strong>Dispatch is blocked.</strong> No execution pool is currently dispatchable.</div>`
+      : "");
+  const rows = pools.map(function(p) {
+    const poolCapacityFull = (p.blockers || []).length > 0 && (p.blockers || []).every(function(b) {
+      return String(b.code || "").toUpperCase() === "CONCURRENCY_LIMIT";
+    });
+    const color = p.available ? "#4ade80" : (poolCapacityFull ? "#fbbf24" : "#f87171");
+    const poolState = poolCapacityFull ? "FULL" : (p.state || (p.available ? "AVAILABLE" : "BLOCKED"));
+    const storage = p.storage || {};
+    const paths = storage.paths || [];
+    const space = paths.map(function(item) {
+      const free = fmtBytes(item.free_bytes || 0);
+      const total = fmtBytes(item.total_bytes || 0);
+      const path = escapeHtml(item.path || "storage");
+      const reason = item.reason ? " — " + escapeHtml(item.reason) : "";
+      return `<div style="font-size:0.74rem;color:#cbd5e1"><span style="color:#94a3b8">` + path + `</span>: ` + free + ` free / ` + total + reason + `</div>`;
+    }).join("");
+    const blockerColor = poolCapacityFull ? "#fcd34d" : "#fca5a5";
+    const blockers = (p.blockers || []).map(function(b) {
+      return `<div style="font-size:0.74rem;color:` + blockerColor + `"><strong>` + escapeHtml(b.code || "BLOCKED") + `</strong>: ` + escapeHtml(b.message || "unknown reason") + `</div>`;
+    }).join("");
+    return `<div style="border:1px solid #334155;border-left:3px solid ` + color + `;border-radius:6px;padding:9px 11px;margin-bottom:7px">` +
+      `<div style="display:flex;justify-content:space-between;gap:8px"><span class="chip" style="border-color:` + color + `;color:` + color + `">` + escapeHtml(p.name || "pool") + `</span><span style="color:` + color + `;font-weight:600">` + escapeHtml(poolState) + `</span></div>` +
+      `<div style="font-size:0.75rem;color:#94a3b8;margin-top:5px">` + escapeHtml(p.backend || "") + (p.target ? " · target " + escapeHtml(p.target) : "") + " · active " + (p.active_batches ?? "--") + "/" + (p.max_batches ?? "--") + `</div>` +
+      (space ? `<div style="margin-top:5px">` + space + `</div>` : "") + blockers + `</div>`;
+  }).join("");
+  content.innerHTML = heading + rows;
+}
+
 // Status overview
 async function loadStatus() {
   try {
     const d = await apiFetch('/api/status');
     const c = d.counts || {};
+    const chartCounts = d.chart_counts || c;
+    const dh = d.dispatcher_health || {};
+    renderReleaseSync(d.release_sync || {});
+      renderExecutionCapacity(d);
     document.getElementById('s-total').textContent       = d.total ?? '--';
     document.getElementById('s-done').textContent        = c.SUCCEEDED ?? 0;
-    document.getElementById('s-failed').textContent      = c.FAILED ?? 0;
+    document.getElementById('s-failed').textContent      = d.retry_pending ?? 0;
     document.getElementById('s-pending').textContent     = c.PENDING ?? 0;
     document.getElementById('s-dispatched').textContent  = c.DISPATCHED ?? 0;
     document.getElementById('s-pct').textContent         = (d.pct_succeeded ?? 0) + '%';
-    document.getElementById('s-running').textContent     = d.running_batches ?? 0;
+    const runningTotal = d.running_batches_total ?? d.running_batches ?? 0;
+    const runningLocal = d.running_batches_local ?? 0;
+    const runningRemote = d.running_batches_remote ?? 0;
+    document.getElementById('s-running').textContent     = runningTotal;
+    document.getElementById('s-running-detail').textContent = 'local ' + runningLocal + ' · remote ' + runningRemote;
     document.getElementById('s-blacklisted').textContent = d.blacklisted ?? 0;
     document.getElementById('progress-bar').style.width  = (d.pct_done ?? 0) + '%';
+    const healthWrap = document.getElementById('dispatcher-health-wrap');
+    const healthBanner = document.getElementById('dispatcher-health-banner');
+    if (dh.state === 'dead') {
+      healthWrap.style.display = '';
+      healthBanner.className = 'alert-banner alert-dead';
+      healthBanner.innerHTML =
+        '<strong>Dispatcher down.</strong> ' + (dh.message || 'Dispatcher is not running.') +
+        (dh.log_mtime ? ' Last dispatcher log update: ' + fmtTime(dh.log_mtime) + '.' : '');
+    } else if (dh.state === 'duplicate') {
+      healthWrap.style.display = '';
+      healthBanner.className = 'alert-banner alert-warn';
+      healthBanner.innerHTML =
+        '<strong>Duplicate dispatchers detected.</strong> ' + (dh.message || 'Multiple dispatcher processes are active for this config.');
+    } else if (dh.state === 'unknown') {
+      healthWrap.style.display = '';
+      healthBanner.className = 'alert-banner alert-warn';
+      healthBanner.innerHTML =
+        '<strong>Dispatcher health unknown.</strong> ' + (dh.message || 'Could not determine dispatcher state.');
+    } else {
+      healthWrap.style.display = 'none';
+      healthBanner.className = 'alert-banner alert-ok';
+      healthBanner.textContent = '';
+    }
     document.getElementById('s-throughput').textContent  = d.throughput_per_hour != null ? d.throughput_per_hour : '--';
     const etaEl = document.getElementById('s-eta');
     if (d.eta_seconds != null) {
@@ -278,6 +584,7 @@ async function loadStatus() {
       syncTile.title = 'No sync status recorded yet. Sync runs after each successful batch.';
     } else {
       const ok  = ss.status === 'SUCCESS';
+      const pending = ss.status === 'PENDING' || ss.status === 'RESET';
       const ago = ss.updated_at ? Math.round((Date.now() - new Date(ss.updated_at)) / 60000) : null;
       const runActive = (c.PENDING || 0) + (c.DISPATCHED || 0) + (d.running_batches || 0) > 0;
       const stale = ago != null && ago > 24 * 60 && runActive;  // >24h stale only if run still active
@@ -287,6 +594,9 @@ async function loadStatus() {
       } else if (ok && stale) {
         syncEl.textContent = '⚠ Stale';
         syncEl.style.color = '#fbbf24';
+      } else if (pending) {
+        syncEl.textContent = '--';
+        syncEl.style.color = '#94a3b8';
       } else {
         syncEl.textContent = '✗ Failed';
         syncEl.style.color = '#f87171';
@@ -300,10 +610,116 @@ async function loadStatus() {
         agoStr     ? 'Updated: ' + agoStr      : '',
       ].filter(Boolean).join('\n');
     }
-    const labels = Object.keys(c);
-    const values = Object.values(c);
+    const remoteEl = document.getElementById('remote-content');
+      const targets = d.remote_targets || [];
+    const finalization = d.finalization_coordination || {};
+    const lease = finalization.lease;
+    const laneLimits = finalization.max_slots_by_lane || {};
+    const laneText = ['local', 'remote'].map(function(lane) {
+      const active = (finalization.lanes || {})[lane] || [];
+      const limit = laneLimits[lane] ?? finalization.max_slots_per_lane ?? '--';
+      return lane + ' ' + active.length + '/' + limit;
+    }).join(' &middot; ');
+    const leaseText = lease
+      ? ('finalizer ' + (lease.batch_id || '--') + ' (' + (lease.owner || '--') + ')')
+      : 'finalizer idle';
+    const finalizationHtml = '<div style="margin-bottom:0.55rem;color:#94a3b8;font-size:0.78rem">' +
+      'finalization queue ' + (finalization.queued_batches ?? '--') +
+      ' &middot; slots ' + laneText + ' &middot; ' + leaseText + '</div>';
+    if (!targets.length) {
+      remoteEl.innerHTML = finalizationHtml + '<span class="no-data">No remote targets configured.</span>';
+    } else {
+      remoteEl.innerHTML = finalizationHtml + targets.map(function(t) {
+        const color = t.state === 'alive' ? '#4ade80' : (t.state === 'stale' ? '#fbbf24' : '#94a3b8');
+        const age = t.agent_heartbeat_age_s != null ? fmtDuration(t.agent_heartbeat_age_s) + ' ago' : 'unknown';
+        const slurm = (t.slurm_running != null)
+          ? (' &middot; slurm ' + (t.slurm_running || 0) + '&#x25B6;' +
+             (t.slurm_pending ? ' ' + t.slurm_pending + '&#x23F3;' : '') +
+             (t.slurm_completing ? ' ' + t.slurm_completing + '&#x27F3;' : ''))
+          : '';
+        const nodeTip = (t.slurm_nodes || []).length ? ' nodes ' + t.slurm_nodes.join(', ') : '';
+        const slurmErr = t.slurm_error ? '<br><span style="color:#fbbf24;font-size:0.74rem">slurm: ' + t.slurm_error + '</span>' : '';
+        const fin = t.finalization || {};
+        const reconciliation = fin.reconciliation || {};
+        const reconciliationState = String(reconciliation.state || '').toUpperCase();
+        const reconciliationColor = reconciliationState === 'DEGRADED'
+          ? '#f87171' : (reconciliationState === 'RECOVERING' ? '#fbbf24' : '#c4b5fd');
+        const foreignCount = (reconciliation.foreign_live || []).length;
+        const orphanCount = (reconciliation.unresolved_orphans || []).length;
+        const unfencedWorkers = (reconciliation.workers_without_lease || []).length;
+        const reconciliationLine = reconciliationState
+          ? '<br><span style="color:' + reconciliationColor + ';font-size:0.74rem">finalization ' +
+            reconciliationState.toLowerCase() + ' (' +
+            (reconciliation.process_active ?? fin.active ?? 0) + ' workers / ' +
+            (reconciliation.durable_slots ?? fin.active ?? 0) + ' durable slots)' +
+            (reconciliation.repaired && reconciliation.repaired.length
+              ? ' · repaired ' + reconciliation.repaired.length : '') +
+            (foreignCount ? ' · foreign ' + foreignCount : '') +
+            (orphanCount ? ' · orphan ' + orphanCount : '') +
+            (unfencedWorkers ? ' · lease missing ' + unfencedWorkers : '') + '</span>'
+          : '';
+        const reconciliationError = reconciliationState === 'DEGRADED' && reconciliation.errors && reconciliation.errors.length
+          ? '<br><span style="color:#f87171;font-size:0.74rem">' + escapeHtml(reconciliation.errors[reconciliation.errors.length - 1]) + '</span>'
+          : '';
+        const queueAge = reconciliation.queue && reconciliation.queue.oldest_queued_age_s != null
+          ? ' · oldest queued ' + fmtDuration(reconciliation.queue.oldest_queued_age_s)
+          : '';
+        const hookHealth = t.hook_executor_health || {};
+        const progressLine = hookHealth.last_progress_at
+          ? '<br><span style="color:#94a3b8;font-size:0.74rem">hook polling progress ' + escapeHtml(hookHealth.last_progress_at) + '</span>'
+          : '';
+        const heartbeatRows = Object.values(fin.heartbeats || {});
+        const latestHeartbeat = heartbeatRows.map(function(row) { return row.last_success_at || ''; }).sort().pop()
+          || reconciliation.last_successful_heartbeat_at;
+        const heartbeatLine = latestHeartbeat
+          ? '<br><span style="color:#94a3b8;font-size:0.74rem">finalizer lease heartbeat ' + escapeHtml(latestHeartbeat) + '</span>'
+          : '';
+        const finLine = fin.limit != null
+          ? '<br><span style="color:#c4b5fd;font-size:0.74rem">finalizers ' +
+            (fin.active || 0) + '/' + fin.limit + ' active</span>' + reconciliationLine + reconciliationError + queueAge + progressLine + heartbeatLine
+          : reconciliationLine + reconciliationError + queueAge + progressLine + heartbeatLine;
+        const circuit = t.hook_circuit || {};
+        const circuitLine = circuit.state === 'HALF_OPEN'
+          ? '<br><span style="color:#fbbf24;font-size:0.74rem;font-weight:600">hooks canary: ' +
+            escapeHtml(circuit.canary_batch_id || 'waiting for eligible batch') + '</span>'
+          : (circuit.paused
+            ? '<br><span style="color:#f87171;font-size:0.74rem;font-weight:600">hooks paused: ' +
+              escapeHtml(circuit.reason || circuit.category || 'circuit breaker open') + '</span>'
+            : '');
+        const release = t.release || {};
+        const releaseManaged = Boolean((d.release_sync || {}).managed || release.name);
+        const releaseColor = release.dispatch_ready ? '#4ade80' : '#fbbf24';
+        const releaseText = release.dispatch_ready
+          ? ('release active ' + shortRevision(release.active_revision))
+          : ('release syncing ' + shortRevision(release.active_revision) + ' → ' + shortRevision((d.release_sync || {}).desired_revision));
+        const releaseLine = releaseManaged
+          ? '<br><span style="color:' + releaseColor + ';font-size:0.74rem">' + escapeHtml(releaseText) + '</span>'
+          : '';
+        const releaseReason = release.dispatch_block_reason
+          ? '<br><span style="color:' + releaseColor + ';font-size:0.74rem">' + escapeHtml(release.dispatch_block_reason) + '</span>'
+          : '';
+        return '<div style="margin-bottom:0.55rem">' +
+          '<span class="chip" style="border-color:' + color + ';color:' + color + '">' + t.name + '</span> ' +
+          '<span style="color:' + color + ';font-weight:600">' + t.state + '</span><br>' +
+          '<span style="color:#94a3b8;font-size:0.78rem">host ' + (t.login_host || '--') +
+          ' &middot; queue ' + (t.queue_depth ?? '--') +
+          ' &middot; batches ' + (t.active_batches ?? '--') +
+          slurm +
+          ' &middot; heartbeat ' + age + (nodeTip ? ' &middot;' + nodeTip : '') + '</span>' +
+          releaseLine + releaseReason + circuitLine + finLine + slurmErr + '</div>';
+      }).join('');
+    }
+
+    const labels = Object.keys(chartCounts).filter(function(k) { return (chartCounts[k] || 0) > 0; });
+    const values = labels.map(function(k) { return chartCounts[k]; });
     const colors = labels.map(function(l) {
-      return {SUCCEEDED:'#22c55e',FAILED:'#ef4444',PENDING:'#6366f1',DISPATCHED:'#0ea5e9'}[l] || '#64748b';
+      return {
+        SUCCEEDED:'#22c55e',
+        RETRY_PENDING:'#ef4444',
+        FAILED:'#b91c1c',
+        PENDING:'#6366f1',
+        DISPATCHED:'#0ea5e9'
+      }[l] || '#64748b';
     });
     if (typeof Chart === 'undefined' || !_chartJsReady) return;
     if (!statusChart) {
@@ -394,6 +810,9 @@ function renderFailures(failures) {
 // Full running batch card
 function renderBatchCard(b) {
   const t = b.tower;
+  const towerExpected = b.tower_expected === true ||
+    (b.tower_expected == null && b.status === 'RUNNING' &&
+      (b.backend !== 'remote_agent' || b.remote_status === 'RUNNING'));
   const stalled = t && t.stalled;
   let progressHtml = '';
   if (t) {
@@ -429,11 +848,15 @@ function renderBatchCard(b) {
   const logBtn = b.has_log ? '<button class="btn-sm" onclick="showLog(\'' + b.batch_id + '\')">Log</button>' : '';
   const towerContent = t
     ? renderProcesses(t.processes) + renderResources(t.resources) + renderFailures(t.failures)
-    : '<span class="no-data" style="font-size:0.75rem">Tower not yet connected for this batch</span>';
+    : (towerExpected
+      ? '<span class="no-data" style="font-size:0.75rem">Tower not yet connected for this batch</span>'
+      : (b.hooks && b.hooks.length
+        ? '<div style="margin-top:6px;font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em">Post-batch hooks</div>' + renderHookSummary(b.hooks)
+        : ''));
   return '<div class="batch-card' + (stalled?' stalled':'') + '">' +
     '<div class="batch-card-header">' +
       '<div>' +
-        '<div class="batch-title">' + b.batch_id + ' ' + badge(b.status, stalled) + '</div>' +
+        '<div class="batch-title">' + b.batch_id + ' ' + badge(b.status, stalled) + ' ' + executionBadge(b) + '</div>' +
         '<div class="batch-meta">' + (b.slide_count||'?') + ' slides &middot; started ' + fmtTime(b.dispatched_at) +
         ' &middot; elapsed ' + fmtDuration(null, b.dispatched_at, true) + '</div>' +
       '</div>' +
@@ -445,25 +868,7 @@ function renderBatchCard(b) {
   '</div>';
 }
 
-// Batches: history table + running cards
-async function loadBatches() {
-  try {
-    const batches = await apiFetch('/api/batches');
-    const running = batches.filter(function(b) { return b.status === 'RUNNING'; });
-    const towerActive = running.some(function(b) { return b.tower; });
-    document.getElementById('running-tower-badge').style.display = towerActive ? '' : 'none';
-    const rc = document.getElementById('running-content');
-    if (!running.length) {
-      rc.innerHTML = '<span class="no-data">No running batches.</span>';
-    } else {
-      rc.innerHTML = running.map(renderBatchCard).join('');
-    }
-    const tbody = document.getElementById('batch-tbody');
-    if (!batches.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="no-data">No batches yet.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = batches.map(function(b) {
+function renderBatchRow(b) {
       const t = b.tower;
       let progressCell = '--';
       if (t && t.total) {
@@ -502,20 +907,66 @@ async function loadBatches() {
       const exitCell = (b.nextflow_exit != null && b.nextflow_exit !== 0)
         ? '<span style="color:#f87171" title="Non-zero Nextflow exit — process was aborted or errored. Slides were reset to PENDING or FAILED.">' + b.nextflow_exit + '</span>'
         : (b.nextflow_exit === 0 ? '<span title="Nextflow exited cleanly">0</span>' : '--');
+      const targetCell = b.backend === 'remote_agent'
+        ? executionBadge(b) + '<br><span style="color:#94a3b8;font-size:0.7rem" title="Driver job ' + (b.remote_driver_job_id || '--') + '">' + (b.remote_status || 'remote') + '</span>'
+        : executionBadge(b);
+      const hookCell = renderHookSummary(b.hooks);
       return '<tr>' +
         '<td style="font-family:monospace;font-size:0.7rem" title="' + b.batch_id + '">' + b.batch_id + '</td>' +
         '<td>' + badge(b.status, stalled) + failChip + '</td>' +
+        '<td>' + targetCell + '</td>' +
         '<td style="color:#94a3b8" title="Slides assigned to this batch">' + (b.slide_count ?? '--') + '</td>' +
         '<td>' + progressCell + '</td>' +
         '<td>' + slurmCell + '</td>' +
+        '<td>' + hookCell + '</td>' +
         '<td title="' + (b.dispatched_at || '') + '">' + fmtTime(b.dispatched_at) + '</td>' +
         '<td>' + fmtDuration(b.duration_s, b.dispatched_at, b.status === 'RUNNING') + '</td>' +
         '<td>' + exitCell + '</td>' +
         '<td>' + (b.has_log ? '<button class="btn-sm" onclick="showLog(\'' + b.batch_id + '\')">View</button>' : '--') + '</td>' +
         '</tr>';
-    }).join('');
+}
+
+function renderRecentBatchTable(tbodyId, countId, rows, label) {
+  const tbody = document.getElementById(tbodyId);
+  document.getElementById(countId).textContent = '(' + rows.length + ')';
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="no-data">No ' + label + ' batches.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(renderBatchRow).join('');
+}
+
+// Batches: history tables + running cards
+async function loadBatches() {
+  try {
+    const batches = await apiFetch('/api/batches');
+    renderRunningHooks(batches);
+    const activeStatuses = new Set(['RUNNING', 'RECOVERING', 'FINALIZING']);
+  const activeRemoteStatuses = new Set(['QUEUED', 'CLAIMED', 'STARTING', 'SUBMITTED', 'RUNNING', 'CANCEL_REQUESTED', 'FINALIZATION_QUEUED', 'HOOKS_RETRY', 'HOOKS_RUNNING', 'HOOKS_BLOCKED', 'BLOCKED', 'STALE']);
+    const running = batches.filter(function(b) {
+      return activeStatuses.has(b.status) ||
+        (b.backend === 'remote_agent' && activeRemoteStatuses.has(b.remote_status));
+    });
+    const towerActive = running.some(function(b) { return b.tower; });
+    document.getElementById('running-tower-badge').style.display = towerActive ? '' : 'none';
+    const rc = document.getElementById('running-content');
+    if (!running.length) {
+      rc.innerHTML = '<span class="no-data">No running batches.</span>';
+    } else {
+      rc.innerHTML = running.map(renderBatchCard).join('');
+    }
+
+    const localBatches = batches.filter(function(b) { return !isRemoteBatch(b); });
+    const remoteBatches = batches.filter(isRemoteBatch);
+    renderRecentBatchTable('local-batch-tbody', 'local-batch-count', localBatches, 'local');
+    renderRecentBatchTable('remote-batch-tbody', 'remote-batch-count', remoteBatches, 'remote');
   } catch(e) {
-    document.getElementById('batch-tbody').innerHTML = '<tr><td colspan="9" class="no-data">Failed to load batches.</td></tr>';
+    document.getElementById('running-hooks-count').textContent = '';
+    document.getElementById('running-hooks-content').innerHTML = '<span class="no-data">Failed to load running hooks.</span>';
+    document.getElementById('local-batch-count').textContent = '';
+    document.getElementById('remote-batch-count').textContent = '';
+    document.getElementById('local-batch-tbody').innerHTML = '<tr><td colspan="11" class="no-data">Failed to load local batches.</td></tr>';
+    document.getElementById('remote-batch-tbody').innerHTML = '<tr><td colspan="11" class="no-data">Failed to load remote batches.</td></tr>';
     console.error('loadBatches:', e);
   }
 }
@@ -531,7 +982,7 @@ function openLogModal(batch_id) {
   document.getElementById('log-modal').classList.add('open');
   refreshModalLog();
   clearInterval(_modalInterval);
-  _modalInterval = setInterval(refreshModalLog, 5000);
+  _modalInterval = setInterval(refreshModalLog, 15000);
 }
 function closeLogModal() {
   document.getElementById('log-modal').classList.remove('open');
@@ -542,7 +993,11 @@ async function refreshModalLog() {
   const el = document.getElementById('log-modal-body');
   try {
     const d = await apiFetch('/api/logs/' + _modalBatchId);
-    const text = (d.lines || []).join('\n') || d.error || '(empty)';
+    const meta = [];
+    if (d.stale) meta.push('[stale]');
+    if (d.error) meta.push('[error: ' + d.error + ']');
+    const prefix = meta.length ? meta.join(' ') + '\n\n' : '';
+    const text = prefix + ((d.lines || []).join('\n') || d.error || '(empty)');
     const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 20;
     el.textContent = text;
     if (atBottom) el.scrollTop = el.scrollHeight;
@@ -572,17 +1027,17 @@ async function loadWds() {
     const header = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">' +
       '<thead><tr style="color:#64748b;text-align:left">' +
       '<th style="padding:4px 6px">Model</th>' +
-      '<th style="padding:4px 6px;text-align:right">WDS Slides</th>' +
-      '<th style="padding:4px 6px;text-align:right" title="SUCCEEDED in DB minus WDS-indexed slides">Gap</th>' +
-      '<th style="padding:4px 6px;text-align:right" title="Valid S3 shards / manifest shards">S3 / Manifest</th>' +
-      '<th style="padding:4px 6px;text-align:right" title="Average slides per shard">Slides/Shard</th>' +
+      '<th style="padding:4px 6px;text-align:right" title="Current SUCCEEDED DB slides present in this model&apos;s WDS index">WDS Slides</th>' +
+      '<th style="padding:4px 6px;text-align:right" title="SUCCEEDED in DB minus current WDS-indexed slides for this model">Gap</th>' +
+      '<th style="padding:4px 6px;text-align:right" title="Live S3 shard count / all indexed shard count">S3 / Index</th>' +
+      '<th style="padding:4px 6px;text-align:right" title="Average current indexed slides per shard">Slides/Shard</th>' +
       '<th style="padding:4px 6px;text-align:right" title="Local .pt files pending cleanup">Local .pt</th>' +
       '</tr></thead><tbody>';
     const rows = keys.map(function(m) {
       const mv = models[m];
       const gap = mv.gap || 0;
       const ns  = mv.shards || 0;
-      const ms  = mv.manifest_shards || 0;
+      const ms  = mv.index_shards || 0;
       const ss  = mv.shard_stats || {};
       const gapColor = gap === 0 ? '#4ade80' : gap < 100 ? '#fcd34d' : '#f87171';
       const shardStr = mv.error
@@ -605,7 +1060,7 @@ async function loadWds() {
     const footer = dbSucceeded
       ? '<tr style="border-top:1px solid #334155;color:#94a3b8">' +
         '<td style="padding:4px 6px" colspan="2">SUCCEEDED in DB: <b style="color:#fff">' + dbSucceeded + '</b></td>' +
-        '<td colspan="4" style="padding:4px 6px;font-size:0.7rem;color:#64748b" title="Non-zero gap means slides completed Nextflow but were not uploaded to WDS — usually caused by GPU node failures (errorStrategy=ignore) killing TESSELLATE tasks before .pt files are written">Gap = SUCCEEDED − WDS indexed (non-zero = slides need re-processing)</td>' +
+        '<td colspan="4" style="padding:4px 6px;font-size:0.7rem;color:#64748b" title="Served from the dispatcher&apos;s persisted WDS snapshot. Non-zero gap means slides completed Nextflow but are not indexed in WDS for that model.">Gap = SUCCEEDED − current WDS indexed</td>' +
         '</tr>' : '';
     el.innerHTML = header + rows.join('') + footer + '</tbody></table>';
   } catch(e) {
@@ -622,12 +1077,13 @@ async function loadSlurm() {
     if (d.error) { el.innerHTML = '<span class="no-data">squeue error: ' + d.error + '</span>'; return; }
     const summary = '<div style="font-size:1.1rem;margin-bottom:0.5rem">' +
       '<span style="color:#6ee7b7;font-weight:600" title="SLURM jobs actively executing on GPU nodes">' + d.running + '</span> running &nbsp;' +
+      '<span style="color:#cbd5e1;font-weight:600" title="SLURM jobs draining after cancellation or normal task exit; these are not queueing new work">' + (d.completing || 0) + '</span> completing &nbsp;' +
       '<span style="color:#fcd34d;font-weight:600" title="SLURM jobs submitted but waiting for available GPU slots">' + d.pending + '</span> pending &nbsp;' +
-      '<span style="color:#94a3b8" title="All nf-* SLURM jobs across all running batches">(' + d.total + ' total nf-* jobs)</span></div>';
+      '<span style="color:#94a3b8" title="All nf-* SLURM jobs across all tracked batches, including completing jobs">(' + d.total + ' total nf-* jobs)</span></div>';
 
     // Per-process breakdown
     const procs = Object.entries(d.processes || {}).sort(function(a,b){
-      return (b[1].running + b[1].pending) - (a[1].running + a[1].pending);
+      return (b[1].running + b[1].completing + b[1].pending) - (a[1].running + a[1].completing + a[1].pending);
     });
     const procHtml = procs.length
       ? '<div style="margin-bottom:0.6rem"><span style="color:#94a3b8;font-size:0.75rem" title="Active SLURM jobs grouped by Nextflow process name">BY PROCESS</span><br>' +
@@ -635,6 +1091,7 @@ async function loadSlurm() {
           const name = e[0]; const v = e[1];
           return '<span style="font-family:monospace;font-size:0.75rem;color:#c4b5fd">' + name + '</span> ' +
             (v.running ? '<span style="color:#6ee7b7" title="Running SLURM jobs">&#x25B6;' + v.running + '</span> ' : '') +
+            (v.completing ? '<span style="color:#cbd5e1" title="Jobs in Slurm COMPLETING state">&#x23F9;' + v.completing + '</span> ' : '') +
             (v.pending ? '<span style="color:#fcd34d" title="Pending SLURM jobs (waiting for GPU slot)">&#x23F3;' + v.pending + '</span>' : '');
         }).join(' &nbsp; ') + '</div>'
       : '';
@@ -696,14 +1153,30 @@ async function loadSlurm() {
 // Main refresh
 async function refresh() {
   document.getElementById('last-updated').textContent = 'Refreshing...';
-  await Promise.allSettled([loadStatus(), loadBatches(), loadWds(), loadSlurm()]);
+  await Promise.allSettled([loadStatus(), loadBatches()]);
   document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 }
 
-refresh();
-setInterval(refresh, 10000);
-setInterval(loadSlurm, 15000);
-setInterval(loadWds, 60000);
+let _refreshTimer = null;
+let _slurmTimer = null;
+let _wdsTimer = null;
+function startPolling() {
+  if (_refreshTimer) return;
+  refresh();
+  loadSlurm();
+  loadWds();
+  _refreshTimer = setInterval(refresh, 30000);
+  _slurmTimer = setInterval(loadSlurm, 30000);
+  _wdsTimer = setInterval(loadWds, 60000);
+}
+function stopPolling() {
+  clearInterval(_refreshTimer); clearInterval(_slurmTimer); clearInterval(_wdsTimer);
+  _refreshTimer = _slurmTimer = _wdsTimer = null;
+}
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) stopPolling(); else startPolling();
+});
+startPolling();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"
   onload="onChartJsReady()"></script>

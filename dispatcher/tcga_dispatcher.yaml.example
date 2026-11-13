@@ -78,8 +78,8 @@ watchers:
     # The destination is the base path; mussel_dispatcher.wds appends /{model_type}/
     # automatically, so do NOT include the model name here.
     wds_destinations:
-      hoptimus1: s3://reef-tcga-v2-0/wds
-      titan_slide: s3://reef-tcga-v2-0/wds
+      hoptimus1: s3://your-bucket/tcga/wds
+      titan_slide: s3://your-bucket/tcga/wds
       # uni2h: s3://your-bucket/wds
     wds_staging_dir: tcga-results/wds-staging   # local staging base for S3 uploads; each model uses {staging}/{model}/
 
@@ -91,7 +91,7 @@ watchers:
     # See databricks/README.md for setup instructions (create volume, import notebook, create job).
     databricks_volume_folder: /Volumes/your_catalog/your_schema/tcga_dispatcher
     databricks_table: your_catalog.your_schema.tcga_slide_embeddings
-    # databricks_job_id: "12345"   # set to the job ID from: databricks jobs create --json @databricks/jobs/tcga_metadata_sync_job.json
+    # databricks_job_id: "12345"   # set to the job ID from: databricks jobs create --json @databricks/jobs/metadata_sync_job.json
     # databricks_job_id: "12345"
 
 # Any explicit post_batch_hooks run after the auto-generated ones above.

@@ -1,0 +1,106 @@
+nextflow_pipeline {
+    name   "Slurm submission failures and failed tessellation (fake Slurm) — stub mode"
+    script "../main.nf"
+    profile "test_stub_grid_from_primary,cluster,slurm"
+    config "./fake_slurm/fake_slurm.config"
+    options "-stub"
+
+    // Runs the production cluster + slurm profiles against tests/fake_slurm, which must
+    // be first on PATH: PATH=$PWD/tests/fake_slurm:$PATH nf-test test tests/pipeline_fake_slurm.nf.test
+    // An ignored TESSELLATE submission failure (sbatch error while
+    // slurmctld was down) never counts as done in Nextflow, so TESSELLATE never closed
+    // its outputs and the collate before DERIVE_TILE_GRID waited forever. The fake's
+    // WATCHDOG SIGTERMs Nextflow, so a hang fails the test instead of blocking CI.
+
+    // Run root (parent of work/ and output/, Nextflow's launch dir): the fake finds
+    // fake_slurm.conf here from its working directory and keeps this run's state
+    // (job records, failure counters) under it, so tests never share counters.
+    def runRoot = { String outputDir -> new File(outputDir).parentFile }
+    def setup = { String outputDir, List<String> slideIds, String conf ->
+        def root = runRoot(outputDir)
+        root.mkdirs()
+        new File(root, "fake_slurm.conf").text = conf + "\nWATCHDOG=240\n"
+        def slide = new File("tests/testdata/948176.svs").absolutePath
+        def csv = new File(root, "samples.csv")
+        csv.text = "slide_id,slide_path\n" + slideIds.collect { "${it},${slide}" }.join("\n") + "\n"
+        return csv.absolutePath
+    }
+    def submissions = { String outputDir ->
+        def log = new File(runRoot(outputDir), "fake_slurm.log")
+        assert log.exists() : "tests/fake_slurm is not first on PATH (no submissions recorded)"
+        log.readLines()
+    }
+    def noHang = { String outputDir ->
+        assert !new File(runRoot(outputDir), "fake_slurm_watchdog_fired").exists() : "the run hung (watchdog fired)"
+    }
+
+    test("a failed TESSELLATE submission is retried, not ignored") {
+        when {
+            params {
+                // 10 failures: more than the cluster profile's 8 sbatch attempts, so one
+                // submission fails in Nextflow and the errorStrategy decides.
+                samples_csv = setup("${outputDir}", ["948176"], "FAIL_SUBMIT=TESSELLATE_PATCHES_TESSELLATE\nFAIL_TIMES=10")
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            noHang("${outputDir}")
+            assert workflow.success
+            assert submissions("${outputDir}").count { it.contains("TESSELLATE_PATCHES_TESSELLATE") } == 11
+            assert path("${outputDir}/tiles_512px/9481/948176.patch.h5").exists()
+            assert path("${outputDir}/features/titan_slide/948176.features.pt").exists()
+        }
+    }
+
+    test("a submission that keeps failing terminates the run instead of hanging") {
+        when {
+            params {
+                samples_csv = setup("${outputDir}", ["948176"], "FAIL_SUBMIT=TESSELLATE_PATCHES_TESSELLATE")
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            noHang("${outputDir}")
+            assert workflow.failed
+            // 8 sbatch attempts per task attempt; 1 + maxRetries (3) task attempts.
+            assert submissions("${outputDir}").count { it.contains("TESSELLATE_PATCHES_TESSELLATE") } == 32
+        }
+    }
+
+    test("a TESSELLATE task the driver watch failed as lost (exit 75) is retried, not ignored") {
+        when {
+            params {
+                // The driver watch fails a lost job's task with exit 75 (.command.begin +
+                // .exitcode); the slide never ran, so unlike exit 1 it must not be ignored.
+                samples_csv = setup("${outputDir}", ["948176", "948177"],
+                    "EXEC_FAIL=TESSELLATE_PATCHES_TESSELLATE_\\(2\\)\nEXEC_EXIT=75\nEXEC_FAIL_TIMES=1")
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            noHang("${outputDir}")
+            assert workflow.success
+            assert submissions("${outputDir}").count { it.contains("TESSELLATE_PATCHES_TESSELLATE_(2)") } == 2
+            assert path("${outputDir}/tiles_512px/9481/948176.patch.h5").exists()
+            assert path("${outputDir}/tiles_512px/9481/948177.patch.h5").exists()
+        }
+    }
+
+    test("an ignored TESSELLATE task failure still lets the derived grid and featurization finish") {
+        when {
+            params {
+                // The second slide's task starts and exits 1: ignored, as on a real cluster. This is
+                // also how the driver watch fails a lost job (.command.begin + .exitcode).
+                samples_csv = setup("${outputDir}", ["948176", "948177"], "EXEC_FAIL=TESSELLATE_PATCHES_TESSELLATE_\\(2\\)")
+                outdir = "${outputDir}"
+            }
+        }
+        then {
+            noHang("${outputDir}")
+            assert workflow.exitStatus == 0
+            assert path("${outputDir}/tiles_512px/9481/948176.patch.h5").exists()
+            assert path("${outputDir}/features/titan_slide/948176.features.pt").exists()
+            assert !path("${outputDir}/tiles/9481/948177.patch.h5").exists()
+        }
+    }
+}

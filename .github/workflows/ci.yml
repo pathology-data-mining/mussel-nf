@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
 
 jobs:
   # ── Python unit tests ──────────────────────────────────────────────────────
@@ -28,6 +28,50 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/ -v --ignore=tests/testdata
+
+  # ── Dispatcher unit tests (production runs Python 3.12) ───────────────────
+  dispatcher-tests:
+    name: Dispatcher unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dispatcher and test dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy pandas pytest webdataset h5py requests boto3 pyarrow databricks-sdk
+          # Production runs nextflow-turret from this commit (agent/tower-compatibility);
+          # PyPI 0.1.0 predates its 16-character Tower workflow IDs.
+          pip install "nextflow-turret @ git+https://github.com/msk-mind/nextflow-turret@7df7717"
+          pip install -e dispatcher/
+
+      - name: Run dispatcher tests
+        working-directory: dispatcher
+        run: pytest tests/ -q
+
+  # ── Dispatcher syntax on the oldest supported Pythons (requires-python >=3.10) ─
+  dispatcher-syntax:
+    name: Dispatcher syntax (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Compile every dispatcher module
+        run: python -m compileall -q dispatcher/mussel_dispatcher dispatcher/scripts
 
   # ── Linear probe integration test (no GPU, no real slides) ────────────────
   nf-test-linear-probe:
@@ -184,7 +228,36 @@ jobs:
             tests/pipeline_stub_wds.nf.test \
             tests/pipeline_stub_wds_grouped.nf.test \
             tests/pipeline_stub_clip.nf.test \
-            tests/pipeline_stub_multi_slide.nf.test
+            tests/pipeline_stub_multi_slide.nf.test \
+            tests/pipeline_stub_multi_model.nf.test \
+            tests/pipeline_stub_grid_from_primary.nf.test \
+            tests/pipeline_stub_grid_from_primary_batched.nf.test \
+            tests/pipeline_stub_one_step_partial.nf.test \
+            tests/pipeline_stub_one_step_slide_encoders.nf.test \
+            tests/pipeline_stub_one_step_slide_override.nf.test
+
+      - name: Run non-stub FEATURIZE script regression test
+        run: |
+          nf-test test \
+            tests/pipeline_real_featurize.nf.test \
+            tests/pipeline_real_featurize_multi.nf.test \
+            tests/pipeline_real_featurize_partial.nf.test \
+            tests/pipeline_real_featurize_partial_slide.nf.test \
+            tests/abmil_features_suffix.nf.test
+
+      # Production cluster + slurm profiles against a fake Slurm that fails submissions;
+      # its watchdog turns a hung run into a failure.
+      - name: Run Slurm submission-failure test (fake Slurm)
+        timeout-minutes: 20
+        run: PATH="$GITHUB_WORKSPACE/tests/fake_slurm:$PATH" nf-test test tests/pipeline_fake_slurm.nf.test
+
+      # The driver watch beside real Nextflow (lost job failed and retried) and the remote
+      # agent classifying runs Nextflow aborted on Slurm failures (~1 min).
+      - name: Run live driver-watch tests (Nextflow + fake Slurm)
+        timeout-minutes: 20
+        run: |
+          pip install pytest -e dispatcher/
+          cd dispatcher && pytest tests/test_driver_watch.py -q -m live_nextflow
 
   # ── TCGA scripts integration: stub pipeline output → append_wds ────────
   nf-test-stub-tcga:

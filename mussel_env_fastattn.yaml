@@ -3,5 +3,6 @@ dependencies:
   - python=3.11.*
   - pip
   - pip:
-    - mussel-pathology[fastattn]
+    - mussel-pathology[fastattn]==1.6.0
+    - segmentation-models-pytorch
     - git+https://github.com/prov-gigapath/prov-gigapath  # required for gigapath/gigapath_slide

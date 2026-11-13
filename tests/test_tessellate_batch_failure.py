@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.live_nextflow
 def test_tessellate_batch_skips_failed_slide(tmp_path):
     if shutil.which("nextflow") is None:
         pytest.skip("nextflow is not installed")
@@ -71,6 +72,7 @@ def test_tessellate_batch_skips_failed_slide(tmp_path):
     assert "948178,948178,reef,tiles_h5_path,tiles/9481/948178.patch.h5" in manifest_text
 
 
+@pytest.mark.live_nextflow
 def test_tessellate_only_batch_skips_feature_extraction(tmp_path):
     if shutil.which("nextflow") is None:
         pytest.skip("nextflow is not installed")

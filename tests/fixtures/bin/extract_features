@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Tiny FEATURIZE_BATCH test double.
+
+It validates the Hydra list arguments before creating the output files. The
+historical regression passed patch_h5_paths as a nested list, which this test
+must reject.
+
+Like Mussel >= 1.6.0, it goes on past failed slides: a slide ID starting with
+FAIL gets no outputs, and the run then exits 1 with Mussel's partial-failure
+message; one starting with EMPTY has no tiles (identity: an empty (0, D)
+.features.h5 and an empty .pt; with a slide encoder only an empty
+.patch_features.h5). When every slide is EMPTY it fails as Mussel does
+("none of the N slide(s) had tiles").
+"""
+from __future__ import annotations
+
+import ast
+import sys
+from pathlib import Path
+
+
+def _argument_map(argv: list[str]) -> dict[str, str]:
+    result = {}
+    for argument in argv:
+        if "=" in argument:
+            key, value = argument.split("=", 1)
+            result[key] = value
+    return result
+
+
+def _list_argument(arguments: dict[str, str], name: str) -> list[str]:
+    try:
+        value = ast.literal_eval(arguments[name])
+    except (KeyError, SyntaxError, ValueError) as exc:
+        raise AssertionError(f"invalid {name} argument: {arguments.get(name)!r}") from exc
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise AssertionError(f"{name} must be a flat list of strings: {value!r}")
+    return value
+
+
+arguments = _argument_map(sys.argv[1:])
+patch_h5_paths = _list_argument(arguments, "patch_h5_paths")
+slide_paths = _list_argument(arguments, "slide_paths")
+slide_ids = _list_argument(arguments, "slide_ids")
+if not (len(patch_h5_paths) == len(slide_paths) == len(slide_ids)):
+    raise AssertionError(
+        "list lengths differ: "
+        f"patch_h5_paths={len(patch_h5_paths)}, "
+        f"slide_paths={len(slide_paths)}, slide_ids={len(slide_ids)}"
+    )
+
+def _hydra_list(value: str) -> list[str]:
+    """Bare-name Hydra list, e.g. [HOPTIMUS1,OPTIMUS]."""
+    if not (value.startswith("[") and value.endswith("]")):
+        raise AssertionError(f"not a Hydra list: {value!r}")
+    return [v.strip() for v in value[1:-1].split(",") if v.strip()]
+
+
+def _hydra_dict(value: str) -> dict[str, str]:
+    """Hydra dict, e.g. {hoptimus1:bfloat16,optimus:bfloat16}."""
+    if not (value.startswith("{") and value.endswith("}")):
+        raise AssertionError(f"not a Hydra dict: {value!r}")
+    return dict(item.split(":", 1) for item in value[1:-1].split(",") if item)
+
+
+def _quoted(value: str) -> str:
+    """A double-quoted Hydra string, e.g. "/models/w.pt"."""
+    if not (len(value) >= 2 and value[0] == value[-1] == '"'):
+        raise AssertionError(f"paths must be double-quoted in Hydra dicts: {value!r}")
+    return value[1:-1]
+
+
+failures = {}
+n_empty = 0
+
+
+def _write_features(stem: str, suffix: str, rows: int) -> None:
+    """A features .h5 (and its .pt for .features) with `rows` rows; touch if h5py/torch are missing."""
+    try:
+        import h5py
+        import numpy as np
+        import torch
+    except ImportError:
+        Path(f"{stem}.{suffix}.h5").touch()
+        if suffix == "features":
+            Path(f"{stem}.{suffix}.pt").touch()
+        return
+    with h5py.File(f"{stem}.{suffix}.h5", "w") as f:
+        f.create_dataset("features", data=np.zeros((rows, 8), dtype="float32"))
+        f.create_dataset("coords", data=np.zeros((rows, 2), dtype="int64"))
+    if suffix == "features":
+        torch.save(torch.zeros(rows, 8), f"{stem}.{suffix}.pt")
+
+
+def _write_slide(stem: str, slide_id: str, slide_model: bool, what: str) -> None:
+    global n_empty
+    if slide_id.startswith("FAIL"):
+        failures[what] = "CUDA out of memory (test double)"
+        return
+    if slide_id.startswith("EMPTY"):
+        n_empty += 1
+        _write_features(stem, "patch_features" if slide_model else "features", 0)
+        return
+    _write_features(stem, "features", 1)
+    if slide_model:
+        _write_features(stem, "patch_features", 3)
+
+
+if arguments.get("tile_size_check", "error") not in ("error", "warn", "off"):
+    raise AssertionError(f"invalid tile_size_check: {arguments['tile_size_check']!r}")
+
+if "model_types" in arguments:
+    # FEATURIZE_PATCH_MULTI: several patch models, outputs per model directory.
+    model_codes = [m.lower() for m in _hydra_list(arguments["model_types"])]
+    if len(model_codes) < 2:
+        raise AssertionError(f"model_types should list several models: {model_codes}")
+    if arguments.get("aggregation_method") != "identity":
+        raise AssertionError("model_types requires aggregation_method=identity")
+    for key in ("model_precisions", "model_paths"):
+        if key in arguments:
+            raise AssertionError(f"{key} must be passed as ++{key}={{...}} (Hydra struct mode)")
+        if f"++{key}" in arguments:
+            extra = set(_hydra_dict(arguments[f"++{key}"])) - set(model_codes)
+            if extra:
+                raise AssertionError(f"{key} names models not in model_types: {sorted(extra)}")
+    if "tile_size_check" not in arguments:  # the test harness passes 'error'
+        raise AssertionError("FEATURIZE_PATCH_MULTI must pass tile_size_check")
+    for path in _hydra_dict(arguments.get("++model_paths", "{}")).values():
+        _quoted(path)
+    precisions = _hydra_dict(arguments.get("++model_precisions", "{}"))
+    if any(p not in ("float16", "bfloat16") for p in precisions.values()):
+        raise AssertionError(f"unexpected precisions: {precisions}")
+    for code in model_codes:
+        Path(code).mkdir(exist_ok=True)
+        for slide_id in slide_ids:
+            _write_slide(f"{code}/{slide_id}", slide_id, slide_model=False, what=f"{slide_id} ({code.upper()})")
+else:
+    for slide_id in slide_ids:
+        _write_slide(slide_id, slide_id, slide_model="slide_model_type" in arguments, what=slide_id)
+
+if "timings_path" in arguments:
+    raise AssertionError("timings_path must be passed as ++timings_path (older Mussel lacks the key)")
+if "++timings_path" in arguments:
+    # Mussel's timings file (mussel.utils.timings): one JSON object per stage.
+    import json, time
+    with open(arguments["++timings_path"], "a") as fh:
+        for slide_id in slide_ids:
+            fh.write(json.dumps({"stage": "patch_features", "slide": slide_id, "start": time.time(),
+                                 "end": time.time(), "seconds": 0.0}) + "\n")
+
+if failures:
+    listed = "; ".join(f"{name}: {reason}" for name, reason in failures.items())
+    total = len(slide_ids) * (len(model_codes) if "model_types" in arguments else 1)
+    print(f"RuntimeError: {len(failures)} of {total} slide(s) failed (the others' outputs were written): {listed}",
+          file=sys.stderr)
+    sys.exit(1)
+if n_empty and n_empty == len(slide_ids) * (len(model_codes) if "model_types" in arguments else 1):
+    print(f"RuntimeError: none of the {len(slide_ids)} slide(s) had tiles, so no output files were written",
+          file=sys.stderr)
+    sys.exit(1)

@@ -121,4 +121,4 @@ watchers:
     # Sync results back to Databricks after each batch.
     # Volume folder and warehouse MERGE are auto-configured from the table name
     # and the auto-detected warehouse — no job_id or warehouse_id required.
-    databricks_table: your_catalog.your_schema.slide_embeddings_v2
+    databricks_table: your_catalog.your_schema.slide_embeddings

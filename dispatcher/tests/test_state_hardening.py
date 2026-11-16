@@ -695,3 +695,40 @@ def test_dashboard_db_total_excludes_skipped_rows(tmp_path, monkeypatch):
     h, responses = routes._fake_request(Handler, "GET", "/api/wds")
     assert h._response_code == 200
     assert json.loads(responses[0])["db_total"] == 10
+
+
+@pytest.mark.parametrize("bad", [
+    {"slide_path": "s3://pathology/LUNG_18-193/slides/S17-10361 PD-L1.svs", "slide_id": "S17-10361 PD-L1"},
+    {"slide_path": "/slides/c/C.mrxs", "slide_id": "C"},
+    {"slide_path": "/slides/d/D.svs", "slide_id": "D", "oncotree_code": "LUNG ADC"},
+])
+def test_a_row_the_pipeline_schema_rejects_is_dropped_and_the_batch_still_runs(tmp_path, bad):
+    # One such row fails Nextflow's samplesheet validation for the whole batch
+    # (e.g. slide_ids with spaces took every other slide in their batch down).
+    store = StateStore(str(tmp_path / "state.db"))
+    good = {"slide_path": "/slides/a/A.svs", "slide_id": "A", "oncotree_code": "LUAD"}
+    for slide in (good, bad):
+        store.add_slide(slide["slide_path"], slide["slide_id"])
+    runner, csv_path = _runner(tmp_path, store, [good, bad])
+
+    assert runner._register_new_batch(
+        csv_path, str(tmp_path / "w"), str(tmp_path / "l.log"), nf_run_name="rx"
+    )
+    assert _csv_paths(csv_path) == ["/slides/a/A.svs"]
+    assert _slide(store, "/slides/a/A.svs")["status"] == "DISPATCHED"
+    dropped = _slide(store, bad["slide_path"])
+    assert dropped["status"] == "FAILED"
+    assert "fails the pipeline schema" in dropped["error_msg"]
+
+
+def test_schema_filter_keeps_every_valid_row_shape():
+    from mussel_dispatcher.batch_lifecycle import select_batch_csv_slides
+    rows = [
+        {"slide_path": "s3://b/x/1.svs", "slide_id": "1", "oncotree_code": "LUAD"},
+        {"slide_path": "/s/2.ndpi", "slide_id": "2", "oncotree_code": ""},
+        {"slide_path": "/s/3.tif", "slide_id": "3"},
+        {"slide_path": "TCGA-AA.uuid.svs", "slide_id": "4", "needs_download": True,
+         "file_id": "f", "file_name": "TCGA-AA.uuid.svs"},
+    ]
+    selected, duplicates, invalid = select_batch_csv_slides(rows, batch_id="b")
+    assert [r["slide_id"] for r in selected] == ["1", "2", "3", "4"] and not invalid

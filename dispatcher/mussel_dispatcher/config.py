@@ -650,6 +650,7 @@ class Config:
                         "--slide-ids-csv={batch_csv}",
                         "--project-id-column=oncotree_code",
                         "--manifest-csv={outdir}/wds_manifest.csv",
+                        "--batch-manifest-csv=" + BATCH_WDS_MANIFEST_TEMPLATE,
                     ]
                     if w.wds_staging_dir:
                         args.append("--staging-dir=" + w.wds_staging_dir)
@@ -681,6 +682,7 @@ class Config:
                         "--model-type=" + model,
                         "--slide-ids-csv={batch_csv}",
                         "--manifest-csv={outdir}/wds_manifest.csv",
+                        "--batch-manifest-csv=" + BATCH_WDS_MANIFEST_TEMPLATE,
                         "--status-csv=" + w.status_csv,
                     ]
                     if w.wds_staging_dir:
@@ -707,6 +709,17 @@ class Config:
                 )
 
         return hooks + db_hooks
+
+
+# Per-batch WDS manifest each WDS hook appends this run's rows to. The
+# cumulative {outdir}/wds_manifest.csv keeps rows from every earlier run (it
+# feeds the Databricks sync), so it cannot prove a batch's slides reached WDS.
+BATCH_WDS_MANIFEST_TEMPLATE = "{outdir}/wds_manifests/{batch_id}.csv"
+
+
+def batch_wds_manifest_path(outdir: str, batch_id: str) -> str:
+    """Where batch ``batch_id``'s WDS hooks write their per-batch manifest."""
+    return BATCH_WDS_MANIFEST_TEMPLATE.format(outdir=outdir.rstrip("/"), batch_id=batch_id)
 
 
 def release_stage_root(target: object, repo_dir: str) -> tuple[str, bool]:

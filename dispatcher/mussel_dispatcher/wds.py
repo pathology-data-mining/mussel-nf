@@ -1612,6 +1612,7 @@ def append_wds(
     delete_local: bool = False,
     delete_coords_local: bool = False,
     manifest_csv: Path | None = None,
+    batch_manifest_csv: Path | None = None,
     s3_max_concurrency: int = 4,
     lock_dir: Path | None = None,
     lock_backend: str = "file",
@@ -1640,6 +1641,10 @@ def append_wds(
       once every model's append has consumed it, whichever hook runs last.
     If manifest_csv is set, appends rows (slide_id, model, wds_path) to that
     CSV so callers can look up the full S3 shard path for each slide.
+    batch_manifest_csv: also append the same rows -- and only this run's rows --
+      to this file. ``manifest_csv`` is cumulative across runs, so it cannot
+      say whether *this* batch's slides are in WDS; batch finalization reads
+      the per-batch file for coverage instead.
     s3_max_concurrency limits boto3 multipart threads per upload/download.
     slide_to_project: pre-built slide_id → routing key (e.g. oncotree_code) dict.
       When provided, inventory_df is not used for routing. Useful when the
@@ -1673,6 +1678,7 @@ def append_wds(
                 delete_local=delete_local,
                 delete_coords_local=delete_coords_local,
                 manifest_csv=manifest_csv,
+                batch_manifest_csv=batch_manifest_csv,
                 s3_max_concurrency=s3_max_concurrency,
                 lock_dir=None,
                 lock_backend="file",
@@ -1702,6 +1708,7 @@ def append_wds(
                 delete_local=delete_local,
                 delete_coords_local=delete_coords_local,
                 manifest_csv=manifest_csv,
+                batch_manifest_csv=batch_manifest_csv,
                 s3_max_concurrency=s3_max_concurrency,
                 lock_dir=None,
                 lock_backend="file",
@@ -2007,7 +2014,7 @@ def append_wds(
     # already in the WDS index (n_appended == 0), which happens after a manifest reset/rename.
     # Only this run's slides: _save_index merges other writers' entries into
     # ``index``, and those are not this batch's to record.
-    if manifest_csv is not None and not dry_run:
+    if (manifest_csv is not None or batch_manifest_csv is not None) and not dry_run:
         slides_to_manifest: dict[str, dict] = {}
         for slide_id, info in index.items():
             if slide_id in appended_ids:
@@ -2016,21 +2023,13 @@ def append_wds(
                   and slide_id in slide_id_filter):
                 slides_to_manifest[slide_id] = info  # batch slide already in WDS — confirm in manifest
         if slides_to_manifest:
-            manifest_csv = Path(manifest_csv)
-            manifest_csv.parent.mkdir(parents=True, exist_ok=True)
-            write_header = not manifest_csv.exists()
-            with manifest_csv.open("a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
-                if write_header:
-                    writer.writeheader()
-                for slide_id, info in slides_to_manifest.items():
-                    shard_file = info["shard_file"]
-                    wds_path = f"{wds_dest.rstrip('/')}/{model_type}/{shard_file}"
-                    writer.writerow({"slide_id": slide_id, "model": model_type,
-                                     "wds_path": wds_path})
             n_already_written = len(slides_to_manifest) - n_appended
-            log.info("Wrote %d WDS path entries to %s (%d new, %d already-indexed)",
-                     len(slides_to_manifest), manifest_csv, n_appended, n_already_written)
+            for path in (manifest_csv, batch_manifest_csv):
+                if path is None:
+                    continue
+                _append_manifest_rows(Path(path), slides_to_manifest, wds_dest, model_type)
+                log.info("Wrote %d WDS path entries to %s (%d new, %d already-indexed)",
+                         len(slides_to_manifest), path, n_appended, n_already_written)
 
     index["_stats"] = {
         "n_appended": n_appended,
@@ -2043,6 +2042,24 @@ def append_wds(
         "n_indexed_mismatched_coords": n_indexed_mismatched_coords,
     }
     return index
+
+
+def _append_manifest_rows(
+    manifest_csv: Path,
+    slides: dict[str, dict],
+    wds_dest: str,
+    model_type: str,
+) -> None:
+    """Append (slide_id, model, wds_path) rows, writing the header on creation."""
+    manifest_csv.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not manifest_csv.exists()
+    with manifest_csv.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"])
+        if write_header:
+            writer.writeheader()
+        for slide_id, info in slides.items():
+            wds_path = f"{wds_dest.rstrip('/')}/{model_type}/{info['shard_file']}"
+            writer.writerow({"slide_id": slide_id, "model": model_type, "wds_path": wds_path})
 
 
 def _discover_models(results_dir: Path) -> list[str]:
@@ -2094,6 +2111,12 @@ def main(argv: list[str] | None = None) -> int:
                              "for every slide successfully added to WDS. "
                              "Appended to on each run so it builds up over time. "
                              "Created with a header row if it does not yet exist.")
+    parser.add_argument("--batch-manifest-csv", default=None,
+                        help="Path to a per-batch CSV that receives the same rows as "
+                             "--manifest-csv for this run only (appended, header on "
+                             "creation, so every model hook of one batch can share it). "
+                             "Batch finalization reads it to verify WDS coverage, which "
+                             "the cumulative --manifest-csv cannot do.")
     parser.add_argument("--delete-local", action="store_true",
                         help="Delete local .pt and companion .features.h5 source files "
                              "after they are successfully flushed to WDS (including S3 upload). "
@@ -2265,6 +2288,18 @@ def main(argv: list[str] | None = None) -> int:
         log.error("Either --model-type or --results-dir must be specified")
         return 1
 
+    if args.batch_manifest_csv and not args.dry_run:
+        # Create it (header only) even when this run appends nothing: its
+        # existence tells batch finalization this batch's hooks wrote a
+        # per-batch manifest, so a slide with no row is genuinely missing.
+        batch_manifest = Path(args.batch_manifest_csv)
+        batch_manifest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with batch_manifest.open("x", newline="") as f:
+                csv.DictWriter(f, fieldnames=["slide_id", "model", "wds_path"]).writeheader()
+        except FileExistsError:
+            pass
+
     rc = 0
     # Build failed_slides set from status CSV (per-model, using requested model(s)).
     failed_slides: set[str] | None = None
@@ -2330,6 +2365,7 @@ def main(argv: list[str] | None = None) -> int:
                 delete_local=args.delete_local,
                 delete_coords_local=args.delete_coords_local,
                 manifest_csv=Path(args.manifest_csv) if args.manifest_csv else None,
+                batch_manifest_csv=Path(args.batch_manifest_csv) if args.batch_manifest_csv else None,
                 s3_max_concurrency=args.s3_max_concurrency,
                 lock_dir=lock_dir,
                 lock_backend=args.lock_backend,

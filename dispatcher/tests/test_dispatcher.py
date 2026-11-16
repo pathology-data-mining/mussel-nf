@@ -4189,6 +4189,114 @@ class TestSidecarLogging:
         assert "dashboard-stderr" in content
 
 
+class TestTowerProxyWiring:
+    """The dispatcher runs nextflow-turret's Tower proxy, standalone and as a sidecar."""
+
+    _DISPATCHER_DIR = Path(__file__).resolve().parents[1]
+
+    @staticmethod
+    def _free_port() -> int:
+        import socket
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    @staticmethod
+    def _standalone_proxy_argv() -> list[str]:
+        # As documented in dispatcher/README.md for running the proxy on its own.
+        return ["-m", "nextflow_turret.proxy", "--upstream", "http://127.0.0.1:8050",
+                "--port", "8049", "--host", "0.0.0.0"]
+
+    def test_standalone_proxy_answers_create_while_dashboard_is_down(self):
+        from nextflow_turret import workflow_id_for_batch
+
+        argv = self._standalone_proxy_argv()
+        assert argv[:2] == ["-m", "nextflow_turret.proxy"]
+        opts = dict(zip(argv[2::2], argv[3::2]))
+        assert opts == {"--upstream": "http://127.0.0.1:8050", "--port": "8049", "--host": "0.0.0.0"}
+
+        # Same command, on free loopback ports, with nothing behind the upstream.
+        port = self._free_port()
+        opts.update({"--upstream": f"http://127.0.0.1:{self._free_port()}",
+                     "--port": str(port), "--host": "127.0.0.1"})
+        cmd = [sys.executable, *argv[:2]] + [part for item in opts.items() for part in item]
+        proc = subprocess.Popen(cmd, cwd=self._DISPATCHER_DIR,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/trace/create",
+            data=json.dumps({"runName": "rabc12345", "sessionId": "s-1"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    with opener.open(request, timeout=5) as resp:
+                        status, body = resp.status, json.loads(resp.read())
+                    break
+                except urllib.error.URLError:
+                    assert proc.poll() is None, "tower proxy exited"
+                    assert time.monotonic() < deadline, "tower proxy never listened"
+                    time.sleep(0.2)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+        assert status == 200
+        assert body["workflowId"] == workflow_id_for_batch("rabc12345")
+        assert len(body["workflowId"]) <= 16
+
+    def test_sidecar_runs_turret_proxy_and_replaces_the_old_module(self, monkeypatch, tmp_path):
+        from mussel_dispatcher import scheduler as sched
+
+        cfg = make_config(log_dir=str(tmp_path), dashboard_port=18050, tower_proxy_port=18049)
+        launched, markers = {}, {}
+        monkeypatch.delenv("MUSSEL_DISABLE_SIDECARS", raising=False)
+        monkeypatch.setattr(sched, "_port_in_use", lambda port: False)
+        monkeypatch.setattr(
+            sched, "_replace_managed_listener",
+            lambda name, port, marker: markers.__setitem__(name, marker) or False,
+        )
+        monkeypatch.setattr(
+            sched, "_launch_sidecar",
+            lambda name, cmd, cfg, persistent=False: launched.__setitem__(name, cmd) or MagicMock(),
+        )
+
+        sched._start_sidecars(cfg, "cohort.yaml")
+
+        assert launched["tower_proxy"][1:] == [
+            "-m", "nextflow_turret.proxy",
+            "--upstream", "http://localhost:18050", "--port", "18049",
+        ]
+        assert set(markers["tower_proxy"]) == {"nextflow_turret.proxy", "mussel_dispatcher.tower_proxy"}
+
+    def test_old_proxy_listener_is_replaced(self, monkeypatch):
+        from mussel_dispatcher import scheduler as sched
+
+        bound = [True]
+        terminated = []
+        monkeypatch.setattr(sched, "_port_in_use", lambda port: bound[0])
+        monkeypatch.setattr(sched, "_listener_pids", lambda port: [4242])
+        monkeypatch.setattr(
+            sched, "_cmdline_for_pid",
+            lambda pid: "python -m mussel_dispatcher.tower_proxy --port 9049",
+        )
+
+        def _terminate(pid, *, label):
+            terminated.append(pid)
+            bound[0] = False
+            return True
+
+        monkeypatch.setattr(sched, "_terminate_pid", _terminate)
+
+        assert sched._replace_managed_listener(
+            "tower_proxy", 9049, ("nextflow_turret.proxy", "mussel_dispatcher.tower_proxy"),
+        ) is True
+        assert terminated == [4242]
+
+
 # ---------------------------------------------------------------------------
 # Auto post-batch hook generation
 # ---------------------------------------------------------------------------
@@ -7332,6 +7440,77 @@ class TestTowerState:
 
         assert matched == states[2]
 
+    # Nextflow 26.04 reports exit 2147483647 both for tasks its errorStrategy
+    # ignored and for jobs whose exit status it could not read (Slurm-killed
+    # or lost); only its own `ignored` counter tells them apart.
+    _SLURM_KILLED_PROGRESS = {
+        "succeeded": 3, "failed": 2, "ignored": 1, "retries": 1,
+        "processes": [
+            {"process": "EMBED", "succeeded": 3, "failed": 2, "ignored": 1, "retries": 1},
+        ],
+    }
+    _SLURM_KILLED_TASKS = [
+        {"taskId": 1, "status": "FAILED", "process": "EMBED", "name": "EMBED (a)",
+         "exit": 2147483647, "errorAction": "RETRY", "hash": "aa/111111"},
+        {"taskId": 2, "status": "FAILED", "process": "EMBED", "name": "EMBED (b)",
+         "exit": 2147483647, "errorAction": "IGNORE", "hash": "bb/222222"},
+    ]
+
+    @pytest.mark.parametrize("error_action", ["RETRY", "TERMINATE"])
+    def test_slurm_killed_task_is_a_failure_but_ignored_task_is_not(self, error_action):
+        from nextflow_turret import TowerRouter, WorkflowRegistry
+        from mussel_dispatcher.tower_state import normalize_tower_state
+
+        tasks = [dict(task) for task in self._SLURM_KILLED_TASKS]
+        tasks[0]["errorAction"] = error_action
+        registry = WorkflowRegistry()
+        router = TowerRouter(registry=registry)
+        status, body = router.handle_post("/trace/create", {"runName": "rabc12345"})
+        assert status == 200
+        router.handle_put(
+            f"/trace/{body['workflowId']}/progress",
+            {"progress": self._SLURM_KILLED_PROGRESS, "tasks": tasks},
+        )
+
+        state = normalize_tower_state(registry.get_all()[0], now=0.0)
+
+        # Raw failed keeps both; only the errorStrategy-ignored one is discounted.
+        assert state["task_counts"]["failed"] == 2
+        assert state["failed_not_ignored"] == 1
+        assert state["processes"][0]["failedNotIgnored"] == 1
+        assert [(f["exit"], f["errorAction"]) for f in state["failures"]] == [
+            (2147483647, error_action), (2147483647, "IGNORE"),
+        ]
+
+    def test_rows_persisted_before_turret_020_still_normalize(self, tmp_path):
+        """A row written by turret 7df7717: no task-level `ignored`, no errorAction."""
+        from nextflow_turret import RunStore
+        from mussel_dispatcher.tower_state import normalize_tower_state
+
+        store = RunStore(str(tmp_path / "turret_runs.db"))
+        store.upsert({
+            "workflow_id": "rold1234567890ab", "batch_id": "20261101T000000_abc12345",
+            "run_name": "rabc12345", "complete": True,
+            "task_counts": {"succeeded": 3, "failed": 2, "cached": 0, "running": 0,
+                            "pending": 0, "submitted": 0, "aborted": 0},
+            "processes": [{"process": "EMBED", "succeeded": 3, "failed": 2, "ignored": 1}],
+            "resources": {},
+            "failures": [{"taskId": 1, "process": "EMBED", "name": "EMBED (a)",
+                          "exit": 2147483647, "hash": "aa/111111"}],
+            "started_at": 10.0, "updated_at": 20.0,
+        })
+
+        (row,) = store.load_all()
+        state = normalize_tower_state(row, now=30.0)
+
+        assert state["task_counts"]["failed"] == 2
+        assert state["task_counts"]["ignored"] == 1
+        assert state["failed_not_ignored"] == 1
+        assert state["processes"][0]["failedNotIgnored"] == 1
+        assert state["failures"][0]["exit"] == 2147483647
+        assert (state["done"], state["total"], state["pct"]) == (3, 5, 60)
+        assert state["stalled"] is False
+
 
 @pytest.mark.integration
 class TestDashboardHttpIntegration:
@@ -7906,6 +8085,60 @@ class TestTowerShimServerRoutes:
         assert body[0]["tower"]["updated_at"] == 200.0
         assert body[0]["tower"]["stalled"] is False
 
+    def test_batches_route_renders_tower_rows_persisted_before_turret_020(self, tmp_path):
+        import json
+        Handler = self._make_server(tmp_path)
+        (tmp_path / "state" / "dispatcher_status.json").write_text(json.dumps({
+            "recent_batches": [{
+                "batch_id": "20260730T010517_fda379da", "status": "RUNNING",
+                "slide_count": 5, "dispatched_at": "2026-07-30T01:05:17+00:00",
+                "completed_at": None, "nextflow_exit": None, "log_path": "", "hooks": [],
+            }],
+        }))
+        # As RunStore.load_all returns a row written by turret 7df7717.
+        old_row = {
+            "workflow_id": "dispatcher_rfda379da", "batch_id": "rfda379da",
+            "run_name": "rfda379da", "complete": False, "updated_at": time.time(),
+            "task_counts": {"succeeded": 4, "failed": 3, "running": 1},
+            "processes": [
+                {"process": "EMBED", "succeeded": 4, "failed": 3, "ignored": 2, "running": 1},
+            ],
+            "resources": {},
+            "failures": [{"taskId": 7, "process": "EMBED", "exit": 2147483647}],
+        }
+        Handler.tower_registry.get_all = lambda: [old_row]
+
+        h, responses = self._fake_request(Handler, "GET", "/api/batches")
+        assert h._response_code == 200
+        tower = json.loads(responses[0])[0]["tower"]
+        assert tower["task_counts"]["failed"] == 3
+        assert tower["failed_not_ignored"] == 1
+        assert tower["processes"][0]["failedNotIgnored"] == 1
+        assert tower["failures"] == old_row["failures"]
+        assert (tower["done"], tower["total"]) == (4, 8)
+
+    def test_progress_for_proxy_fallback_workflow_id_reaches_its_batch(self, tmp_path):
+        """While the dashboard was down the proxy answered /trace/create itself."""
+        import json, sqlite3
+        from nextflow_turret import workflow_id_for_batch
+
+        Handler = self._make_server(tmp_path)
+        with sqlite3.connect(str(tmp_path / "state" / "dispatcher.db")) as conn:
+            conn.execute("ALTER TABLE batches ADD COLUMN run_name TEXT")
+            conn.execute(
+                "INSERT INTO batches (batch_id, status, slide_count, run_name) VALUES (?,?,?,?)",
+                ("20260523T041220_4c59c6c7", "RUNNING", 5, "r4c59c6c7"),
+            )
+        fallback_id = workflow_id_for_batch("r4c59c6c7")
+        h, _ = self._fake_request(
+            Handler, "PUT", f"/trace/{fallback_id}/progress",
+            body={"progress": {"succeeded": 1, "running": 1}},
+        )
+        assert h._response_code == 200
+        state = Handler.tower_registry.get_by_batch("20260523T041220_4c59c6c7")
+        assert state is not None
+        assert state["workflow_id"] == fallback_id
+
     def test_trace_create_route(self, tmp_path):
         import json
         Handler = self._make_server(tmp_path)
@@ -7917,7 +8150,7 @@ class TestTowerShimServerRoutes:
         body = json.loads(responses[0])
         # nf-tower caps workflow IDs at 16 characters, so nextflow-turret maps
         # "dispatcher_test99" (17) to its deterministic opaque form.
-        from mussel_dispatcher.tower_shim import workflow_id_for_batch
+        from nextflow_turret import workflow_id_for_batch
         assert body["workflowId"] == workflow_id_for_batch("test99")
         assert len(body["workflowId"]) <= 16
         # State should now exist in the registry

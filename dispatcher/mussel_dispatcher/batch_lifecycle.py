@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 
-from .config import Config
+from .config import Config, batch_wds_manifest_path
 from .hook_hardening import (
     HookFailureCategory,
     classify_hook_failure,
@@ -118,6 +118,25 @@ def _download_file_identity(slide: dict) -> tuple[str, str]:
     return file_id, file_name
 
 
+# assets/schema_input.json: Nextflow rejects the whole samplesheet when one row fails these.
+_VALID_SLIDE_ID = re.compile(r"^\S+$")
+_VALID_SLIDE_PATH = re.compile(r"^[^\n]+\.(svs|tiff|tif|ndpi|scn)$")
+_VALID_ONCOTREE = re.compile(r"^\S+$")
+
+
+def _schema_violation(slide: dict) -> str:
+    """Why this row would fail the pipeline's input schema, or ''."""
+    if not _VALID_SLIDE_ID.match(str(slide.get("slide_id") or "")):
+        return "slide_id fails the pipeline schema (no whitespace)"
+    path = str(slide.get("slide_path") or "")
+    if path and not slide.get("needs_download") and not _VALID_SLIDE_PATH.match(path):
+        return "slide_path fails the pipeline schema (.svs/.tiff/.tif/.ndpi/.scn)"
+    code = str(slide.get("oncotree_code") or "")
+    if code and not _VALID_ONCOTREE.match(code):
+        return "oncotree_code fails the pipeline schema (no whitespace)"
+    return ""
+
+
 def select_batch_csv_slides(
     slides: list[dict], *, batch_id: str = ""
 ) -> tuple[list[dict], list[tuple[dict, str]], list[tuple[dict, str]]]:
@@ -148,6 +167,12 @@ def select_batch_csv_slides(
         ))
     selected: list[dict] = []
     for slide in deduped:
+        violation = _schema_violation(slide)
+        if violation:
+            # One such row fails Nextflow's input validation for the whole batch.
+            log.warning("Batch %s: skipping slide %r: %s", batch_id, slide.get("slide_id"), violation)
+            invalid.append((slide, violation))
+            continue
         if not str(slide.get("slide_path") or ""):
             log.warning("Skipping slide %s with empty slide_path", slide.get("slide_id"))
             invalid.append((slide, "empty slide_path"))
@@ -1129,6 +1154,36 @@ class BatchFinalizer:
                 shutil.rmtree(entry.path, ignore_errors=True)
                 log.info("Removing intermediate features directory: %s", entry.path)
 
+    def _coverage_manifest_path(self, outdir: str) -> str:
+        """The WDS manifest that proves which of this batch's slides reached WDS.
+
+        The cumulative ``wds_manifest.csv`` keeps every row any earlier run
+        appended, so a slide that was once appended, later lost from the WDS
+        index and re-run without output would still look covered. WDS hooks
+        therefore also write this run's rows to a per-batch manifest, which is
+        authoritative whenever the batch's hooks were given one. Only a batch
+        whose recorded hooks predate it falls back to the cumulative file.
+        """
+        batch_manifest = batch_wds_manifest_path(outdir, self.batch_id)
+        if os.path.exists(batch_manifest):
+            log.info("Batch %s: verifying WDS coverage from per-batch manifest %s",
+                     self.batch_id, batch_manifest)
+            return batch_manifest
+        hook_rows = self.state.get_batch_hooks([self.batch_id]).get(self.batch_id, [])
+        if any("--batch-manifest-csv" in str(row.get("command") or "") for row in hook_rows):
+            # The hooks were given a per-batch manifest but never created it
+            # (none reached WDS): nothing of this batch is proven covered.
+            log.warning("Batch %s: per-batch WDS manifest %s was not written",
+                        self.batch_id, batch_manifest)
+            return batch_manifest
+        cumulative = os.path.join(outdir, "wds_manifest.csv")
+        log.warning(
+            "Batch %s: no per-batch WDS manifest (hooks predate it); verifying coverage "
+            "from the cumulative manifest %s, which may include rows from earlier runs",
+            self.batch_id, cumulative,
+        )
+        return cumulative
+
     def _verify_wds_coverage(self, batch_csv: str, outdir: str) -> bool:
         required_models = {
             model
@@ -1137,7 +1192,7 @@ class BatchFinalizer:
         }
         if not required_models:
             return True
-        manifest_path = os.path.join(outdir, "wds_manifest.csv")
+        manifest_path = self._coverage_manifest_path(outdir)
         if not os.path.exists(manifest_path):
             log.warning(
                 "Batch %s: WDS manifest missing at %s; all batch slides remain incomplete",

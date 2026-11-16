@@ -4622,6 +4622,136 @@ class TestAutoHooks:
         assert "sync_databricks" in hook["command"]
         assert hook.get("_phase") == "db_sync"
 
+    def test_cohort_db_sync_hook_runs_after_wds(self, tmp_path):
+        """A Databricks watcher with a table gets the cohort sync hook, after its WDS hooks."""
+        import yaml as _yaml
+        cfg_path = tmp_path / "test.yaml"
+        cfg_path.write_text(_yaml.dump({
+            "nextflow_profiles": "standard",
+            "outdir": str(tmp_path / "results"),
+            "watchers": [{
+                "type": "databricks", "query": "SELECT 1", "warehouse_id": "wh",
+                "wds_destinations": {"optimus": "s3://bucket/wds"},
+                "databricks_table": "cat.schema.slide_embeddings",
+            }],
+        }))
+        cfg = Config.load(str(cfg_path))
+        commands = [h["command"] for h in cfg.post_batch_hooks]
+        assert commands == ["python -m mussel_dispatcher.wds",
+                            "python -m mussel_dispatcher.cohort.sync_databricks"]
+        hook = cfg.post_batch_hooks[1]
+        assert hook.get("_phase") == "db_sync"
+        assert f"--config={cfg_path}" in hook["args"]
+        assert "--model-types=optimus" in hook["args"]
+        assert "--table=cat.schema.slide_embeddings" in hook["args"]
+        assert "--warehouse-id=wh" in hook["args"]
+
+
+class TestCohortDatabricksExport:
+    @staticmethod
+    def _two_path_slide(tmp_path, first_ok: bool):
+        """Slide "x" imported from two paths; one batch fails, the other succeeds."""
+        db_path = tmp_path / "dispatcher.db"
+        store = StateStore(str(db_path))
+        store.add_slide("/old/x.svs", "x", oncotree_code="COAD")
+        store.add_slide("/new/x.svs", "x", oncotree_code="COAD")
+        for path, batch, ok, done in (("/old/x.svs", "b-old", first_ok, "2026-08-09T00:00:00+00:00"),
+                                      ("/new/x.svs", "b-new", not first_ok, "2026-10-06T00:00:00+00:00")):
+            store.mark_dispatched([path], batch)
+            store.mark_slides_complete(batch, succeeded=ok)
+            store._conn().execute("UPDATE slides SET completed_at = ? WHERE slide_path = ?", (done, path))
+        store._conn().commit()
+        wds_root = TestCohortDatabricksExport._wds_index(tmp_path, {"x": "COAD/000007.tar"})
+        return db_path, wds_root
+
+    @staticmethod
+    def _wds_index(tmp_path, shards: dict) -> Path:
+        """A local WDS root whose optimus index maps slide_id -> shard_file."""
+        from mussel_dispatcher.cohort.sync_databricks import clear_index_cache
+
+        clear_index_cache()
+        root = tmp_path / "wds"
+        (root / "optimus").mkdir(parents=True, exist_ok=True)
+        (root / "optimus" / "wds_index.json").write_text(json.dumps(
+            {sid: {"project_id": shard.split("/")[0], "shard_file": shard}
+             for sid, shard in shards.items()}))
+        return root
+
+    @pytest.mark.parametrize("first_ok", [False, True])
+    def test_slide_with_a_failed_and_a_succeeded_path_exports_succeeded(self, tmp_path, first_ok):
+        from mussel_dispatcher.cohort.sync_databricks import build_export
+
+        db_path, wds_root = self._two_path_slide(tmp_path, first_ok)
+        df = build_export(str(db_path), None, ["optimus"],
+                          wds_destinations={"optimus": str(wds_root)})
+        row = df[df["slide_id"] == "x"]
+        assert len(row) == 1
+        row = row.iloc[0]
+        assert row["status"] == "SUCCEEDED"
+        assert row["wds_path"] == f"{wds_root}/optimus/COAD/000007.tar"
+        assert row["slide_path"] == ("/old/x.svs" if first_ok else "/new/x.svs")
+        assert row["failure_reason"] == ""
+
+    def test_latest_succeeded_path_wins(self, tmp_path):
+        from mussel_dispatcher.cohort.sync_databricks import _representative_rows
+
+        rows = [
+            {"slide_id": "x", "status": "SUCCEEDED", "slide_path": "/new", "completed_at": "2026-10-06"},
+            {"slide_id": "x", "status": "SUCCEEDED", "slide_path": "/old", "completed_at": "2026-08-09"},
+            {"slide_id": "x", "status": "FAILED", "slide_path": "/broken", "completed_at": "2026-10-20"},
+            {"slide_id": "y", "status": "PENDING", "slide_path": "/y", "completed_at": None},
+        ]
+        best = _representative_rows(rows)
+        assert best["x"]["slide_path"] == "/new" and best["y"]["slide_path"] == "/y"
+
+    def test_unfinished_requeue_does_not_mask_a_failure(self, tmp_path):
+        from mussel_dispatcher.cohort.sync_databricks import _representative_rows
+
+        rows = [
+            {"slide_id": "x", "status": "PENDING", "slide_path": "/new", "completed_at": None,
+             "first_seen_at": "2026-10-20"},
+            {"slide_id": "x", "status": "FAILED", "slide_path": "/old", "completed_at": "2026-10-01",
+             "first_seen_at": "2026-08-01"},
+        ]
+        assert _representative_rows(rows)["x"]["slide_path"] == "/old"
+
+    def test_choice_does_not_depend_on_row_order(self, tmp_path):
+        from mussel_dispatcher.cohort.sync_databricks import _representative_rows
+
+        tied = [{"slide_id": "x", "status": "SUCCEEDED", "slide_path": p,
+                 "completed_at": "2026-10-06", "first_seen_at": "2026-05-24"} for p in ("/a", "/b")]
+        assert _representative_rows(tied)["x"]["slide_path"] == "/b"
+        assert _representative_rows(tied[::-1])["x"]["slide_path"] == "/b"
+
+    def test_pending_rows_do_not_export_stale_wds_or_completed_at(self, tmp_path):
+        from mussel_dispatcher.cohort.sync_databricks import build_export
+
+        db_path = tmp_path / "dispatcher.db"
+        store = StateStore(str(db_path))
+        store.add_slide("/slides/retry.svs", "retry", oncotree_code="MNET")
+        store.add_slide("/slides/done.svs", "done", oncotree_code="MNET")
+        store.mark_dispatched(["/slides/done.svs"], "batch-001")
+        store.mark_slides_complete("batch-001", succeeded=True)
+        store._conn().execute(
+            "UPDATE slides SET completed_at='2026-06-21T01:00:00+00:00' "
+            "WHERE slide_id='retry'"
+        )
+        store._conn().commit()
+
+        wds_root = self._wds_index(tmp_path, {"retry": "MNET/000000.tar", "done": "MNET/000001.tar"})
+
+        df = build_export(str(db_path), None, ["optimus"],
+                          wds_destinations={"optimus": str(wds_root)})
+        retry = df[df["slide_id"] == "retry"].iloc[0]
+        done = df[df["slide_id"] == "done"].iloc[0]
+
+        assert retry["status"] == "PENDING"
+        assert retry["wds_path"] == ""
+        assert retry["completed_at"] == ""
+        assert done["status"] == "SUCCEEDED"
+        assert done["wds_path"].endswith("/000001.tar")
+        assert done["completed_at"] != ""
+
 
 class TestCleanup:
     """Tests for post-batch cleanup: downloads, batch CSV, old logs."""

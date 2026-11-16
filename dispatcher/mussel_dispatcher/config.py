@@ -668,6 +668,22 @@ class Config:
                         args.extend(_coords_cleanup_args(model, [m for m, _ in destinations]))
                     hooks.append({"command": "python -m mussel_dispatcher.wds", "args": args, "required": True})
 
+            # Cohort Databricks sync hook — fires when a table is configured
+            if w.type == "databricks" and (w.databricks_table or w.databricks_volume_folder or w.databricks_volume_path):
+                extra_args = [
+                    "--config=" + self.config_path,
+                    "--wds-manifest={outdir}/wds_manifest.csv",
+                ]
+                if w.wds_destinations:
+                    extra_args.append(
+                        "--model-types=" + ",".join(w.wds_destinations.keys())
+                    )
+                db_hooks.append(
+                    _build_db_sync_hook(w, "mussel_dispatcher.cohort.sync_databricks",
+                                        extra_args, state_dir=self.state_dir,
+                                        phase="db_sync")
+                )
+
             if w.type != "tcga":
                 continue
 

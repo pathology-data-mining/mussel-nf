@@ -680,6 +680,45 @@ def test_replayed_completion_does_not_touch_slides_requeued_elsewhere(tmp_path):
 # 8. SKIPPED duplicates never stand in for their slide_id downstream
 # ---------------------------------------------------------------------------
 
+def test_databricks_export_ranks_skipped_below_unfinished_twin():
+    from mussel_dispatcher.cohort.sync_databricks import _representative_rows
+
+    rows = [
+        {"slide_id": "x", "status": "SKIPPED", "slide_path": "/b/x.svs",
+         "completed_at": "2026-10-28T00:00:00", "first_seen_at": "2026-10-01"},
+        {"slide_id": "x", "status": "DISPATCHED", "slide_path": "/a/x.svs",
+         "completed_at": None, "first_seen_at": "2026-10-01"},
+        {"slide_id": "y", "status": "SKIPPED", "slide_path": "/b/y.svs",
+         "completed_at": "2026-10-28T00:00:00"},
+        {"slide_id": "y", "status": "FAILED", "slide_path": "/a/y.svs",
+         "completed_at": "2026-10-02T00:00:00"},
+    ]
+    best = _representative_rows(rows)
+    assert best["x"]["slide_path"] == "/a/x.svs"
+    assert best["y"]["slide_path"] == "/a/y.svs"
+
+
+def test_databricks_export_never_emits_skipped(tmp_path):
+    from mussel_dispatcher.cohort.sync_databricks import build_export
+
+    db = tmp_path / "state.db"
+    store = StateStore(str(db))
+    store.add_slide("/a/x.svs", "x")
+    store.add_slide("/b/x.svs", "x")
+    store.add_slide("/b/lone.svs", "lone")
+    store.reject_pending_slides(
+        {"/b/x.svs": "duplicate of /a/x.svs", "/b/lone.svs": "duplicate"},
+        terminal_status="SKIPPED",
+    )
+
+    df = build_export(str(db), None, ["m"])
+    by_id = {row.slide_id: row for row in df.itertuples()}
+    assert by_id["x"].slide_path == "/a/x.svs"
+    assert by_id["x"].status == "PENDING"
+    assert by_id["lone"].status == "PENDING"
+    assert "SKIPPED" not in set(df["status"])
+
+
 def test_dashboard_db_total_excludes_skipped_rows(tmp_path, monkeypatch):
     import json
     import tests.test_dispatcher as td

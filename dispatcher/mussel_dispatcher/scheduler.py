@@ -106,8 +106,16 @@ def _terminate_pid(pid: int, *, label: str, timeout: float = 5.0) -> bool:
     return not _pid_is_alive(pid)
 
 
-def _replace_managed_listener(name: str, port: int, marker: str) -> bool:
-    """If *port* is occupied by our own managed sidecar, replace it."""
+# nextflow-turret's resilient Tower proxy (the `turret-proxy` console script).
+_TOWER_PROXY_MODULE = "nextflow_turret.proxy"
+
+
+def _replace_managed_listener(name: str, port: int, marker: str | tuple[str, ...]) -> bool:
+    """If *port* is occupied by our own managed sidecar, replace it.
+
+    *marker* (or any of several) identifies the sidecar in its command line.
+    """
+    markers = (marker,) if isinstance(marker, str) else tuple(marker)
     if not _port_in_use(port):
         return False
     pids = _listener_pids(port)
@@ -116,7 +124,7 @@ def _replace_managed_listener(name: str, port: int, marker: str) -> bool:
     replaced = False
     for pid in pids:
         cmdline = _cmdline_for_pid(pid)
-        if marker not in cmdline:
+        if not any(m in cmdline for m in markers):
             log.warning(
                 "%s port %d is in use by unrelated PID %d (%s) — reusing existing listener.",
                 name, port, pid, cmdline or "<unknown>",
@@ -485,7 +493,12 @@ def _start_sidecars(cfg: Config, config_path: str) -> list[tuple[str, subprocess
         procs.append(("dashboard", dashboard, False))
 
     if cfg.tower_proxy_port:
-        if _replace_managed_listener("tower_proxy", cfg.tower_proxy_port, "mussel_dispatcher.tower_proxy"):
+        # The proxy is nextflow-turret's; mussel_dispatcher.tower_proxy was its
+        # predecessor, still listening wherever the dispatcher last started it.
+        if _replace_managed_listener(
+            "tower_proxy", cfg.tower_proxy_port,
+            (_TOWER_PROXY_MODULE, "mussel_dispatcher.tower_proxy"),
+        ):
             pass
         if _port_in_use(cfg.tower_proxy_port):
             log.warning(
@@ -494,7 +507,7 @@ def _start_sidecars(cfg: Config, config_path: str) -> list[tuple[str, subprocess
             )
         else:
             proxy = _launch_sidecar("tower_proxy", [
-                python, "-m", "mussel_dispatcher.tower_proxy",
+                python, "-m", _TOWER_PROXY_MODULE,
                 "--upstream", f"http://localhost:{cfg.dashboard_port}",
                 "--port", str(cfg.tower_proxy_port),
             ], cfg, persistent=True)

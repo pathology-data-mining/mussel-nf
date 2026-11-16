@@ -45,6 +45,14 @@ The main dispatcher process also writes a persistent `log_dir/dispatcher.log`.
 These are the first places to check when the dashboard is down, the proxy is
 accepting traffic but not forwarding it, or the dispatcher itself exited.
 
+The Tower proxy is nextflow-turret's (`nextflow-turret>=0.2.0`). To run it on its
+own, in front of a dashboard on port 8050:
+
+```bash
+python -m nextflow_turret.proxy --upstream http://127.0.0.1:8050 --port 8049 --host 0.0.0.0
+# or, with the console script: turret-proxy --upstream http://127.0.0.1:8050 --port 8049
+```
+
 ## How It Works
 
 ### 1. Watchers

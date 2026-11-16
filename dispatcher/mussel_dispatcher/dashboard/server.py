@@ -34,12 +34,12 @@ from mussel_dispatcher.state import StateStore
 from mussel_dispatcher.tower_state import newest_tower_state_for_batch, normalize_tower_state
 from mussel_dispatcher.wds_status import parse_wds_index as _parse_wds_index
 from mussel_dispatcher.wds_status import parse_wds_manifest as _parse_wds_manifest
-import nextflow_turret as _tower_shim
 from nextflow_turret import TowerRouter as _TowerRouter
 from nextflow_turret import TowerHandlerMixin as _TowerHandlerMixin
 from nextflow_turret import PersistentWorkflowRegistry as _PersistentRegistry
 from nextflow_turret import RunStore as _RunStore
 from nextflow_turret import tower_process_to_slurm_name
+from nextflow_turret import workflow_id_for_batch
 from mussel_dispatcher.db import connect_database, resolve_database_config, sql_for_backend
 
 slurm_stats   = _helpers.slurm_stats
@@ -262,7 +262,6 @@ def _seed_registry_from_db(registry, cfg: Config) -> None:
     Backfills any batch that has task count data in the old schema columns but
     is not yet present in the persistent RunStore. Runs once at startup.
     """
-    import nextflow_turret.state as _nt_state
     db_cfg = resolve_database_config(cfg)
     if db_cfg.backend != "sqlite":
         return
@@ -279,7 +278,7 @@ def _seed_registry_from_db(registry, cfg: Config) -> None:
         conn.close()
         for r in rows:
             batch_id = r["batch_id"]
-            wf_id = _nt_state.workflow_id_for_batch(batch_id)
+            wf_id = workflow_id_for_batch(batch_id)
             if registry.get_by_id(wf_id) is not None:
                 continue  # already in registry
             run_name = f"dispatcher_{batch_id}"
@@ -728,6 +727,12 @@ def _build_handler(cfg: Config):
             return mapped
         if mapped := _lookup_batch_id_by_suffix(run):
             return mapped
+        # While the dashboard is down the Tower proxy answers /trace/create
+        # with workflow_id_for_batch(<run name>); a run whose later events
+        # carry only that ID is auto-registered under it.
+        for active_name, mapped in active_runs.items():
+            if workflow_id_for_batch(active_name) == run_name:
+                return mapped
         return run_name
 
     def _tower_state_for_batch(batch_id: str, *, active_runs: dict[str, str] | None = None) -> dict | None:

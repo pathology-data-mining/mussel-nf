@@ -46,9 +46,9 @@ jobs:
           pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install numpy pandas pytest webdataset h5py requests boto3 pyarrow databricks-sdk
-          # Production runs nextflow-turret from this commit (agent/tower-compatibility);
-          # PyPI 0.1.0 predates its 16-character Tower workflow IDs.
-          pip install "nextflow-turret @ git+https://github.com/msk-mind/nextflow-turret@7df7717"
+          # Production pins this release; 0.1.0 predates its 16-character
+          # Tower workflow IDs and failed_not_ignored counts.
+          pip install "nextflow-turret==0.2.0"
           pip install -e dispatcher/
 
       - name: Run dispatcher tests

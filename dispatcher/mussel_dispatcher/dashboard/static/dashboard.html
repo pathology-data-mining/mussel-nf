@@ -740,6 +740,19 @@ async function loadStatus() {
   }
 }
 
+// Failed tasks that count against a run. Nextflow's `failed` also counts the
+// tasks its errorStrategy ignored; rows from before nextflow-turret 0.2.0 lack
+// the derived fields, so fall back to failed - ignored.
+function towerFailed(t) {
+  if (t.failed_not_ignored != null) return t.failed_not_ignored;
+  const tc = t.task_counts || {};
+  return Math.max(0, (tc.failed||0) - (tc.ignored||0));
+}
+function processFailed(p) {
+  if (p.failedNotIgnored != null) return p.failedNotIgnored;
+  return Math.max(0, (p.failed||0) - (p.ignored||0));
+}
+
 // Per-process breakdown
 function renderProcesses(processes) {
   if (!processes || !processes.length) return '';
@@ -749,7 +762,8 @@ function renderProcesses(processes) {
     const total = done + (p.failed||0) + (p.running||0) + (p.pending||0) + (p.submitted||0);
     const pct   = total ? Math.round(done/total*100) : 0;
     const run = p.running || 0;
-    const fail= p.failed  || 0;
+    const fail= processFailed(p);
+    const ign = p.ignored || 0;
 
     // SLURM enrichment: node badge + elapsed time
     let slurmBadge = '';
@@ -768,7 +782,8 @@ function renderProcesses(processes) {
       '<div class="process-counts">' +
         '<span class="chip chip-green" title="Tasks succeeded or served from cache">&#x2714; ' + done + '</span>' +
         (run  ? '<span class="chip chip-blue" title="Tasks currently running in SLURM">&#x25B6; ' + run  + '</span>' : '') +
-        (fail ? '<span class="chip chip-red" title="Tasks failed (errorStrategy=ignore — typically killed by node failure; slides will be re-queued after WDS check)">&#x2716; '  + fail + '</span>' : '') +
+        (fail ? '<span class="chip chip-red" title="Tasks failed and not ignored by the errorStrategy (includes Slurm-killed or lost jobs); slides will be re-queued after WDS check">&#x2716; '  + fail + '</span>' : '') +
+        (ign  ? '<span class="chip chip-gray" title="Failed tasks the errorStrategy ignored">' + ign + ' ignored</span>' : '') +
         slurmBadge +
         '<span class="chip chip-gray" title="Percentage of tasks complete">' + pct + '%</span>' +
       '</div></div>';
@@ -795,10 +810,11 @@ function renderFailures(failures) {
   const recent = failures.slice(-5).reverse();
   const items = recent.map(function(f) {
     const exit = f.exit != null ? ' exit:' + f.exit : '';
+    const action = f.errorAction ? ' ' + f.errorAction : '';
     const tag  = f.tag  ? ' (' + f.tag + ')' : '';
     return '<div class="failure-item">' +
       '<span class="fi-name">' + (f.process||f.name||'?') + '</span>' + tag +
-      '<span class="fi-meta">' + exit + (f.hash ? ' #' + f.hash : '') + '</span>' +
+      '<span class="fi-meta">' + exit + action + (f.hash ? ' #' + f.hash : '') + '</span>' +
       '</div>';
   }).join('');
   return '<div class="failure-list">' +
@@ -820,7 +836,7 @@ function renderBatchCard(b) {
     const done  = (tc.succeeded||0) + (tc.cached||0);
     const total = done + (tc.failed||0) + (tc.running||0) + (tc.pending||0) + (tc.submitted||0);
     const pct   = total ? Math.round(done/total*100) : 0;
-    const fail  = tc.failed||0;
+    const fail  = towerFailed(t);
     progressHtml =
       '<div style="margin-bottom:8px">' +
         '<div style="display:flex;justify-content:space-between;font-size:0.75rem;margin-bottom:3px">' +
@@ -872,9 +888,9 @@ function renderBatchRow(b) {
       const t = b.tower;
       let progressCell = '--';
       if (t && t.total) {
-        const fail = (t.task_counts||{}).failed || 0;
+        const fail = towerFailed(t);
         if (b.status === 'RUNNING') {
-          const runTip = fail ? 'title="' + fail + ' tasks failed so far (will be ignored — see NF errorStrategy)"' : 'title="All tasks passing so far"';
+          const runTip = fail ? 'title="' + fail + ' tasks failed so far (not ignored by the errorStrategy)"' : 'title="All tasks passing so far"';
           progressCell = '<span style="font-size:0.75rem" ' + runTip + '>' + t.done + '/' + t.total + '</span>' +
             '<div class="pbar-wrap" style="min-width:60px"><div class="pbar pbar-' + (fail?'orange':'green') + '" style="width:' + t.pct + '%"></div></div>';
         } else {
@@ -884,7 +900,7 @@ function renderBatchRow(b) {
           const tip   = incomplete
             ? ' title="Only ' + t.done + ' of ' + t.total + ' tasks completed before NF exited (remaining slides reset to PENDING for retry)"'
             : (fail
-                ? ' title="All ' + t.total + ' tasks ran; ' + fail + ' failed (errorStrategy=ignore — typically node failure; slides requeued)"'
+                ? ' title="All ' + t.total + ' tasks ran; ' + fail + ' failed (not ignored by the errorStrategy — e.g. Slurm-killed; slides requeued)"'
                 : ' title="All ' + t.total + ' tasks completed successfully"');
           progressCell = '<span style="font-size:0.75rem;color:#' + color + '"' + tip + '>' +
             icon + t.done + '/' + t.total + '</span>';
@@ -902,8 +918,9 @@ function renderBatchRow(b) {
           (b.slurm_pending ? ' <span style="color:#fcd34d" title="' + b.slurm_pending + ' SLURM job(s) queued — waiting for GPU slots">'+b.slurm_pending+'&#x23F3;</span>' : '') + '</span>';
       }
       const stalled  = t && t.stalled;
-      const failChip = t && (t.task_counts||{}).failed
-        ? '<span class="chip chip-red" style="margin-left:4px" title="' + t.task_counts.failed + ' Nextflow tasks failed (errorStrategy=ignore — typically killed by node failure; affected slides reset to PENDING for retry)">&#x2716;' + t.task_counts.failed + '</span>' : '';
+      const failCount = t ? towerFailed(t) : 0;
+      const failChip = failCount
+        ? '<span class="chip chip-red" style="margin-left:4px" title="' + failCount + ' Nextflow tasks failed and were not ignored by the errorStrategy (includes Slurm-killed or lost jobs; affected slides reset to PENDING for retry)">&#x2716;' + failCount + '</span>' : '';
       const exitCell = (b.nextflow_exit != null && b.nextflow_exit !== 0)
         ? '<span style="color:#f87171" title="Non-zero Nextflow exit — process was aborted or errored. Slides were reset to PENDING or FAILED.">' + b.nextflow_exit + '</span>'
         : (b.nextflow_exit === 0 ? '<span title="Nextflow exited cleanly">0</span>' : '--');

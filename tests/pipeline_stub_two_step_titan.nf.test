@@ -24,9 +24,10 @@ nextflow_pipeline {
             // titan_slide features: published under features/titan_slide/
             assert path("${outputDir}/features/titan_slide/948176.features.pt").exists()
             assert path("${outputDir}/features/titan_slide/948176.features.h5").exists()
+            // slide encoder runs must still emit patch-level H5 features for LP / ABMIL wiring
+            assert path("${outputDir}/features/conch1_5/948176.patch_features.h5").exists()
             // Tessellated patches
             assert path("${outputDir}/tiles/9481/948176.patch.h5").exists()
-            // Note: patch_features (CONCH1_5 intermediate) are optional and not emitted by the stub
         }
     }
 }

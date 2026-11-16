@@ -21,6 +21,16 @@
                     "fa_icon": "fas fa-folder-open",
                     "default": "results"
                 },
+                "hf_cache_dir": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "description": "Shared Hugging Face cache for model weights, on a filesystem every task can see; each model is downloaded once and the directory is bound into Apptainer/Docker containers. Set with --hf_cache_dir, -params-file or a profile (not a -c config). Unset: a per-task cache (re-downloads every model in every task)."
+                },
+                "profile_dir": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "description": "Opt-in task profiling: Mussel tasks sample their GPU, record start/end times and write Mussel's per-stage timings (timings_path) under <profile_dir>/<task hash>/ with task.json and their .command.log (bin/summarize_task_profiles.py)."
+                },
                 "publish_mode": {
                     "type": "string",
                     "default": "copy",
@@ -126,14 +136,14 @@
                     ]
                 },
                 "patch_size": {
-                    "type": "integer",
-                    "default": 224,
-                    "description": "Patch size"
+                    "type": ["integer", "null"],
+                    "default": null,
+                    "description": "Explicit tile size (pixels at mpp) for every model. Default null: each model is tiled at its recommended size (assets/recommended_patch_sizes.json, from Mussel's MODEL_PATCH_SIZES), with one tessellation per distinct size. Prefer featurize.model_patch_sizes for per-model overrides."
                 },
                 "mpp": {
-                    "type": "number",
-                    "default": 0.5,
-                    "description": "microns per pixel"
+                    "type": ["number", "null"],
+                    "default": null,
+                    "description": "Tile resolution (µm/px) for every model. Default (null): each model's authors' resolution (target_mpp in assets/recommended_patch_sizes.json), else 0.5. Prefer featurize.model_mpps for one model."
                 },
                 "segment_threshold": {
                     "type": "integer",
@@ -193,6 +203,12 @@
                         "neural"
                     ],
                     "description": "Tissue segmentation model used during tessellation: classic (HSV + fixed threshold), otsu (HSV + Otsu automatic threshold), or neural (DeepLabV3 neural network). If unset, Mussel uses its own default (classic) or the seg_config_group preset value. Requires Mussel v1.2.0+."
+                },
+                "neural_seg_max_tiles": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 4096,
+                    "description": "Maximum 512x512 inference tiles for neural tissue segmentation. Set to 0 to disable the guard for validated large-slide cohorts."
                 },
                 "slide_mpp_override": {
                     "type": "number",
@@ -263,6 +279,8 @@
                             "kaiko_vitl14",
                             "lunit_vits8",
                             "lunit_vits16",
+                            "musk",
+                            "keep",
                             "gigapath_slide",
                             "titan_slide",
                             "prism_slide",
@@ -271,7 +289,7 @@
                             "madeleine_slide",
                             "abmil_slide"
                         ],
-                        "description": "Patch encoders: resnet50, ctranspath, gigapath, virchow, virchow2, optimus, hoptimus1, h0mini, uni, uni2h, conch1_5, conch_v1, clip, googlepath, phikon, phikon_v2, midnight12k, gpfm, hibou_l, openmidnight, genbio_pathfm, kaiko_vits8, kaiko_vits16, kaiko_vitb8, kaiko_vitb16, kaiko_vitl14, lunit_vits8, lunit_vits16. Slide encoders: gigapath_slide, titan_slide, prism_slide, feather_slide, chief_slide, madeleine_slide, abmil_slide."
+                        "description": "Patch encoders: resnet50, ctranspath, gigapath, virchow, virchow2, optimus, hoptimus1, h0mini, uni, uni2h, conch1_5, conch_v1, clip, googlepath, phikon, phikon_v2, midnight12k, gpfm, hibou_l, openmidnight, genbio_pathfm, kaiko_vits8, kaiko_vits16, kaiko_vitb8, kaiko_vitb16, kaiko_vitl14, lunit_vits8, lunit_vits16, musk, keep. Slide encoders: gigapath_slide, titan_slide, prism_slide, feather_slide, chief_slide, madeleine_slide, abmil_slide."
                     }
                 },
                 "use_gpu": {
@@ -300,7 +318,7 @@
                         "null"
                     ],
                     "default": null,
-                    "description": "Maximum number of patches passed to slide-level encoders (e.g. gigapath_slide, titan_slide) per slide. Null keeps all patches. Useful to cap memory usage and prevent OOM for very large slides."
+                    "description": "TITAN: aggregate at most this many tiles per slide, a subset seeded by the slide's file name (Mussel extract_features max_slide_patches, Mussel #151). Null or 0 keeps every tile. Caps TITAN's memory on very large slides; patch features are still written for every tile."
                 },
                 "max_tiles_per_sample": {
                     "type": [
@@ -330,6 +348,41 @@
                     "description": "paths to models",
                     "additionalProperties": {
                         "type": "string"
+                    }
+                },
+                "tile_size_check": {
+                    "type": ["string", "null"],
+                    "enum": ["error", "warn", "off", null],
+                    "default": "error",
+                    "description": "Mussel tile_size_check for each model: 'error' fails when a model's tiles aren't its recommended size/MPP; models overridden on purpose get 'warn'. null omits the option (Mussel without tile_size_check)."
+                },
+                "model_mpps": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Explicit per-model resolution overrides (µm/px), e.g. {\"chief_slide\": 0.5}. Takes precedence over tiling.mpp and the model's target resolution.",
+                    "additionalProperties": {
+                        "type": "number"
+                    }
+                },
+                "grid_from_primary": {
+                    "type": "array",
+                    "default": [],
+                    "description": "Models whose tiles are derived from the primary (first model's) tiles instead of tessellated at their own size: every cell of the model's tile size containing a primary tile centre, at the primary resolution. E.g. [\"titan_slide\"] builds TITAN's 512 px grid from the 224 px tiles. Two-step workflow only.",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "multi_model_patch_pass": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Two-step workflow: run all plain patch models that share a tile set (size and resolution) in one task, reading each tile once. Needs Mussel with extract_features model_types (Mussel#144)."
+                },
+                "model_patch_sizes": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Explicit per-model tile size overrides (pixels at the model's resolution), e.g. {\"conch1_5\": 448}. Takes precedence over tiling.patch_size and the recommended size.",
+                    "additionalProperties": {
+                        "type": "integer"
                     }
                 },
                 "model_batch_sizes": {
@@ -399,7 +452,7 @@
                         },
                         "madeleine_slide": {
                             "type": "string",
-                            "default": "clip"
+                            "default": "conch_v1"
                         }
                     }
                 }

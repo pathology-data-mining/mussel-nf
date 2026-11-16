@@ -410,6 +410,142 @@ def merge_via_warehouse(
 
 
 # ---------------------------------------------------------------------------
+# wds_path regression guard (opt-in: wds_path_guard=True)
+# ---------------------------------------------------------------------------
+# An export that holds every (slide, model) is MERGEd over every matched row,
+# so an export with wrong/blank wds_paths (e.g. built from a small partial
+# manifest) silently erases good ones.  Two checks run before the MERGE;
+# --allow-wds-path-loss skips both.
+
+DEFAULT_MIN_WDS_PATH_FRACTION = 0.90
+DEFAULT_MAX_WDS_PATH_BLANK_FRACTION = 0.01
+
+
+class WdsPathGuardError(RuntimeError):
+    """The export would lose wds_paths; the MERGE was refused."""
+
+
+def check_export_wds_paths(
+    export_df: pd.DataFrame, min_fraction: float = DEFAULT_MIN_WDS_PATH_FRACTION
+) -> None:
+    """Refuse an export whose SUCCEEDED rows mostly lack a wds_path.
+
+    Checked per model: a model whose index went missing must not hide behind
+    the others' coverage.  Raises WdsPathGuardError.
+    """
+    if export_df.empty or "status" not in export_df.columns or "wds_path" not in export_df.columns:
+        return
+    done = export_df[export_df["status"] == "SUCCEEDED"]
+    if done.empty:
+        return
+    has_path = done["wds_path"].fillna("").astype(str).str.strip() != ""
+    groups = done.groupby("model") if "model" in done.columns else [("all", done)]
+    problems = []
+    for model, group in groups:
+        n = len(group)
+        n_path = int(has_path.loc[group.index].sum())
+        if n and n_path < min_fraction * n:
+            problems.append(f"{model}: {n_path}/{n} SUCCEEDED rows have a wds_path "
+                            f"({n_path / n:.1%} < {min_fraction:.0%})")
+    if problems:
+        raise WdsPathGuardError(
+            "export would MERGE blank wds_paths over SUCCEEDED rows — "
+            + "; ".join(problems)
+            + ". Pass --allow-wds-path-loss to MERGE anyway.")
+
+
+def _sql_rows(statement: str, host: str, token: str, warehouse_id: str,
+              *, timeout_s: int = _SQL_TIMEOUT_S,
+              poll_interval_s: int = _SQL_POLL_INTERVAL_S) -> list[list]:
+    """Run a read-only SQL statement; return its rows.  Raises RuntimeError on failure."""
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    base = host.rstrip("/")
+    resp = requests.post(f"{base}/api/2.0/sql/statements", headers=headers, json={
+        "warehouse_id": warehouse_id, "statement": statement, "wait_timeout": "50s",
+    }, timeout=90)
+    resp.raise_for_status()
+    body = resp.json()
+    deadline = time.monotonic() + timeout_s
+    while body.get("status", {}).get("state") in ("PENDING", "RUNNING"):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"statement {body.get('statement_id')} timed out after {timeout_s}s")
+        time.sleep(poll_interval_s)
+        r = requests.get(f"{base}/api/2.0/sql/statements/{body['statement_id']}",
+                         headers=headers, timeout=30)
+        r.raise_for_status()
+        body = r.json()
+    state = body.get("status", {}).get("state")
+    if state != "SUCCEEDED":
+        err = body.get("status", {}).get("error", {})
+        raise RuntimeError(err.get("message") or f"statement {state}")
+    return body.get("result", {}).get("data_array") or []
+
+
+def count_wds_paths_blanked(
+    source: str, table: str, host: str, token: str, warehouse_id: str
+) -> tuple[int, int] | None:
+    """(SUCCEEDED rows of *table* with a wds_path, how many the MERGE would blank).
+
+    *source* is the uploaded parquet (a volume folder ending in ``/`` or a
+    file).  Uses the MERGE's own de-duplication of the source.  Returns None
+    when *table* does not exist yet (nothing to lose).
+    """
+    statement = (
+        "WITH s AS (SELECT slide_id, model, wds_path FROM (SELECT *, ROW_NUMBER() OVER "
+        "(PARTITION BY slide_id, model ORDER BY completed_at DESC NULLS LAST) AS _rn "
+        f"FROM parquet.`{source}`) WHERE _rn = 1) "
+        "SELECT COUNT(*), COUNT_IF(s.slide_id IS NOT NULL AND COALESCE(TRIM(s.wds_path), '') = '') "
+        f"FROM {table} t LEFT JOIN s ON t.slide_id = s.slide_id AND t.model = s.model "
+        "WHERE t.status = 'SUCCEEDED' AND COALESCE(TRIM(t.wds_path), '') <> ''"
+    )
+    try:
+        rows = _sql_rows(statement, host, token, warehouse_id)
+    except RuntimeError as exc:
+        if "TABLE_OR_VIEW_NOT_FOUND" in str(exc):
+            return None
+        raise
+    if not rows:
+        return 0, 0
+    return int(rows[0][0] or 0), int(rows[0][1] or 0)
+
+
+def check_merge_wds_paths(
+    source: str, table: str, host: str, token: str, warehouse_id: str,
+    max_blank_fraction: float = DEFAULT_MAX_WDS_PATH_BLANK_FRACTION,
+) -> None:
+    """Refuse a MERGE that would blank more than *max_blank_fraction* of the
+    table's non-empty wds_paths on SUCCEEDED rows.  Raises WdsPathGuardError
+    (also when the check itself cannot run: fail closed)."""
+    try:
+        counts = count_wds_paths_blanked(source, table, host, token, warehouse_id)
+    except Exception as exc:
+        raise WdsPathGuardError(
+            f"could not check how many wds_paths the MERGE into {table} would blank: {exc}. "
+            "Pass --allow-wds-path-loss to MERGE without the check.") from exc
+    if counts is None:
+        log.info("wds_path guard: %s does not exist yet; nothing to protect", table)
+        return
+    nonempty, blanked = counts
+    log.info("wds_path guard: MERGE would blank %d of %d non-empty wds_paths on SUCCEEDED rows",
+             blanked, nonempty)
+    if blanked and blanked > max_blank_fraction * nonempty:
+        raise WdsPathGuardError(
+            f"MERGE into {table} would blank {blanked} of {nonempty} non-empty wds_paths on "
+            f"SUCCEEDED rows ({blanked / max(nonempty, 1):.1%} > {max_blank_fraction:.0%}). "
+            "Pass --allow-wds-path-loss to MERGE anyway.")
+
+
+def _delete_volume_file(volume_path: str, host: str, token: str) -> None:
+    try:
+        r = requests.delete(f"{host.rstrip('/')}/api/2.0/fs/files{volume_path}",
+                            headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        r.raise_for_status()
+        log.info("Deleted refused export %s", volume_path)
+    except Exception as exc:
+        log.warning("Could not delete refused export %s: %s", volume_path, exc)
+
+
+# ---------------------------------------------------------------------------
 # Shared argparse
 # ---------------------------------------------------------------------------
 
@@ -445,7 +581,7 @@ def add_upload_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--table", default=None,
         help="Target Delta table (passed as notebook_param 'target_table'). "
-             "E.g. your_catalog.your_schema.tcga_slide_embeddings_v2",
+             "E.g. your_catalog.your_schema.tcga_slide_embeddings",
     )
     parser.add_argument(
         "--job-id", default=None,
@@ -465,6 +601,22 @@ def add_upload_args(parser: argparse.ArgumentParser) -> None:
         "--output-parquet", default=None,
         help="Also save the Parquet file locally at this path",
     )
+    parser.add_argument(
+        "--allow-wds-path-loss", action="store_true",
+        help="With the wds_path guard: MERGE even when the wds_path guard finds the export would "
+             "blank existing paths (see --min-wds-path-fraction / --max-wds-path-blank-fraction)",
+    )
+    parser.add_argument(
+        "--min-wds-path-fraction", type=float, default=DEFAULT_MIN_WDS_PATH_FRACTION,
+        help="With the wds_path guard: refuse when fewer than this fraction of a model's SUCCEEDED "
+             f"export rows have a wds_path (default {DEFAULT_MIN_WDS_PATH_FRACTION})",
+    )
+    parser.add_argument(
+        "--max-wds-path-blank-fraction", type=float, default=DEFAULT_MAX_WDS_PATH_BLANK_FRACTION,
+        help="With the wds_path guard: refuse when the MERGE would blank more than this fraction of the "
+             "table's non-empty wds_paths on SUCCEEDED rows "
+             f"(default {DEFAULT_MAX_WDS_PATH_BLANK_FRACTION})",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
 
 
@@ -477,6 +629,7 @@ def upload_and_trigger(
     args: argparse.Namespace,
     *,
     filename_prefix: str,
+    wds_path_guard: bool = False,
 ) -> None:
     """Write *export_df* to a temp Parquet, upload to Databricks, optionally trigger job.
 
@@ -484,8 +637,32 @@ def upload_and_trigger(
     ``--volume-path`` (legacy single-file path).
 
     ``filename_prefix`` sets the file name stem, e.g. ``"tcga_inventory_"`` or
-    ``"impact_inventory_"``.
+    ``"cohort_inventory_"``.
+
+    With ``wds_path_guard``, the export is refused before upload when a
+    model's SUCCEEDED rows mostly lack a wds_path, and — when a SQL warehouse
+    is available — after upload but before the MERGE/job when it would blank
+    more than a small fraction of the table's existing paths.
+    ``--allow-wds-path-loss`` skips both checks.
     """
+    guard = wds_path_guard and not getattr(args, "allow_wds_path_loss", False)
+
+    def _refuse(exc: Exception) -> None:
+        log.error("Refusing Databricks sync: %s", exc)
+        if getattr(args, "status_file", None):
+            write_sync_status(args.status_file, job_id="wds_path_guard", run_id="",
+                              success=False, message=str(exc), table=args.table or "")
+        raise SystemExit(f"Databricks sync refused: {exc}")
+
+    if wds_path_guard and not guard:
+        log.warning("--allow-wds-path-loss: wds_path guard disabled for this sync")
+    if guard:
+        try:
+            check_export_wds_paths(export_df, getattr(args, "min_wds_path_fraction",
+                                                      DEFAULT_MIN_WDS_PATH_FRACTION))
+        except WdsPathGuardError as exc:
+            _refuse(exc)
+
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
@@ -523,6 +700,23 @@ def upload_and_trigger(
             volume_path = args.volume_path
 
         upload_parquet(tmp_path, volume_path, host, token)
+
+        if guard and args.table:
+            warehouse_id = getattr(args, "warehouse_id", None)
+            if warehouse_id:
+                source = f"{args.volume_folder.rstrip('/')}/" if args.volume_folder else volume_path
+                try:
+                    check_merge_wds_paths(
+                        source, args.table, host, token, warehouse_id,
+                        getattr(args, "max_wds_path_blank_fraction",
+                                DEFAULT_MAX_WDS_PATH_BLANK_FRACTION))
+                except WdsPathGuardError as exc:
+                    # Leave no refused parquet for a later job run to MERGE.
+                    _delete_volume_file(volume_path, host, token)
+                    _refuse(exc)
+            else:
+                log.warning("wds_path guard: no --warehouse-id, so the MERGE's effect on "
+                            "existing wds_paths in %s is not checked", args.table)
 
         if args.job_id:
             job_params: dict = {}

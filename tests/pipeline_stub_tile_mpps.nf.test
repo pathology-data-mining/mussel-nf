@@ -1,0 +1,47 @@
+nextflow_pipeline {
+    name   "Per-model tile resolutions (two-step) — stub mode"
+    script "../main.nf"
+    profile "test_stub_tile_mpps"
+    options "-stub"
+
+    // hoptimus1 (224 px at 0.5 µm/px), titan_slide (512 px at 0.5) and chief_slide
+    // (256 px at 1.0, CTransPath features) need three tile sets. They come from one
+    // tessellation task per slide (Mussel seg_config.patch_sizes + patch_mpps); the
+    // set at another resolution goes to tiles_256px_1mpp/.
+    def attrs = { String h5 ->
+        def proc = ["python3", "-c", "import h5py,sys; a=h5py.File(sys.argv[1], 'r')['coords'].attrs; print(int(a['patch_size_to_resize_to_for_desired_mpp']), float(a['mpp']))", h5].execute()
+        proc.waitFor()
+        assert proc.exitValue() == 0 : "reading ${h5} failed:\n${proc.err.text}"
+        def (size, mpp) = proc.text.trim().tokenize(' ')
+        [size as Integer, mpp as Double]
+    }
+
+    def check = { outputDir, workflow ->
+        assert workflow.success
+        assert attrs("${outputDir}/tiles/9481/948176.patch.h5") == [224, 0.5]
+        assert attrs("${outputDir}/tiles_512px/9481/948176.patch.h5") == [512, 0.5]
+        assert attrs("${outputDir}/tiles_256px_1mpp/9481/948176.patch.h5") == [256, 1.0]
+        for (m in ['hoptimus1', 'titan_slide', 'chief_slide']) {
+            assert path("${outputDir}/features/${m}/948176.features.pt").exists() : m
+        }
+        assert path("${outputDir}/features/ctranspath/948176.patch_features.h5").exists()
+        def manifest = file("${outputDir}").listFiles().find { it.name.startsWith('manifest') && it.name.endsWith('.csv') }
+        assert manifest : "no manifest in ${outputDir}"
+        // Long format: one slide,sample,cohort,key,path row per manifest entry.
+        def rows = manifest.readLines().collect { it.tokenize(',') }
+        for (pair in [['tiles_h5_path', 'tiles/9481/948176.patch.h5'],
+                      ['tiles_h5_path_512px', 'tiles_512px/9481/948176.patch.h5'],
+                      ['tiles_h5_path_256px_1mpp', 'tiles_256px_1mpp/9481/948176.patch.h5']]) {
+            assert rows.any { it[-2] == pair[0] && it[-1] == pair[1] } : "${pair} not in ${manifest.text}"
+        }
+    }
+
+    test("two-step: one tessellation, tile sets at their own resolutions") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            check(outputDir, workflow)
+        }
+    }
+}

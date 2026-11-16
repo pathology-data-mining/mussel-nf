@@ -26,6 +26,11 @@ process ABMIL_BENCHMARK {
 
     script:
     def split_col = params.abmil_benchmark.split_col ? "split_col=${params.abmil_benchmark.split_col}" : ""
+    // abmil_benchmark reads {slide_id}.features.h5 (default features_suffix). A slide
+    // encoder's patch-level features are {slide_id}.patch_features.h5: name that suffix
+    // (Mussel >= 1.6.0) when they are all this model's files.
+    def names = (h5_files instanceof List ? h5_files : [h5_files]).collect { it.name.toString() }
+    def features_suffix = names.every { it.endsWith('.patch_features.h5') } ? "features_suffix=patch_features.h5" : ""
     """
     abmil_benchmark \
         features_dir=features_dir \
@@ -43,6 +48,7 @@ process ABMIL_BENCHMARK {
         test_size=${params.abmil_benchmark.test_size} \
         val_size=${params.abmil_benchmark.val_size} \
         ${split_col} \
+        ${features_suffix} \
         output_summary_json=results.json
     """
 }

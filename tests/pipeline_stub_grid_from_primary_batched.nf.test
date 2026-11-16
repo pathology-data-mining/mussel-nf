@@ -1,0 +1,39 @@
+nextflow_pipeline {
+    name   "TITAN grid derived from the primary tiles (batched tessellation) — stub mode"
+    script "../main.nf"
+    profile "test_stub_grid_from_primary_batched"
+    options "-stub"
+
+    // featurize.grid_from_primary = [titan_slide]: Mussel tessellates only the 224 px
+    // set (hoptimus1, optimus); titan_slide's 512 px set is derived from those tiles by
+    // Mussel's derive_tile_grid in a DERIVE_TILE_GRID task, and published under tiles_512px/.
+    def attrs = { String h5 ->
+        def proc = ["python3", "-c", "import h5py,sys; a=h5py.File(sys.argv[1], 'r')['coords'].attrs; print(int(a['patch_size_to_resize_to_for_desired_mpp']), float(a['mpp']), a.get('derived_grid_method', ''))", h5].execute()
+        proc.waitFor()
+        assert proc.exitValue() == 0 : "reading ${h5} failed:\n${proc.err.text}"
+        def parts = proc.text.trim().tokenize(' ')
+        [parts[0] as Integer, parts[1] as Double, parts.size() > 2 ? parts[2] : '']
+    }
+
+    test("batched tessellation: 224 px tessellated, 512 px derived") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            assert attrs("${outputDir}/tiles/9481/948176.patch.h5") == [224, 0.5, '']
+            assert attrs("${outputDir}/tiles_512px/9481/948176.patch.h5") == [512, 0.5, 'cells_containing_source_tile_centres']
+            for (m in ['hoptimus1', 'optimus', 'titan_slide']) {
+                assert path("${outputDir}/features/${m}/948176.features.pt").exists() : m
+            }
+            assert path("${outputDir}/features/conch1_5/948176.patch_features.h5").exists()
+            def manifest = file("${outputDir}").listFiles().find { it.name.startsWith('manifest') && it.name.endsWith('.csv') }
+            assert manifest : "no manifest in ${outputDir}"
+            def rows = manifest.readLines().collect { it.tokenize(',') }
+            for (pair in [['tiles_h5_path', 'tiles/9481/948176.patch.h5'],
+                          ['tiles_h5_path_512px', 'tiles_512px/9481/948176.patch.h5']]) {
+                assert rows.any { it[-2] == pair[0] && it[-1] == pair[1] } : "${pair} not in ${manifest.text}"
+            }
+        }
+    }
+}

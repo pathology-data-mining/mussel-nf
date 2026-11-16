@@ -14,7 +14,7 @@ required patch encoder is resolved automatically via
 | `prism_slide` | PRISM | `virchow` |
 | `feather_slide` | CONCH/FEATHER | `conch1_5` |
 | `chief_slide` | CHIEF | `ctranspath` |
-| `madeleine_slide` | MADELEINE | `clip` |
+| `madeleine_slide` | MADELEINE | `conch_v1` |
 | `abmil_slide` | ABMIL (encoder-agnostic) | specify patch encoder separately |
 
 ## Usage
@@ -62,8 +62,14 @@ results/
       *.patch_features.pt
       *.patch_features.h5
   tiles/
-    *.patch.h5            # tile coordinates
+    *.patch.h5            # tile coordinates (first model's tile size)
+  tiles_512px/
+    *.patch.h5            # e.g. titan_slide's 512 px tiles when another
+                          # model with a different size is listed first
 ```
+
+Each slide encoder is tiled at its own recommended size (e.g. `titan_slide`: 512 px at
+`tiling.mpp` 0.5, i.e. 20x) unless explicitly overridden; see "Tile sizes" in README.md.
 
 ## Batching parameters
 

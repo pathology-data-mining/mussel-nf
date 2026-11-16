@@ -3,8 +3,6 @@ process TESSELLATE_FEATURIZE_BATCH {
     label "gpuTask"
     label "parallelTask"
 
-    beforeScript 'export HDF5_USE_FILE_LOCKING=FALSE'
-
     secret 'HF_TOKEN'
 
     // Publish slide encoder features (always created)
@@ -13,11 +11,11 @@ process TESSELLATE_FEATURIZE_BATCH {
     // Publish patch encoder features (only created when using slide-level model)
     publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; "${params.outdir}/features/${mt}" }, mode: "${params.publish_mode}", pattern: "pt/*.patch_features.pt", saveAs: { fn -> fn.replaceFirst("pt/", "") }
     publishDir path: { def sm = params.featurize.slide_to_patch_mapping; def mt = (sm && sm[model_type_input]) ? sm[model_type_input] : model_type_input; "${params.outdir}/features/${mt}" }, mode: "${params.publish_mode}", pattern: "h5/*.patch_features.h5", saveAs: { fn -> fn.replaceFirst("h5/", "") }
-    publishDir path: "${params.outdir}/tiles", mode: "${params.publish_mode}", pattern: "tile_h5/*.h5", saveAs: { fn -> fn.replaceFirst("tile_h5/", "") }
+    publishDir path: { "${params.outdir}/${tset.dir}" }, mode: "${params.publish_mode}", pattern: "tile_h5/*.h5", saveAs: { fn -> fn.replaceFirst("tile_h5/", "") }
 
     input:
-    tuple val(slide_batch), path(slides) // batch with slide files
-    each model_type_input // Model type string - can be:
+    // Batch with slide files, one model, and the tile set (TileSizes) that model uses.
+    tuple val(slide_batch), path(slides), val(model_type_input), val(tset) // model_type_input can be:
                           // - Patch encoder: 'resnet50', 'ctranspath', 'gigapath', 'virchow', 'virchow2', 'optimus', 'uni', 'uni2h', 'conch1_5', 'clip', 'googlepath'
                           // - Slide encoder: 'gigapath_slide', 'titan_slide'
                           // When using slide encoders, the required patch encoder is automatically inferred from params.featurize.slide_to_patch_mapping
@@ -27,7 +25,9 @@ process TESSELLATE_FEATURIZE_BATCH {
     tuple val(batch_metadata), val(model_type_input), path("h5/*.features.h5"), optional: true, emit: h5
     tuple val(batch_metadata), val(model_type), path("pt/*.patch_features.pt"), optional: true, emit: patch_pt
     tuple val(batch_metadata), val(model_type), path("h5/*.patch_features.h5"), optional: true, emit: patch_h5
-    tuple val(batch_metadata), path("tile_h5/*.patch.h5"), optional: true, emit: tile_h5
+    tuple val(batch_metadata), val(tset), path("tile_h5/*.patch.h5"), optional: true, emit: tile_h5
+    // Slides of the batch without outputs (bin/mussel_batch.py finish); not published.
+    tuple val(batch_metadata), val(model_type_input), path("failed_slides.tsv"), optional: true, emit: failed
 
     script:
     // Determine if this is a slide-level model and infer the patch encoder
@@ -47,6 +47,7 @@ process TESSELLATE_FEATURIZE_BATCH {
 
     model_type_name = slide_model_type ?: model_type
     patch_encoder_name = model_type
+    is_slide_model = slide_model_type ? "true" : "false"
 
     mpath_str = ""
     if (model_path)
@@ -118,8 +119,8 @@ process TESSELLATE_FEATURIZE_BATCH {
 
     // Build individual parameter overrides (only if not using group, or to override group defaults)
     seg_params = []
-    if (params.tiling.mpp != null) seg_params << "seg_config.mpp=${params.tiling.mpp}"
-    if (params.tiling.patch_size != null) seg_params << "seg_config.patch_size=${params.tiling.patch_size}"
+    seg_params << "seg_config.mpp=${tset.mpp}"  // tile set resolved per model (TileSizes)
+    seg_params << "seg_config.patch_size=${tset.size}"
     if (params.tiling.segment_threshold != null) seg_params << "seg_config.segment_threshold=${params.tiling.segment_threshold}"
     if (params.tiling.median_blur_ksize != null) seg_params << "seg_config.median_blur_ksize=${params.tiling.median_blur_ksize}"
     if (params.tiling.morphology_ex_kernel != null) seg_params << "seg_config.morphology_ex_kernel=${params.tiling.morphology_ex_kernel}"
@@ -133,9 +134,20 @@ process TESSELLATE_FEATURIZE_BATCH {
     if (params.tiling.seg_model != null) seg_params << "seg_config.seg_model=${params.tiling.seg_model}"
     if (params.tiling.slide_mpp_override != null) seg_params << "seg_config.slide_mpp_override=${params.tiling.slide_mpp_override}"
     seg_params_str = seg_params.join(' \\\n        ')
+    neural_seg_max_tiles = params.tiling.neural_seg_max_tiles != null
+        ? params.tiling.neural_seg_max_tiles
+        : 4096
+    expected_seg_model = params.tiling.seg_model?.toString()?.trim()?.toLowerCase()
 
+    // Mussel >= 1.6.0 writes the other slides' outputs when some fail, then exits
+    // non-zero: bin/mussel_batch.py keeps those (the failed slides go to
+    // failed_slides.tsv) and moves empty outputs of slides without tiles aside.
+    // Slides without tissue are skipped by Mussel and have no outputs.
     """
-    tessellate_extract_features \
+    ${TaskProfile.script(params.profile_dir, task)}
+    export MUSSEL_NEURAL_SEG_MAX_TILES=${neural_seg_max_tiles}
+    rc=0
+    mussel_batch.py run --log mussel.log -- tessellate_extract_features \
         ${seg_config_str} \
         ${seg_params_str} \
         num_workers=${task.cpus} \
@@ -160,7 +172,8 @@ process TESSELLATE_FEATURIZE_BATCH {
         ${output_thumbnail_suffix_str} \
         ${output_png_dir_suffix_str} \
         ${save_h5_param} \
-        ${embedding_precision_str}
+        ${embedding_precision_str} \
+        ${TaskProfile.timingsArg(params.profile_dir)} || rc=\$?
 
     # When a slide encoder is used, the Mussel CLI writes outputs into model-named
     # subdirs (e.g. TITAN_SLIDE/pt/, CONCH1_5/pt/) instead of flat pt/.
@@ -170,19 +183,37 @@ process TESSELLATE_FEATURIZE_BATCH {
         # Slide-level features → flat pt/ and h5/
         [[ -d "${model_type_name.toUpperCase()}/pt" ]] && mv ${model_type_name.toUpperCase()}/pt/*.features.pt pt/ 2>/dev/null || true
         [[ -d "${model_type_name.toUpperCase()}/h5" ]] && mv ${model_type_name.toUpperCase()}/h5/*.features.h5 h5/ 2>/dev/null || true
+        # The slide encoder's patch features: <PATCH_ENCODER>/, or (Mussel >= 1.6.0)
+        # <PATCH_ENCODER>_<size>px_<mpp>mpp/ when the slide encoder's tiles differ from
+        # the patch encoder's own (e.g. CTRANSPATH_256px_1mpp/ for CHIEF_SLIDE); <PATCH_ENCODER>/
+        # then holds Mussel's standalone patch encoder run, at the patch encoder's tiles.
+        pe_dir="${patch_encoder_name.toUpperCase()}"
+        if [[ "${is_slide_model}" == "true" ]]; then
+            for d in "${patch_encoder_name.toUpperCase()}"_*px_*mpp; do
+                if [[ -d "\$d" ]]; then pe_dir="\$d"; break; fi
+            done
+        fi
         # Patch encoder features → rename to *.patch_features.* so NF can tell them apart
-        if [[ -d "${patch_encoder_name.toUpperCase()}/pt" ]]; then
-            for f in ${patch_encoder_name.toUpperCase()}/pt/*.features.pt; do
+        if [[ -d "\$pe_dir/pt" ]]; then
+            for f in "\$pe_dir"/pt/*.features.pt; do
                 [[ -f "\$f" ]] && mv "\$f" pt/\$(basename "\${f%.features.pt}").patch_features.pt
             done
         fi
-        if [[ -d "${patch_encoder_name.toUpperCase()}/h5" ]]; then
-            for f in ${patch_encoder_name.toUpperCase()}/h5/*.features.h5; do
+        if [[ -d "\$pe_dir/h5" ]]; then
+            for f in "\$pe_dir"/h5/*.features.h5; do
                 [[ -f "\$f" ]] && mv "\$f" h5/\$(basename "\${f%.features.h5}").patch_features.h5
             done
         fi
         # Tile coordinates live under patch encoder subdir
-        [[ -d "${patch_encoder_name.toUpperCase()}/tile_h5" ]] && mv ${patch_encoder_name.toUpperCase()}/tile_h5/* tile_h5/ 2>/dev/null || true
+        [[ -d "\$pe_dir/tile_h5" ]] && mv "\$pe_dir"/tile_h5/* tile_h5/ 2>/dev/null || true
+    fi
+    mussel_batch.py finish --rc \$rc --log mussel.log --slide-ids '${slide_ids_str}' \
+        --expect '${model_type_input}=pt/{sid}.features.pt' --scan pt --scan h5 --report failed_slides.tsv
+    # Only slides with tiles have a tile H5 (none for a slide without tissue).
+    if [ -n "${expected_seg_model}" ] && compgen -G "tile_h5/*.patch.h5" > /dev/null; then
+        validate_tessellation_h5.py \
+            --expected-seg-model=${expected_seg_model} \
+            tile_h5/*.patch.h5
     fi
     """
 
@@ -202,6 +233,8 @@ process TESSELLATE_FEATURIZE_BATCH {
     n_feat = 8
     is_slide_model = ${is_slide_model ? "True" : "False"}
     for sid in "${stub_slide_ids}".split(","):
+        if sid.startswith("FAIL"):
+            continue  # a slide Mussel failed (or skipped): no outputs, as in TESSELLATE_BATCH's stub
         torch.save(torch.zeros(1, n_feat), f"pt/{sid}.features.pt")
         with h5py.File(f"h5/{sid}.features.h5", "w") as f:
             f.create_dataset("features", data=np.zeros((1, n_feat), dtype="float32"))
@@ -218,5 +251,7 @@ process TESSELLATE_FEATURIZE_BATCH {
             ds = f.create_dataset("coords", data=np.array([[0, 0]], dtype="int64"))
             ds.attrs["native_mpp"] = 0.5
             ds.attrs["mpp_is_fallback"] = False
+            ds.attrs["patch_size_to_resize_to_for_desired_mpp"] = ${tset.size}
+            ds.attrs["mpp"] = ${tset.mpp}
     """
 }

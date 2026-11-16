@@ -2,7 +2,7 @@ include { validateParameters; paramsSummaryLog; samplesheetToList } from 'plugin
 
 // nextflow.preview.topic = true
 
-include { MUSSEL } from './modules/mussel'
+include { MUSSEL; TESSELLATE_ONLY } from './modules/mussel'
 include { DOWNLOAD_SLIDE } from './modules/download'
 
 
@@ -14,7 +14,7 @@ process saveParams {
         path "params.json"
 
     script:
-        params_out = params.subMap(['workflow_id', 'tiling'])
+        params_out = params.subMap(['workflow_id', 'tiling', 'tessellate_only'])
         params_out["outdir"] = new File(params.outdir).absolutePath
         "echo '${groovy.json.JsonOutput.toJson(params_out)}' > params.json"
 }
@@ -35,7 +35,7 @@ workflow {
     // ── Pre-flight validation ──────────────────────────────────────────────
 
     // Validate model paths exist on disk
-    if (params.featurize?.model_paths) {
+    if (!params.tessellate_only && params.featurize?.model_paths) {
         params.featurize.model_paths.each { model_name, model_path ->
             if (model_path && !file(model_path).exists()) {
                 log.error "Model path for '${model_name}' does not exist: ${model_path}"
@@ -43,6 +43,17 @@ workflow {
             }
         }
         log.info "✓ All model paths validated"
+    }
+
+    // nextflow.config's env block reads params.hf_cache_dir before -c configs are
+    // loaded, so a value set only there would silently leave per-task caches.
+    if (params.hf_cache_dir) {
+        def hf_home = workflow.session.config.env?.HF_HOME?.toString()
+        if (hf_home != new File(params.hf_cache_dir.toString()).canonicalPath) {
+            log.error "hf_cache_dir=${params.hf_cache_dir} did not reach the task environment (HF_HOME=${hf_home}). " +
+                      "Set it with --hf_cache_dir, in -params-file or in a profile, not in a -c config."
+            System.exit(1)
+        }
     }
 
     // Warn if HF_TOKEN is likely needed but not set
@@ -55,7 +66,7 @@ workflow {
             : [params.featurize.model_types]
     }
     def needs_hf_token = requested_models.any { it in gated_models }
-    if (needs_hf_token) {
+    if (!params.tessellate_only && needs_hf_token) {
         try {
             def token = secrets.HF_TOKEN
             log.info "✓ HF_TOKEN secret is available"
@@ -157,8 +168,11 @@ workflow {
             ["manifest-${timestamp}.csv", "${meta.slide_id},${meta.sample_id},${params.workflow_id},${key},${value}\n"]
         }
 
-
-    MUSSEL(ch_samples, ch_annotations)
+    if (params.tessellate_only) {
+        TESSELLATE_ONLY(ch_samples)
+    } else {
+        MUSSEL(ch_samples, ch_annotations)
+    }
 
     saveParams()
 

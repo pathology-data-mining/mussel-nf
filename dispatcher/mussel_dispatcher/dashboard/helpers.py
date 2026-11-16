@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 import time
 
 from nextflow_turret import (
@@ -30,16 +31,38 @@ _SQUEUE_TTL = 15  # seconds
 
 _sacct_cache: dict = {}
 _SACCT_TTL = 60   # seconds — sacct is slower
+_slurm_cache_lock = threading.Lock()
+_squeue_refresh_lock = threading.Lock()
+_sacct_refresh_lock = threading.Lock()
 
 
 
 
 def sacct_stats() -> dict:
-    """Return summary of completed mussel SLURM jobs from the last 24 h via sacct."""
+    """Return cached sacct data, with at most one slow refresh in progress."""
     now = time.time()
-    if _sacct_cache.get("ts", 0) + _SACCT_TTL > now:
-        return _sacct_cache.get("data", {})
+    with _slurm_cache_lock:
+        cached = _sacct_cache.get("data", {})
+        if _sacct_cache.get("ts", 0) + _SACCT_TTL > now:
+            return cached
+    if not _sacct_refresh_lock.acquire(blocking=False):
+        return cached
+    try:
+        now = time.time()
+        with _slurm_cache_lock:
+            if _sacct_cache.get("ts", 0) + _SACCT_TTL > now:
+                return _sacct_cache.get("data", {})
+        result = _sacct_stats_uncached()
+        with _slurm_cache_lock:
+            _sacct_cache["data"] = result
+            _sacct_cache["ts"] = now
+        return result
+    finally:
+        _sacct_refresh_lock.release()
 
+
+def _sacct_stats_uncached() -> dict:
+    """Return summary of completed mussel SLURM jobs from the last 24 h via sacct."""
     result: dict = {
         "completed": 0, "failed": 0, "cancelled": 0, "timeout": 0,
         "avg_elapsed_s": None, "min_elapsed_s": None, "max_elapsed_s": None,
@@ -91,8 +114,6 @@ def sacct_stats() -> dict:
     except Exception as exc:
         result["sacct_error"] = str(exc)[:80]
 
-    _sacct_cache["data"] = result
-    _sacct_cache["ts"] = now
     return result
 
 
@@ -104,12 +125,34 @@ def slurm_stats() -> dict:
     (e.g. other pipelines) are excluded so the counts are mussel-specific.
     """
     now = time.time()
-    if _squeue_cache.get("ts", 0) + _SQUEUE_TTL > now:
-        return _squeue_cache.get("data", {})
+    with _slurm_cache_lock:
+        cached = _squeue_cache.get("data", {})
+        if _squeue_cache.get("ts", 0) + _SQUEUE_TTL > now:
+            return cached
+    # Return the last known value while one request refreshes SLURM.  Waiting
+    # callers otherwise accumulate behind sacct when the scheduler is slow.
+    if not _squeue_refresh_lock.acquire(blocking=False):
+        return cached
+    try:
+        now = time.time()
+        with _slurm_cache_lock:
+            if _squeue_cache.get("ts", 0) + _SQUEUE_TTL > now:
+                return _squeue_cache.get("data", {})
+        result = _slurm_stats_uncached()
+        with _slurm_cache_lock:
+            _squeue_cache["data"] = result
+            _squeue_cache["ts"] = now
+        return result
+    finally:
+        _squeue_refresh_lock.release()
+
+
+def _slurm_stats_uncached() -> dict:
+    """Collect SLURM state. Caller owns the single-flight refresh lock."""
 
     _BATCH_RE = re.compile(r'batch_(\d{8}T\d{6}_[0-9a-f]+)')
     result: dict = {
-        "running": 0, "pending": 0, "total": 0,
+        "running": 0, "pending": 0, "completing": 0, "total": 0,
         "nodes": {}, "pending_reasons": {},
         "jobs_by_batch": {},
         # Per-process breakdown: {process_short_name: {"running": n, "pending": n}}
@@ -143,11 +186,11 @@ def slurm_stats() -> dict:
             batch_id = m.group(1) if m else None
             if batch_id:
                 b = result["jobs_by_batch"].setdefault(
-                    batch_id, {"running": 0, "pending": 0, "nodes": [], "processes": {}})
+                    batch_id, {"running": 0, "pending": 0, "completing": 0, "nodes": [], "processes": {}})
                 bp = b["processes"].setdefault(
-                    proc_short, {"running": 0, "pending": 0, "nodes": [], "elapsed_s": []})
+                    proc_short, {"running": 0, "pending": 0, "completing": 0, "nodes": [], "elapsed_s": []})
             p = result["processes"].setdefault(
-                proc_short, {"running": 0, "pending": 0})
+                proc_short, {"running": 0, "pending": 0, "completing": 0})
 
             if state == "RUNNING":
                 result["running"] += 1
@@ -181,6 +224,12 @@ def slurm_stats() -> dict:
                 if batch_id:
                     b["pending"] += 1
                     bp["pending"] += 1
+            elif state == "COMPLETING":
+                result["completing"] += 1
+                p["completing"] += 1
+                if batch_id:
+                    b["completing"] += 1
+                    bp["completing"] += 1
     except FileNotFoundError:
         result["error"] = "squeue not found"
     except subprocess.TimeoutExpired:
@@ -190,8 +239,6 @@ def slurm_stats() -> dict:
 
     result.update(sacct_stats())
 
-    _squeue_cache["data"] = result
-    _squeue_cache["ts"] = now
     return result
 
 
@@ -201,9 +248,23 @@ def slurm_stats() -> dict:
 
 _s3_cache: dict = {}
 _S3_CACHE_TTL = 300  # seconds — ECS listing is slow, cache for 5 min
+_s3_refresh_lock = threading.Lock()
 
 
 def s3_stats(watcher, wds_prefix: str) -> dict[str, dict]:
+    """Return S3 stats without allowing concurrent full object listings."""
+    if not _s3_refresh_lock.acquire(blocking=False):
+        return {
+            model: {key: value for key, value in entry.items() if key != "ts"}
+            for model, entry in _s3_cache.items()
+        }
+    try:
+        return _s3_stats_uncached(watcher, wds_prefix)
+    finally:
+        _s3_refresh_lock.release()
+
+
+def _s3_stats_uncached(watcher, wds_prefix: str) -> dict[str, dict]:
     """Return {model: {shards, objects}} from ECS, with TTL cache.
 
     Each model's S3 listing runs in a separate thread so they proceed in
@@ -216,10 +277,18 @@ def s3_stats(watcher, wds_prefix: str) -> dict[str, dict]:
 
     now = time.time()
 
+    session_kwargs: dict = {}
     client_kwargs: dict = {}
+    if watcher.aws_profile:
+        session_kwargs["profile_name"] = watcher.aws_profile
     endpoint = watcher.s3_endpoint or os.environ.get("ECS_ENDPOINT_URL")
-    ak = watcher.s3_access_key or os.environ.get("ECS_ACCESS_KEY")
-    sk = watcher.s3_secret_key or os.environ.get("ECS_SECRET_KEY")
+    # Prefer an explicit shared-credentials profile when configured so the
+    # dashboard does not fall back to stale Nextflow secret values.
+    if watcher.aws_profile:
+        ak = sk = None
+    else:
+        ak = watcher.s3_access_key or os.environ.get("ECS_ACCESS_KEY")
+        sk = watcher.s3_secret_key or os.environ.get("ECS_SECRET_KEY")
     if endpoint:
         client_kwargs["endpoint_url"] = endpoint
     if ak:
@@ -243,7 +312,8 @@ def s3_stats(watcher, wds_prefix: str) -> dict[str, dict]:
         rest = dest[5:]
         bucket, _, prefix = rest.partition("/")
         try:
-            s3 = boto3.client("s3", **client_kwargs)
+            session = boto3.Session(**session_kwargs)
+            s3 = session.client("s3", **client_kwargs)
             paginator = s3.get_paginator("list_objects_v2")
             shards = objects = 0
             model_prefix = f"{prefix}/{model}/"

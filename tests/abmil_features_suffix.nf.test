@@ -1,0 +1,20 @@
+nextflow_pipeline {
+    name   "ABMIL_BENCHMARK real script — features_suffix for slide encoder patch features"
+    script "../tests/abmil_features_suffix_script.nf"
+    profile "test_real_featurize"
+
+    test("finds .features.h5 and .patch_features.h5 inputs") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            for (model in ['optimus', 'conch1_5']) {
+                def res = new groovy.json.JsonSlurper().parse(path("${outputDir}/abmil_benchmark/${model}/results.json").toFile())
+                assert res.n_slides == 3 : model
+            }
+            def patch = new groovy.json.JsonSlurper().parse(path("${outputDir}/abmil_benchmark/conch1_5/results.json").toFile())
+            assert patch.files.S1 == 'S1.patch_features.h5'
+        }
+    }
+}

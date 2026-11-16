@@ -1,0 +1,48 @@
+nextflow_pipeline {
+    name   "FEATURIZE_BATCH real script — Mussel 1.6.0 partial batch failure"
+    script "../tests/featurize_batch_partial_script.nf"
+    profile "test_real_featurize"
+
+    test("keeps the other slides' outputs, pairs them by slide ID, and drops empty ones") {
+        when {
+            params {
+                outdir = "${outputDir}"
+                model  = 'optimus'
+            }
+        }
+        then {
+            assert workflow.success
+            def feat = "${outputDir}/features/optimus"
+            for (sid in ['1001234', 'SLIDE0002']) {
+                assert path("${feat}/${sid}.features.pt").exists() : sid
+                assert path("${feat}/${sid}.features.h5").exists() : sid
+            }
+            // No outputs for the failed slide; the empty ones were never published.
+            def published = new File(feat).list().toList().sort()
+            assert published == ['1001234.features.h5', '1001234.features.pt',
+                                 'SLIDE0002.features.h5', 'SLIDE0002.features.pt']
+            assert !new File(feat).list().any { it.contains('failed_slides') }
+
+            def pairs = path("${outputDir}/pairs.tsv").readLines().findAll { it }
+            assert pairs == ['1001234\t1001234.features.h5', '1001234\t1001234.features.pt',
+                             'SLIDE0002\tSLIDE0002.features.h5', 'SLIDE0002\tSLIDE0002.features.pt']
+
+            def failed = path("${outputDir}/failed_slides.tsv").readLines()
+            assert failed[0] == 'slide_id\tmodel\tstatus'
+            assert failed.drop(1).sort() == ['EMPTY0003\toptimus\tno_tiles', 'FAIL0001\toptimus\tfailed']
+        }
+    }
+
+    test("a batch where every slide failed still fails") {
+        when {
+            params {
+                outdir = "${outputDir}"
+                model  = 'optimus'
+                ids    = 'FAIL0001,FAIL0002'
+            }
+        }
+        then {
+            assert workflow.failed
+        }
+    }
+}

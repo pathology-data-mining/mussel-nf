@@ -1,0 +1,31 @@
+nextflow_pipeline {
+    name   "MUSSEL two-step pipeline — patch models sharing a tile set in one task (stub)"
+    script "../main.nf"
+    profile "test_stub_multi_model"
+    options "-stub"
+
+    test("H-optimus-0 and -1 run in one FEATURIZE_PATCH_MULTI task; TITAN on its own") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            // Tracing is off (nf-test.config), and the console log is not captured the same
+            // way everywhere (empty in CI), so read the tasks that ran from their work dirs:
+            // each .command.run names its task in its header ("### name: '<process> (<tag>)'").
+            def tasks = []
+            new File("${workDir}").eachFileRecurse(groovy.io.FileType.FILES) { f ->
+                if (f.name == '.command.run') {
+                    def line = f.readLines().find { it.startsWith('### name:') }
+                    if (line) tasks << line
+                }
+            }
+            assert tasks.count { it.contains(':FEATURIZE_PATCH_MULTI') } == 1
+            assert !tasks.any { it.contains(':FEATURIZE_BATCH_PATCH') }
+            for (model in ['hoptimus1', 'optimus', 'titan_slide']) {
+                assert path("${outputDir}/features/${model}/948176.features.pt").exists() : model
+                assert path("${outputDir}/features/${model}/948176.features.h5").exists() : model
+            }
+        }
+    }
+}

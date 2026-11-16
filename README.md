@@ -73,7 +73,7 @@ See [`dispatcher/README.md`](dispatcher/README.md) for full configuration refere
 ## Supported Models
 
 **Patch encoders** (`params.featurize.model_types`):
-`resnet50`, `ctranspath`, `gigapath`, `virchow`, `virchow2`, `optimus`, `hoptimus1`, `h0mini`, `uni`, `uni2h`, `conch1_5`, `conch_v1`, `clip`, `googlepath`, `phikon`, `phikon_v2`, `midnight12k`, `gpfm`, `hibou_l`, `openmidnight`, `genbio_pathfm`, `kaiko_vits8`, `kaiko_vits16`, `kaiko_vitb8`, `kaiko_vitb16`, `kaiko_vitl14`, `lunit_vits8`, `lunit_vits16`
+`resnet50`, `ctranspath`, `gigapath`, `virchow`, `virchow2`, `optimus`, `hoptimus1`, `h0mini`, `uni`, `uni2h`, `conch1_5`, `conch_v1`, `clip`, `googlepath`, `phikon`, `phikon_v2`, `midnight12k`, `gpfm`, `hibou_l`, `openmidnight`, `genbio_pathfm`, `kaiko_vits8`, `kaiko_vits16`, `kaiko_vitb8`, `kaiko_vitb16`, `kaiko_vitl14`, `lunit_vits8`, `lunit_vits16`, `musk`, `keep`
 
 **Slide encoders** (specified in `model_types`; patch encoder auto-resolved):
 
@@ -84,7 +84,7 @@ See [`dispatcher/README.md`](dispatcher/README.md) for full configuration refere
 | `prism_slide` | `virchow` |
 | `feather_slide` | `conch1_5` |
 | `chief_slide` | `ctranspath` |
-| `madeleine_slide` | `clip` |
+| `madeleine_slide` | `conch_v1` |
 
 See [SLIDE_MODELS.md](SLIDE_MODELS.md) for slide encoder configuration details.
 
@@ -124,6 +124,110 @@ The standard workflow tessellates slides and extracts features for `params.featu
   happen in a single task via `tessellate_extract_features`. More efficient for most use cases.
 * **Two-step** (`params.use_one_step_workflow = false`): separate `TESSELLATE` → `FEATURIZE_BATCH`
   tasks. Useful when reusing pre-tessellated tiles.
+
+### Failed slides and slides without tiles
+
+A batch task goes on past a slide that fails (Mussel >= 1.6.0): Mussel writes the
+other slides' outputs, then exits non-zero. The task keeps those outputs and lists
+the slides without outputs in `failed_slides.tsv` in its work dir (`slide_id`,
+`model`, `status`: `failed`, `no_tiles` or `missing`), which is not published. The
+task still fails when no slide of a model has outputs, or on any other error. A
+slide without tissue gets no tiles and no features. A slide without tiles gets no
+features either: Mussel's empty (0-row) feature files are renamed to
+`<name>.empty` in the work dir, so they're neither published nor passed on.
+Outputs are matched to their slides by the slide ID in each file name.
+
+### Tile sizes and resolutions
+
+Each model is tiled at its recommended size and resolution from Mussel's
+`MODEL_PATCH_SIZES` and `MODEL_TARGET_MPP`, which were checked against each model's
+authors (e.g. `hoptimus1` 224 px at 0.5 µm/px, `uni` 256 px at 0.5, `conch1_5` /
+`titan_slide` 512 px at 0.5, `chief_slide` 256 px at 1.0, `gpfm` 512 px at 0.25).
+Models without an authors' resolution (trained on several magnifications) are tiled
+at 0.5 µm/px. A slide encoder uses its own entries, so TITAN's CONCH v1.5 features
+come from 512 px tiles at 20x, as TITAN was trained.
+
+Models with the same size and resolution share a tile set, and all tile sets come
+from **one tissue segmentation per slide**: with several, Mussel's `tessellate` gets
+`seg_config.patch_sizes` (plus `seg_config.patch_mpps` when the resolutions differ)
+and writes one tile file per set. This needs Mussel with multi-size tessellation
+(pathology-data-mining/Mussel#142); a single tile set runs exactly as before. The
+one-step workflow (`use_one_step_workflow`) still segments once per tile set:
+Mussel's `tessellate_extract_features` tiles at a single size and resolution.
+
+`assets/recommended_patch_sizes.json` is generated from Mussel's source at a pinned ref
+(`bin/sync_patch_sizes.py --ref <commit|tag>`); `tests/test_recommended_patch_sizes.py`
+fails in CI if it drifts from that ref, or if `featurize.slide_to_patch_mapping`
+disagrees with Mussel's slide-encoder pairings.
+
+Featurization asks Mussel to check each model's tiles (`featurize.tile_size_check`,
+default `error`): a model at its recommended size and resolution fails if its tiles
+don't match; models overridden on purpose (below) are checked with `warn`. Set it to
+`null` for Mussel images without `tile_size_check`.
+
+Explicit overrides, highest precedence first (a warning lists any model moved off its
+recommended size or resolution):
+
+| Setting | Effect |
+|---|---|
+| `featurize.model_patch_sizes` | Per-model size, e.g. `[conch1_5: 448]` |
+| `tiling.patch_size` | One size for every model (default `null`: recommended sizes) |
+| `featurize.model_mpps` | Per-model resolution (µm/px), e.g. `[gpfm: 0.5]` |
+| `tiling.mpp` | One resolution for every model (default `null`: each model's resolution) |
+
+A slide encoder's size or resolution override (e.g. `model_mpps: [chief_slide: 0.5]`)
+needs the two-step workflow (`use_one_step_workflow = false`). The one-step workflow
+stops with an error instead: there Mussel's multi-model `tessellate_extract_features`
+tiles a slide encoder at its recommended size whatever `seg_config.patch_size` says,
+and takes `seg_config.mpp = 0.5` as unset (`chief_slide` and `madeleine_slide` would
+get 1.0 µm/px).
+
+The first model in `model_types` sets the primary tile set, published under `tiles/`
+(manifest key `tiles_h5_path`). Another size at the primary set's resolution goes to
+`tiles_<size>px/` (key `tiles_h5_path_<size>px`); a set at another resolution to
+`tiles_<size>px_<mpp>mpp/` (e.g. `tiles_256px_1mpp/`, key `tiles_h5_path_256px_1mpp`).
+Legacy tile filtering (`tiling.filter_tiles`) and CLIP annotation support only the
+primary tile set; the pipeline stops with an error otherwise.
+
+**Derived grids.** A model listed in `featurize.grid_from_primary` is not tessellated
+at its own size. Its tiles are every cell of that size, aligned to the slide origin,
+that contains a primary tile's centre, at the primary resolution. They come from
+Mussel's `derive_tile_grid` (pathology-data-mining/Mussel#151), so the model reads
+the same tissue as the primary model. For example,
+`featurize.grid_from_primary: [titan_slide]` builds TITAN's
+512 px tiles from the 224 px H-optimus tiles. A separate 512 px tessellation gives
+different TITAN embeddings (cosine as low as 0.98 on small slides). Derived grids need
+the two-step workflow, keep the primary resolution, and must not be smaller than the
+primary tiles.
+
+Derivation runs in its own small process, `DERIVE_TILE_GRID` (batched 64 slides at a
+time), so it can use a different Mussel from tessellation: give it, and the
+slide-encoder featurization (`FEATURIZE_BATCH_SLIDE`), their own container or conda
+env with `withName` in a config file. For example, to run both on the published
+Mussel 1.6.0 image while the rest of the pipeline keeps its environment:
+
+```groovy
+process {
+    withName: 'DERIVE_TILE_GRID|FEATURIZE_BATCH_SLIDE' {
+        container = 'docker://mskmind/mussel@sha256:313fc9b2ad1e21850af268030fa8a4bbd72bf5603efda969661682c221bc61e0'  // 1.6.0-torch-gpu
+    }
+}
+```
+
+`featurize.slide_max_patches` caps the tiles TITAN aggregates per slide (Mussel
+`extract_features max_slide_patches`, Mussel#151), a subset seeded by the slide's file
+name; null or 0 keeps every tile.
+
+Other options:
+
+* `featurize.multi_model_patch_pass` (default `false`): in the two-step workflow, run
+  all plain patch models that share a tile set in one task (`FEATURIZE_PATCH_MULTI`),
+  reading each tile once. Needs Mussel with `extract_features model_types` (Mussel#144).
+* `hf_cache_dir`: a shared Hugging Face cache, visible to every task, so each model is
+  downloaded once. Set it with `--hf_cache_dir`, `-params-file` or a profile (not a
+  `-c` config); unset, each task uses its own cache.
+* `profile_dir`: opt-in task profiling (GPU samples, script timings and Mussel stage
+  timings per task); summarize with `bin/summarize_task_profiles.py`.
 
 ### Tile filtering
 

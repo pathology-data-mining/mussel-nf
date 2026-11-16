@@ -50,7 +50,9 @@ with open(os.path.join(OUT, "class_mapping.yaml"), "w") as f:
 with open(os.path.join(OUT, "annotations.csv"), "w") as f:
     f.write("slide_id,annotation_bmp_path\n")
     for slide_id in SLIDE_IDS:
-        f.write(f"{slide_id},{os.path.join(OUT, slide_id + '.bmp')}\n")
+        # Paths relative to the repository root, so the file is machine-independent.
+        rel = os.path.relpath(os.path.join(OUT, slide_id + '.bmp'), Path(OUT).parents[2])
+        f.write(f"{slide_id},{rel}\n")
 
 print(f"Generated {N_SLIDES} slides in {OUT}")
 for fn in sorted(os.listdir(OUT)):

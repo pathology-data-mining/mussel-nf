@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Tiny abmil_benchmark test double.
+
+Finds each labelled slide's feature file the way Mussel >= 1.6.0 does
+({slide_id}.{features_suffix}, default features.h5, else legacy {slide_id}.h5)
+and writes how many it found to results.json. Here labels_parquet is a text
+file with one slide ID per line. Fails, as Mussel does, when no slide has a file.
+"""
+import json
+import sys
+from pathlib import Path
+
+args = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a)
+features_dir = Path(args["features_dir"])
+suffix = args.get("features_suffix", "features.h5")
+slide_ids = [s for s in Path(args["labels_parquet"]).read_text().split() if s]
+found = {}
+for sid in slide_ids:
+    for name in (f"{sid}.{suffix}", f"{sid}.h5"):
+        if (features_dir / name).exists():
+            found[sid] = name
+            break
+if not found:
+    sys.exit(f"no feature files for the labelled slides in {features_dir} (features_suffix={suffix})")
+Path(args["output_summary_json"]).write_text(json.dumps({"n_slides": len(found), "files": found}))

@@ -1,0 +1,26 @@
+nextflow_pipeline {
+    name   "Per-model recommended tile sizes (override) — stub mode"
+    script "../main.nf"
+    profile "test_stub_tile_size_override"
+    options "-stub"
+
+    // An explicit per-model override (titan_slide: 224) puts both models on one tile set.
+    test("explicit per-model override shares one tile set") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.success
+            // Tile size recorded in a patch.h5 (the stubs write it like real tessellation does).
+            def tileSize = { String h5 ->
+                def proc = ["python3", "-c", "import h5py,sys; print(int(h5py.File(sys.argv[1], 'r')['coords'].attrs['patch_size_to_resize_to_for_desired_mpp']))", h5].execute()
+                proc.waitFor()
+                assert proc.exitValue() == 0 : "reading ${h5} failed:\n${proc.err.text}"
+                proc.text.trim() as Integer
+            }
+            assert tileSize("${outputDir}/tiles/9481/948176.patch.h5") == 224
+            assert !path("${outputDir}/tiles_512px").exists()
+            assert path("${outputDir}/features/titan_slide/948176.features.pt").exists()
+        }
+    }
+}

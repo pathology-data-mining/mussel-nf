@@ -34,6 +34,7 @@ Open an issue using the **Feature Request** template. Describe the use case and 
 ## Code style
 
 - Nextflow: follow DSL2 conventions; use process labels from `nextflow.config` for resource allocation.
+- Task environment variables (caches, `HDF5_USE_FILE_LOCKING`, …) go in the `env` scope of `nextflow.config`, which Nextflow also passes into containers. Don't add `beforeScript`/`afterScript` or `APPTAINERENV_*` exports to processes: a process-level `beforeScript` overrides a profile's `process.beforeScript` (e.g. the `$MUSSEL_VENV` PATH setup). `tests/test_task_setup_consistency.py` checks this.
 - Python: standard formatting (`black`-compatible); type hints encouraged.
 - No secrets or institution-specific paths in committed code.
 

@@ -1,0 +1,39 @@
+nextflow_pipeline {
+    name   "MUSSEL one-step pipeline — batch with a slide without outputs (stub)"
+    script "../main.nf"
+    profile "test_stub_one_step_partial"
+    options "-stub"
+
+    test("outputs pair with their own slides when a slide in the batch has none") {
+        when {
+            params {
+                // Three slides in one TESSELLATE_FEATURIZE_BATCH task; FAIL0001 gets no
+                // outputs. Sorted positionally, its meta would take SLIDE0002's files.
+                def input = new File("${outputDir}/input")
+                input.mkdirs()
+                def svs = new File("tests/testdata/948176.svs").absoluteFile.toPath()
+                def rows = ['slide_id,slide_path']
+                for (sid in ['948176', 'FAIL0001', 'SLIDE0002']) {
+                    def link = new File(input, "${sid}.svs").toPath()
+                    if (!java.nio.file.Files.exists(link)) java.nio.file.Files.createSymbolicLink(link, svs)
+                    rows << "${sid},${link}"
+                }
+                def csv = new File(input, "samples.csv")
+                csv.text = rows.join('\n') + '\n'
+                samples_csv = csv.path
+                outdir      = "${outputDir}"
+            }
+        }
+        then {
+            assert workflow.success
+            assert path("${outputDir}/features/resnet50/948176.features.pt").exists()
+            assert path("${outputDir}/features/resnet50/SLIDE0002.features.pt").exists()
+            assert !path("${outputDir}/features/resnet50/FAIL0001.features.pt").exists()
+            // Per-slide manifest entries come from the tile files paired with each meta.
+            def manifest = new File("${outputDir}").listFiles().findAll { it.name.startsWith('manifest-') }
+                .collect { it.text }.join('')
+            def mpp_rows = manifest.readLines().findAll { it.contains(',native_mpp,') }.collect { it.tokenize(',')[0] }.sort()
+            assert mpp_rows == ['948176', 'SLIDE0002']
+        }
+    }
+}

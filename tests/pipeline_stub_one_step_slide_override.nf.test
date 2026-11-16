@@ -1,0 +1,21 @@
+nextflow_pipeline {
+    name   "MUSSEL one-step pipeline — slide encoder tile overrides (stub)"
+    script "../main.nf"
+    profile "test_stub_one_step_slide_override"
+    options "-stub"
+
+    test("rejects slide encoder size / 0.5 µm/px overrides Mussel's multi-model mode would ignore") {
+        when {
+            params { outdir = "${outputDir}" }
+        }
+        then {
+            assert workflow.failed
+            // Nextflow prints the startup error to stdout or stderr, depending on version.
+            def out = (workflow.stdout + workflow.stderr).join('\n')
+            assert out.contains("chief_slide at 0.5 µm/px")
+            assert out.contains("titan_slide at 448 px")
+            assert out.contains("use_one_step_workflow = false")
+            assert !path("${outputDir}/features").exists()
+        }
+    }
+}
